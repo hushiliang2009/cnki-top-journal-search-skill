@@ -9,7 +9,7 @@ description: Use when the user asks to search, review, organize, or summarize li
 
 ai4scholar 是中英文文献检索的主要来源。CNKI 仅作为近期中文论文的补充来源，用于公开首页主题检索。所有期刊判级均以 `references/Academic_Journal_Master_Directory_20260715.md` 为准，目录版本为 2026-07-15。
 
-CNKI 只使用公开首页、固定主题检索和第一页结果。单次 `limit` 为 1 至 20。程序不登录、不下载、不持久化 Cookie，不使用用户浏览器配置文件，也不访问结果的详情页面。
+CNKI 只使用公开首页、固定主题检索和第一页结果。单次 `limit` 为 1 至 20。程序不登录、不下载、不持久化 Cookie，不持久化缓存，运行期仅24小时内存缓存；不使用用户浏览器配置文件，也不访问结果的详情页面。
 
 ## 执行方法
 

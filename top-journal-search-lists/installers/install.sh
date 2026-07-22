@@ -35,7 +35,7 @@ install_skill() {
     mv "$destination" "$backup"
     printf 'Backup: %s\n' "$backup"
   fi
-  cp -R "$skill_source" "$destination"
+  python3 "$skill_source/scripts/build_release.py" --copy-skill "$destination"
 }
 
 codex_skill="$codex_home/skills/top-journal-search-lists"

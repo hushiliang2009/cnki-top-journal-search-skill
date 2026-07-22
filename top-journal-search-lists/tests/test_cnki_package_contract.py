@@ -71,3 +71,9 @@ def test_public_documentation_contract(skill_root: Path) -> None:
             assert item in content, f"{relative} 缺少 {item}"
         for item in forbidden:
             assert item not in content, f"{relative} 包含旧能力 {item}"
+
+
+def test_documentation_describes_only_ephemeral_memory_cache(skill_root: Path) -> None:
+    expected = "不持久化缓存，运行期仅24小时内存缓存"
+    for relative in ("SKILL.md", "README.md", "references/cnki-search-reference.md"):
+        assert expected in (skill_root / relative).read_text(encoding="utf-8")

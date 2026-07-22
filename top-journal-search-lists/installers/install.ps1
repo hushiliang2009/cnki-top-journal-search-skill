@@ -14,6 +14,7 @@ if ($RemainingArguments.Count -gt 0 -or -not ($Codex -or $ClaudeCode -or $Claude
 
 $SkillSource = Split-Path -Parent $PSScriptRoot
 $TimeStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$Python = (Get-Command python -ErrorAction Stop).Source
 
 function Backup-File([string]$Path) {
     if (Test-Path -LiteralPath $Path) {
@@ -31,7 +32,8 @@ function Install-SkillCopy([string]$Destination) {
         Move-Item -LiteralPath $Destination -Destination $Backup
         Write-Host "Backup: $Backup"
     }
-    Copy-Item -LiteralPath $SkillSource -Destination $Destination -Recurse
+    & $Python (Join-Path $SkillSource 'scripts\build_release.py') --copy-skill $Destination
+    if ($LASTEXITCODE -ne 0) { throw "复制 Skill 白名单文件失败，退出码：$LASTEXITCODE" }
 }
 
 $CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
@@ -46,7 +48,6 @@ $RuntimeRoot = if ($Codex) { Join-Path $CodexHome 'runtimes\cnki-search' } else 
 New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
 $RuntimePython = Join-Path $RuntimeRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $RuntimePython -PathType Leaf)) {
-    $Python = (Get-Command python -ErrorAction Stop).Source
     & $Python -m venv (Join-Path $RuntimeRoot '.venv')
     if ($LASTEXITCODE -ne 0) { throw "创建 CNKI 运行时失败，退出码：$LASTEXITCODE" }
 }

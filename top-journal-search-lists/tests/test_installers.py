@@ -1,4 +1,6 @@
+import importlib.util
 from pathlib import Path, PurePosixPath, PureWindowsPath
+import shutil
 
 import tomllib
 
@@ -18,6 +20,38 @@ def test_installers_require_explicit_client_targets(skill_root: Path) -> None:
         assert token in powershell
     for token in ("--codex", "--claude-code", "--claude-desktop"):
         assert token in shell
+
+
+def test_installers_reuse_allowlisted_skill_copy(skill_root: Path) -> None:
+    powershell = (skill_root / "installers/install.ps1").read_text(encoding="utf-8")
+    shell = (skill_root / "installers/install.sh").read_text(encoding="utf-8")
+    assert "--copy-skill" in powershell
+    assert "--copy-skill" in shell
+    assert "Copy-Item -LiteralPath $SkillSource -Destination $Destination -Recurse" not in powershell
+    assert 'cp -R "$skill_source" "$destination"' not in shell
+
+
+def test_allowlisted_install_copy_excludes_workspace_baits(
+    skill_root: Path, tmp_path: Path,
+) -> None:
+    builder_path = skill_root / "scripts/build_release.py"
+    spec = importlib.util.spec_from_file_location("cnki_install_copy", builder_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    source = shutil.copytree(skill_root, tmp_path / "source")
+    for relative in ("Cookie", "Local State", "random-extra.txt", "scripts/cnki_search/random_extra.py"):
+        bait = source / relative
+        bait.parent.mkdir(parents=True, exist_ok=True)
+        bait.write_text("TASK7-INSTALL-BAIT", encoding="utf-8")
+
+    destination = tmp_path / "installed"
+    module.copy_skill_tree(source, destination)
+
+    assert (destination / "SKILL.md").is_file()
+    assert (destination / "scripts/cnki_search/service.py").is_file()
+    for relative in ("Cookie", "Local State", "random-extra.txt", "scripts/cnki_search/random_extra.py"):
+        assert not (destination / relative).exists()
 
 
 def test_merge_claude_config_preserves_unrelated_servers() -> None:

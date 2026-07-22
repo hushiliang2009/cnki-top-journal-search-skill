@@ -8,55 +8,80 @@ import zipfile
 from pathlib import Path
 
 
-SKILL_FILES = ("SKILL.md", "README.md")
-ALLOWLIST = {
-    "agents": ("openai.yaml",),
-    "installers": ("install.ps1", "install.sh"),
-    "references": (
-        "Academic_Journal_Master_Directory_20260715.md",
-        "cnki-search-reference.md",
-    ),
-    "scripts": ("catalog_lookup.py", "build_release.py"),
-    "scripts/cnki_search": ("*.py",),
-    "mcpb": ("manifest.json", "pyproject.toml", "uv.lock"),
-    "mcpb/src": ("catalog_lookup.py", "server.py"),
-    "mcpb/src/cnki_search": ("*.py",),
-    "mcpb/src/references": ("Academic_Journal_Master_Directory_20260715.md",),
-}
-FORBIDDEN_PARTS = {".pytest_cache", "__pycache__", ".venv", "outputs"}
-FORBIDDEN_FILES = {"Local State", "details.py", "downloads.py", "exporters.py", "fields.py", "syntax.py", "cli.py"}
+CNKI_MODULES = (
+    "__init__.py",
+    "browser.py",
+    "cache.py",
+    "install_config.py",
+    "mcp_server.py",
+    "merge.py",
+    "models.py",
+    "ranking.py",
+    "rate_limit.py",
+    "results.py",
+    "search.py",
+    "service.py",
+    "session.py",
+)
+MCPB_ALLOWLIST = (
+    "manifest.json",
+    "pyproject.toml",
+    "src/catalog_lookup.py",
+    *(f"src/cnki_search/{name}" for name in CNKI_MODULES),
+    "src/references/Academic_Journal_Master_Directory_20260715.md",
+    "src/server.py",
+    "uv.lock",
+)
+SKILL_ALLOWLIST = (
+    "README.md",
+    "SKILL.md",
+    "agents/openai.yaml",
+    "installers/install.ps1",
+    "installers/install.sh",
+    *(f"mcpb/{relative}" for relative in MCPB_ALLOWLIST),
+    "references/Academic_Journal_Master_Directory_20260715.md",
+    "references/cnki-search-reference.md",
+    "scripts/build_release.py",
+    "scripts/catalog_lookup.py",
+    *(f"scripts/cnki_search/{name}" for name in CNKI_MODULES),
+)
+ALLOWLIST = SKILL_ALLOWLIST
+ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)
+REGULAR_MODE = 0o100644
+EXECUTABLE_MODE = 0o100755
 
 
-def _copy_allowlisted_tree(source: Path, target: Path) -> None:
-    for filename in SKILL_FILES:
-        _copy_file(source / filename, target / filename)
-    for relative_dir, patterns in ALLOWLIST.items():
-        source_dir = source / relative_dir
-        for pattern in patterns:
-            for path in sorted(source_dir.glob(pattern)):
-                if path.is_file():
-                    _copy_file(path, target / path.relative_to(source))
-
-
-def _copy_file(source: Path, target: Path) -> None:
-    if source.name in FORBIDDEN_FILES or FORBIDDEN_PARTS & set(source.parts):
-        raise ValueError(f"不允许打包的文件：{source}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target)
+def copy_skill_tree(source: Path, target: Path) -> None:
+    target.mkdir(parents=True, exist_ok=False)
+    for relative in SKILL_ALLOWLIST:
+        source_file = source / relative
+        if not source_file.is_file():
+            raise FileNotFoundError(f"白名单文件不存在：{source_file}")
+        target_file = target / relative
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_file, target_file)
 
 
 def _zip_tree(source: Path, output: Path, *, prefix: str = "") -> None:
-    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-        files = sorted(
-            (item for item in source.rglob("*") if item.is_file()),
-            key=lambda item: item.relative_to(source).as_posix(),
-        )
+    files = sorted(
+        (path for path in source.rglob("*") if path.is_file()),
+        key=lambda path: path.relative_to(source).as_posix(),
+    )
+    with zipfile.ZipFile(
+        output,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+    ) as archive:
         for path in files:
-            relative = path.relative_to(source)
-            if FORBIDDEN_PARTS & set(relative.parts) or path.name in FORBIDDEN_FILES:
-                raise ValueError(f"暂存目录包含不允许的文件：{relative}")
-            name = f"{prefix}/{relative.as_posix()}" if prefix else relative.as_posix()
-            archive.write(path, name)
+            relative = path.relative_to(source).as_posix()
+            name = f"{prefix}/{relative}" if prefix else relative
+            info = zipfile.ZipInfo(name, date_time=ZIP_DATE_TIME)
+            info.create_system = 3
+            info.compress_type = zipfile.ZIP_DEFLATED
+            mode = EXECUTABLE_MODE if path.suffix == ".sh" else REGULAR_MODE
+            info.external_attr = mode << 16
+            archive.writestr(info, path.read_bytes(), compresslevel=9)
 
 
 def build(skill_root: Path, output_dir: Path) -> list[Path]:
@@ -70,10 +95,9 @@ def build(skill_root: Path, output_dir: Path) -> list[Path]:
     with tempfile.TemporaryDirectory(prefix="cnki-public-build-") as temporary:
         staging = Path(temporary)
         skill_stage = staging / "top-journal-search-lists"
-        _copy_allowlisted_tree(skill_root, skill_stage)
-        mcpb_stage = skill_stage / "mcpb"
+        copy_skill_tree(skill_root, skill_stage)
         _zip_tree(skill_stage, skill_zip, prefix="top-journal-search-lists")
-        _zip_tree(mcpb_stage, mcpb_zip)
+        _zip_tree(skill_stage / "mcpb", mcpb_zip)
 
     artifacts = [skill_zip, mcpb_zip]
     checksums.write_text(
@@ -85,10 +109,15 @@ def build(skill_root: Path, output_dir: Path) -> list[Path]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, required=True)
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--output", type=Path)
+    target.add_argument("--copy-skill", type=Path)
     args = parser.parse_args()
     skill_root = Path(__file__).resolve().parents[1]
-    build(skill_root, args.output.resolve())
+    if args.copy_skill is not None:
+        copy_skill_tree(skill_root, args.copy_skill.resolve())
+    else:
+        build(skill_root, args.output.resolve())
     return 0
 
 
