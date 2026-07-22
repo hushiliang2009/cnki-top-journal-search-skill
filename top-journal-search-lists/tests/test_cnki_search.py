@@ -14,11 +14,18 @@ class TextInputValueParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.has_prefilled_text_input = False
+        self.has_nonempty_hidden_input = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = dict(attrs)
-        if tag == "input" and attributes.get("type", "").casefold() == "text":
-            self.has_prefilled_text_input = bool((attributes.get("value") or "").strip())
+        if tag != "input":
+            return
+        input_type = attributes.get("type", "").casefold()
+        has_value = bool((attributes.get("value") or "").strip())
+        if input_type == "text":
+            self.has_prefilled_text_input |= has_value
+        if input_type == "hidden":
+            self.has_nonempty_hidden_input |= has_value
 
 
 def test_new_search_fixtures_are_sanitized_and_cover_form_controls() -> None:
@@ -62,10 +69,17 @@ def test_new_search_html_fixtures_exclude_sensitive_or_prefilled_content() -> No
         parser = TextInputValueParser()
         parser.feed(content)
         assert not parser.has_prefilled_text_input
+        assert not parser.has_nonempty_hidden_input
 
     parser = TextInputValueParser()
-    parser.feed('<input value="示例检索词" data-fixture="test" type="text">')
+    parser.feed(
+        '<input value="示例检索词" data-fixture="test" type="text">'
+        '<input type="text" value=" ">'
+    )
     assert parser.has_prefilled_text_input
+    parser = TextInputValueParser()
+    parser.feed('<input type="hidden" value="dynamic-value">')
+    assert parser.has_nonempty_hidden_input
     assert 'a value="="' in fixtures[0]
 
 

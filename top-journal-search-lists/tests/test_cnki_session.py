@@ -125,6 +125,9 @@ def test_session_rejects_new_search_without_stable_visible_marker() -> None:
         "https://evil.cnki.net/kns8s/AdvSearch",
         "https://webvpn.hhu.edu.cn/https/not-the-cnki-proxy/kns8s/AdvSearch",
         "https://kns.cnki.net:443/kns8s/AdvSearch",
+        "https://user@kns.cnki.net/kns8s/AdvSearch",
+        "https://user:password@kns.cnki.net/kns8s/AdvSearch",
+        "https://kns.cnki.net/kns8s/AdvSearch;v=1",
     ],
 )
 def test_new_search_contract_rejects_lookalike_urls(url: str) -> None:

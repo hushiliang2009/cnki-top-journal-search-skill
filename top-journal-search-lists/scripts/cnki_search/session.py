@@ -82,6 +82,12 @@ def classify_public_state(*, url: str, title: str, visible_text: str) -> Session
 
 def is_new_search_page_contract(*, url: str, title: str, visible_text: str) -> bool:
     parsed_url = urlparse(url)
+    if (
+        parsed_url.username is not None
+        or parsed_url.password is not None
+        or parsed_url.params
+    ):
+        return False
     try:
         location = (
             parsed_url.scheme.casefold(),
