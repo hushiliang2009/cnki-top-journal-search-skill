@@ -6,6 +6,7 @@ import threading
 
 import pytest
 
+import cnki_search.mcp_server as mcp_server
 from cnki_search.mcp_server import CnkiMcpServer, REQUIRED_TOOLS
 from cnki_search.models import PaperRecord, SessionStatus
 from cnki_search.session import DIRECT_CNKI_SEARCH_URL
@@ -61,6 +62,76 @@ def test_build_fastmcp_is_lazy_when_sdk_is_unavailable(monkeypatch) -> None:
     mcp = server.build_fastmcp(FakeFastMCP)
     assert mcp is not None
     assert registered == REQUIRED_TOOLS
+
+
+def test_fastmcp_preserves_public_tool_input_schemas() -> None:
+    server = CnkiMcpServer()
+
+    async def list_schemas() -> dict[str, dict]:
+        mcp = server.build_fastmcp()
+        return {tool.name: tool.inputSchema for tool in await mcp.list_tools()}
+
+    schemas = asyncio.run(list_schemas())
+
+    for name in ["cnki_status", "cnki_login", "cnki_close_session"]:
+        assert schemas[name]["properties"] == {}
+        assert "required" not in schemas[name]
+
+    assert set(schemas["cnki_search"]["properties"]) == {
+        "query", "mode", "pages", "fields", "filters"
+    }
+    assert schemas["cnki_search"]["required"] == ["query"]
+    assert set(schemas["cnki_download"]["properties"]) == {
+        "selected_indices", "output_dir", "access_confirmed"
+    }
+    assert schemas["cnki_download"]["required"] == ["selected_indices", "output_dir"]
+    assert schemas["cnki_download"]["properties"]["access_confirmed"]["default"] is False
+
+
+def test_shutdown_closes_session_on_the_worker_before_stopping_executor() -> None:
+    close_threads: list[int] = []
+
+    class FakeSession:
+        def close(self) -> SessionStatus:
+            close_threads.append(threading.get_ident())
+            return SessionStatus.CLOSED
+
+    server = CnkiMcpServer(session=FakeSession())
+    executor = server._tool_executor
+
+    server.shutdown()
+
+    assert close_threads != [threading.get_ident()]
+    assert executor._shutdown is True
+
+
+@pytest.mark.parametrize("run_raises", [False, True])
+def test_main_shuts_down_server_after_run_returns_or_raises(monkeypatch, run_raises: bool) -> None:
+    calls: list[str] = []
+
+    class FakeMcp:
+        def run(self, *, transport: str) -> None:
+            assert transport == "stdio"
+            calls.append("run")
+            if run_raises:
+                raise RuntimeError("run failed")
+
+    class FakeServer:
+        def build_fastmcp(self) -> FakeMcp:
+            return FakeMcp()
+
+        def shutdown(self) -> None:
+            calls.append("shutdown")
+
+    monkeypatch.setattr(mcp_server, "CnkiMcpServer", FakeServer)
+
+    if run_raises:
+        with pytest.raises(RuntimeError, match="run failed"):
+            mcp_server.main()
+    else:
+        mcp_server.main()
+
+    assert calls == ["run", "shutdown"]
 
 
 def test_registered_tools_run_on_one_worker_outside_the_asyncio_loop() -> None:

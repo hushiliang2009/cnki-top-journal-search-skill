@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
+from functools import partial, wraps
 import hashlib
 from pathlib import Path
 from typing import Any, Callable
@@ -39,6 +39,7 @@ class CnkiMcpServer:
         self.records: list[Any] = []
         self.limiter = SerialRateLimiter()
         self._tool_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cnki-mcp")
+        self._shutdown = False
 
     def tool_names(self) -> list[str]:
         return list(REQUIRED_TOOLS)
@@ -208,6 +209,7 @@ class CnkiMcpServer:
         return ToolResponse(ok=True, status=status, message="知网浏览器会话已关闭").to_dict()
 
     def _async_tool(self, function: Callable[..., dict[str, Any]]) -> Callable[..., Any]:
+        @wraps(function)
         async def invoke(*args: Any, **kwargs: Any) -> dict[str, Any]:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
@@ -215,6 +217,15 @@ class CnkiMcpServer:
             )
 
         return invoke
+
+    def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        self._shutdown = True
+        try:
+            self._tool_executor.submit(self.session.close).result()
+        finally:
+            self._tool_executor.shutdown(wait=True)
 
     def build_fastmcp(self, fastmcp_class: type | None = None) -> Any:
         if fastmcp_class is None:
@@ -238,7 +249,11 @@ class CnkiMcpServer:
 
 
 def main() -> None:
-    CnkiMcpServer().build_fastmcp().run(transport="stdio")
+    server = CnkiMcpServer()
+    try:
+        server.build_fastmcp().run(transport="stdio")
+    finally:
+        server.shutdown()
 
 
 if __name__ == "__main__":
