@@ -22,6 +22,36 @@ def test_new_search_fixtures_are_sanitized_and_cover_form_controls() -> None:
     assert 'textarea class="textarea-major majorSearch"' in professional
 
 
+def test_new_search_selector_provenance_is_sanitized() -> None:
+    provenance = (FIXTURES / "new_search_selector_provenance.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "2026-07-21" in provenance
+    assert "work/cnki_form_contract.py" in provenance
+    assert "work/cnki_advanced_dom.py" in provenance
+    assert "work/cnki_live_professional.py" in provenance
+    assert 'li[name="gradeSearch"]' in provenance
+    assert 'li[name="majorSearch"]' in provenance
+    assert "#gradetxt > dd" in provenance
+    assert "不含会话状态声明" in provenance
+
+
+def test_new_search_html_fixtures_exclude_sensitive_or_prefilled_content() -> None:
+    fixtures = [
+        (FIXTURES / "new_advanced.html").read_text(encoding="utf-8"),
+        (FIXTURES / "new_professional.html").read_text(encoding="utf-8"),
+    ]
+    forbidden_tokens = ("cookie", "token", "账号", "密码", "动态参数", "captcha", "verify")
+
+    for content in fixtures:
+        assert not any(token in content.casefold() for token in forbidden_tokens)
+        assert 'input type="text" value=' not in content.casefold()
+        assert "<textarea" not in content.casefold() or "></textarea>" in content.casefold()
+
+    assert 'a value="="' in fixtures[0]
+
+
 class FakePageDriver:
     def __init__(self) -> None:
         self.actions: list[tuple] = []
@@ -84,7 +114,7 @@ class RecordingLocator:
     def first(self) -> "RecordingLocator":
         return self
 
-    def inner_text(self) -> str:
+    def inner_text(self, **_kwargs) -> str:
         return "其他"
 
     def get_attribute(self, _name: str):
@@ -111,6 +141,9 @@ class RecordingPlaywrightPage:
     def locator(self, selector: str) -> RecordingLocator:
         return RecordingLocator(selector, self.actions)
 
+    def title(self) -> str:
+        return "中国知网高级检索"
+
     def get_by_label(self, *_args, **_kwargs):
         raise AssertionError("真实知网表单没有可用 label")
 
@@ -125,6 +158,12 @@ def test_playwright_driver_accepts_new_search_contract() -> None:
 
 def test_playwright_driver_rejects_non_new_url() -> None:
     page = RecordingPlaywrightPage("https://kns.cnki.net/")
+    with pytest.raises(RuntimeError, match="新版检索页面"):
+        PlaywrightPageDriver(page).assert_new_search_page()
+
+
+def test_playwright_driver_rejects_third_party_host_with_new_search_path() -> None:
+    page = RecordingPlaywrightPage("https://untrusted.example/kns8s/AdvSearch")
     with pytest.raises(RuntimeError, match="新版检索页面"):
         PlaywrightPageDriver(page).assert_new_search_page()
 

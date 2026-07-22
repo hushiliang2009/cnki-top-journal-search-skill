@@ -5,6 +5,7 @@ from typing import Any, Protocol
 
 from .fields import resolve_field
 from .models import SearchRequest
+from .session import is_new_search_page_contract
 from .syntax import validate_professional_expression
 
 
@@ -20,7 +21,14 @@ class PlaywrightPageDriver:
         self.page = page
 
     def assert_new_search_page(self) -> None:
-        if "/kns8s/advsearch" not in self.page.url.casefold():
+        url = self.page.url
+        title = self.page.title()
+        visible_text = self.page.locator("body").inner_text(timeout=5_000)
+        if not is_new_search_page_contract(
+            url=url,
+            title=title,
+            visible_text=visible_text,
+        ):
             raise RuntimeError("当前页面不是知网新版检索页面")
         advanced = self.page.locator('li[name="gradeSearch"]')
         professional = self.page.locator('li[name="majorSearch"]')
