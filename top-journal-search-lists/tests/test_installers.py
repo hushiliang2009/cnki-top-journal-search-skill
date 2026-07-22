@@ -15,9 +15,9 @@ def test_merge_claude_config_preserves_unrelated_servers() -> None:
 
 def test_windows_client_paths() -> None:
     paths = client_paths(
-        PureWindowsPath("C:/Users/Test"),
+        PureWindowsPath("C:/CodexTest"),
         platform="win32",
-        env={"APPDATA": r"C:\Users\Test\AppData\Roaming"},
+        env={"APPDATA": r"C:\CodexTest\AppData\Roaming"},
     )
     assert str(paths.codex_skill).endswith(r".codex\skills\top-journal-search-lists")
     assert str(paths.claude_skill).endswith(r".claude\skills\top-journal-search-lists")
