@@ -1,11 +1,25 @@
+from pathlib import Path
+
 import pytest
 
 from cnki_search.models import SearchMode, SearchRequest
 from cnki_search.search import AdvancedSearchRunner, PlaywrightPageDriver, ProfessionalSearchRunner
 
 
-def test_playwright_driver_exposes_old_page_contract() -> None:
-    assert hasattr(PlaywrightPageDriver, "assert_old_search_page")
+FIXTURES = Path(__file__).with_name("fixtures")
+
+
+def test_new_search_fixtures_are_sanitized_and_cover_form_controls() -> None:
+    advanced = (FIXTURES / "new_advanced.html").read_text(encoding="utf-8")
+    professional = (FIXTURES / "new_professional.html").read_text(encoding="utf-8")
+
+    assert 'data-fixture="sanitized"' in advanced
+    assert 'li name="gradeSearch"' in advanced
+    assert 'id="gradetxt"' in advanced
+    assert 'class="btn-search"' in advanced
+    assert 'data-fixture="sanitized"' in professional
+    assert 'li name="majorSearch"' in professional
+    assert 'textarea class="textarea-major majorSearch"' in professional
 
 
 class FakePageDriver:
@@ -14,15 +28,15 @@ class FakePageDriver:
         self.filled_text = ""
 
     def select_label(self, label: str, value: str) -> None:
-        self.actions.append(("select", label, value))
+        self.actions.append(("select_label", label, value))
 
     def fill_label(self, label: str, value: str) -> None:
-        self.actions.append(("fill", label, value))
+        self.actions.append(("fill_label", label, value))
         if label == "专业检索表达式":
             self.filled_text = value
 
     def set_option(self, label: str, value) -> None:
-        self.actions.append(("option", label, value))
+        self.actions.append(("set_option", label, value))
 
     def click_text(self, text: str) -> None:
         self.actions.append(("click", text))
@@ -36,7 +50,7 @@ def test_advanced_search_fills_fields_without_direct_http() -> None:
         fields=[{"field": "主题", "value": "数字化转型", "match": "精确"}],
     )
     AdvancedSearchRunner().run(page, request)
-    assert page.actions[0] == ("select", "检索字段1", "主题")
+    assert page.actions[0] == ("select_label", "检索字段1", "主题")
     assert not any(action[0] == "request" for action in page.actions)
 
 
@@ -90,7 +104,7 @@ class RecordingLocator:
 
 
 class RecordingPlaywrightPage:
-    def __init__(self, url: str = "https://kns.cnki.net/kns/advsearch?dbcode=CJZK") -> None:
+    def __init__(self, url: str = "https://kns.cnki.net/kns8s/AdvSearch") -> None:
         self.url = url
         self.actions: list[tuple] = []
 
@@ -104,15 +118,15 @@ class RecordingPlaywrightPage:
         raise AssertionError("检索按钮应使用真实页面的唯一可见选择器")
 
 
-def test_playwright_driver_requires_old_search_page() -> None:
+def test_playwright_driver_accepts_new_search_contract() -> None:
     page = RecordingPlaywrightPage("https://kns.cnki.net/kns8s/AdvSearch")
-    with pytest.raises(RuntimeError, match="旧版检索页面"):
-        PlaywrightPageDriver(page).assert_old_search_page()
+    PlaywrightPageDriver(page).assert_new_search_page()
 
 
-def test_playwright_driver_accepts_old_search_tabs() -> None:
-    page = RecordingPlaywrightPage()
-    PlaywrightPageDriver(page).assert_old_search_page()
+def test_playwright_driver_rejects_non_new_url() -> None:
+    page = RecordingPlaywrightPage("https://kns.cnki.net/")
+    with pytest.raises(RuntimeError, match="新版检索页面"):
+        PlaywrightPageDriver(page).assert_new_search_page()
 
 
 def test_playwright_driver_uses_cnki_custom_advanced_dom() -> None:
@@ -136,3 +150,34 @@ def test_playwright_driver_activates_professional_tab_and_textarea() -> None:
     flattened = "\n".join(str(action) for action in page.actions)
     assert 'li[name="majorSearch"]' in flattened
     assert "textarea.textarea-major.majorSearch:visible" in flattened
+
+
+def test_exact_title_search_uses_title_field() -> None:
+    page = FakePageDriver()
+    title = "数字化转型、企业创新与新质生产力"
+    request = SearchRequest(
+        mode=SearchMode.ADVANCED,
+        query=title,
+        pages=1,
+        fields=[{"field": "篇名", "value": title, "match": "精确"}],
+        filters={},
+    )
+
+    AdvancedSearchRunner().run(page, request)
+
+    assert ("select_label", "检索字段1", "题名") in page.actions
+    assert ("set_option", "匹配方式1", "精确") in page.actions
+
+
+def test_professional_expression_is_not_rewritten() -> None:
+    page = FakePageDriver()
+    expression = "TI='数字化转型' AND KY='企业创新'"
+
+    ProfessionalSearchRunner().run(page, expression)
+
+    assert ("fill_label", "专业检索表达式", expression) in page.actions
+
+
+def test_playwright_driver_rejects_unknown_advanced_filter() -> None:
+    with pytest.raises(ValueError, match="暂不支持的高级检索筛选项"):
+        PlaywrightPageDriver(RecordingPlaywrightPage()).set_option("未知筛选", "值")

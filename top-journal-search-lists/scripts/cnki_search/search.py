@@ -19,13 +19,13 @@ class PlaywrightPageDriver:
     def __init__(self, page: Any) -> None:
         self.page = page
 
-    def assert_old_search_page(self) -> None:
-        if "/kns/advsearch" not in self.page.url.casefold():
-            raise RuntimeError("当前页面不是知网旧版检索页面")
+    def assert_new_search_page(self) -> None:
+        if "/kns8s/advsearch" not in self.page.url.casefold():
+            raise RuntimeError("当前页面不是知网新版检索页面")
         advanced = self.page.locator('li[name="gradeSearch"]')
         professional = self.page.locator('li[name="majorSearch"]')
         if advanced.count() < 1 or professional.count() < 1:
-            raise RuntimeError("知网旧版检索页面结构已变化")
+            raise RuntimeError("知网新版检索页面结构已变化")
 
     def _condition_row(self, label: str) -> Any:
         match = re.search(r"(\d+)$", label)
