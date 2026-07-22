@@ -1,33 +1,24 @@
-import json
-from pathlib import Path
-
-import pytest
-
-from cnki_search.cache import MetadataCache
+from cnki_search.cache import SearchCache
+from cnki_search.models import SearchStatus
+from cnki_search.service import empty_outcome
 
 
-TEST_CACHE = Path(__file__).with_name("_metadata_cache_test.json")
+class FakeClock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
 
 
-def _remove_test_cache() -> None:
-    TEST_CACHE.unlink(missing_ok=True)
-
-
-def test_cache_rejects_sensitive_keys() -> None:
-    _remove_test_cache()
-    try:
-        cache = MetadataCache(TEST_CACHE)
-        with pytest.raises(ValueError, match="敏感"):
-            cache.put("q", {"nested": {"cookie": "x"}})
-    finally:
-        _remove_test_cache()
-
-
-def test_cache_writes_only_metadata() -> None:
-    _remove_test_cache()
-    try:
-        cache = MetadataCache(TEST_CACHE)
-        cache.put("q", {"title": "数字化转型", "year": 2025})
-        assert json.loads(TEST_CACHE.read_text(encoding="utf-8"))["q"]["year"] == 2025
-    finally:
-        _remove_test_cache()
+def test_cache_expires_after_24_hours() -> None:
+    clock = FakeClock()
+    cache = SearchCache(ttl_seconds=86400, now=clock)
+    outcome = empty_outcome(SearchStatus.SUCCESS, "数字化 转型")
+    cache.put("数字化 转型", 20, outcome)
+    assert cache.get("数字化　转型", 20).status is SearchStatus.SUCCESS
+    clock.advance(86401)
+    assert cache.get("数字化 转型", 20) is None

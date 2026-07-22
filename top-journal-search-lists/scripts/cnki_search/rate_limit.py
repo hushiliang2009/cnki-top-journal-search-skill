@@ -1,41 +1,23 @@
 from __future__ import annotations
 
-import random
 import time
 from collections.abc import Callable
 
 
-class SerialRateLimiter:
-    _DELAYS = {
-        "search_page": (4.0, 7.0),
-        "detail": (3.0, 6.0),
-        "download": (8.0, 15.0),
-    }
-    _LIMITS = {"search_page": 3, "detail": 10, "download": 5}
-
+class SerialSearchGate:
     def __init__(
-        self,
-        *,
+        self, *, minimum_interval: float = 6.0, clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
-        uniform: Callable[[float, float], float] = random.uniform,
     ) -> None:
-        self._sleep = sleep
-        self._uniform = uniform
+        self.minimum_interval = minimum_interval
+        self.clock = clock
+        self.sleep = sleep
+        self._last_started: float | None = None
 
-    def wait(self, kind: str) -> float:
-        try:
-            low, high = self._DELAYS[kind]
-        except KeyError as exc:
-            raise ValueError(f"未知限流类型: {kind}") from exc
-        seconds = self._uniform(low, high)
-        self._sleep(seconds)
-        return seconds
-
-    def validate_count(self, kind: str, count: int) -> None:
-        try:
-            maximum = self._LIMITS[kind]
-        except KeyError as exc:
-            raise ValueError(f"未知调用类型: {kind}") from exc
-        if count < 0 or count > maximum:
-            raise ValueError(f"{kind} 单次最多 {maximum} 条")
-
+    def wait(self) -> float:
+        now = self.clock()
+        delay = 0.0 if self._last_started is None else max(0.0, self.minimum_interval - (now - self._last_started))
+        if delay:
+            self.sleep(delay)
+        self._last_started = self.clock()
+        return delay
