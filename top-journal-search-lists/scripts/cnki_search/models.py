@@ -54,7 +54,7 @@ class PaperRecord:
     source_catalogs: list[str] = field(default_factory=list)
     subject_categories: list[str] = field(default_factory=list)
     ncs_internal_rank: int | None = None
-    catalog_version: str = "2026-07-15"
+    catalog_version: str = field(default="2026-07-15", init=False)
     manual_review_required: bool = True
 
     def to_dict(self) -> dict[str, Any]:
@@ -71,6 +71,12 @@ class SearchOutcome:
     warnings: list[str]
     searched_at: str
 
+    def __post_init__(self) -> None:
+        if any(not _has_complete_bibliography(record) for record in self.records):
+            raise ValueError("正式题录必须具有篇名、期刊和可核验发表年度")
+        if any(_has_complete_bibliography(record) for record in self.incomplete_records):
+            raise ValueError("不完整题录集合不能包含完整题录")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "ok": self.status
@@ -83,3 +89,12 @@ class SearchOutcome:
             "warnings": list(self.warnings),
             "searched_at": self.searched_at,
         }
+
+
+def _has_complete_bibliography(record: PaperRecord) -> bool:
+    return (
+        bool(record.title.strip())
+        and bool(record.journal_raw.strip())
+        and isinstance(record.publication_year, int)
+        and not isinstance(record.publication_year, bool)
+    )

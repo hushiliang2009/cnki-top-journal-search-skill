@@ -7,6 +7,8 @@ from cnki_search.models import PaperRecord, SearchOutcome, SearchRequest, Search
 
 def test_request_accepts_only_nonempty_theme_and_limit_1_to_20() -> None:
     assert SearchRequest("数字化转型", 20).query == "数字化转型"
+    assert SearchRequest("  ＡＢＣ　主题  ").query == "ABC 主题"
+    assert SearchRequest("主题").limit == 20
     for query, limit in (("", 20), ("   ", 20), ("主题", 0), ("主题", 21)):
         with pytest.raises(ValueError):
             SearchRequest(query, limit)
@@ -27,3 +29,54 @@ def test_search_statuses_match_public_contract() -> None:
         "challenge_detected", "login_required", "forbidden",
         "page_contract_changed", "network_error",
     }
+
+
+def _record(*, title: str = "示例论文", journal: str = "经济研究", year: int | None = 2026) -> PaperRecord:
+    return PaperRecord(
+        title=title,
+        authors=[],
+        journal_raw=journal,
+        publication_date=str(year or ""),
+        publication_year=year,
+        document_type="期刊",
+        citations=None,
+        downloads=None,
+        is_online_first=False,
+        result_rank=1,
+        source_database="CNKI",
+        search_query="主题",
+    )
+
+
+@pytest.mark.parametrize(
+    "record",
+    [_record(title=""), _record(journal=""), _record(year=None)],
+)
+def test_outcome_rejects_incomplete_records_in_formal_records(record: PaperRecord) -> None:
+    with pytest.raises(ValueError, match="正式题录"):
+        SearchOutcome(SearchStatus.SUCCESS, "主题", [record], [], 0, [], "2026-07-22T00:00:00+00:00")
+
+
+def test_outcome_accepts_incomplete_records_only_in_incomplete_collection() -> None:
+    incomplete = _record(year=None)
+    outcome = SearchOutcome(
+        SearchStatus.PARTIAL,
+        "主题",
+        [],
+        [incomplete],
+        0,
+        [],
+        "2026-07-22T00:00:00+00:00",
+    )
+    assert outcome.incomplete_records == [incomplete]
+
+
+def test_catalog_version_is_fixed_and_not_a_constructor_argument() -> None:
+    assert _record().catalog_version == "2026-07-15"
+    with pytest.raises(TypeError):
+        PaperRecord(
+            title="示例论文", authors=[], journal_raw="经济研究", publication_date="2026",
+            publication_year=2026, document_type="期刊", citations=None, downloads=None,
+            is_online_first=False, result_rank=1, source_database="CNKI", search_query="主题",
+            catalog_version="other-version",
+        )
