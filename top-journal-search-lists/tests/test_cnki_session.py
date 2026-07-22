@@ -62,16 +62,20 @@ class _Closable:
 
 
 class RestrictedPage:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, response_status: int | None = None) -> None:
         self.url = "https://www.cnki.net/"
         self.text = text
+        self.response_status = response_status
         self.box_accessed = False
 
     def title(self) -> str:
         return "中国知网"
 
-    def goto(self, url: str, *, wait_until: str) -> None:
+    def goto(self, url: str, *, wait_until: str) -> object | None:
         assert (url, wait_until) == (session_module.CNKI_HOME_URL, "domcontentloaded")
+        if self.response_status is None:
+            return None
+        return type("Response", (), {"status": self.response_status})()
 
     def locator(self, selector: str) -> "RestrictedPage":
         assert selector == "body"
@@ -108,5 +112,31 @@ def test_session_returns_initial_restriction_before_theme_contract_and_closes_re
     with session:
         snapshot = session.search("主题")
         assert session_module.classify_public_search_state(**snapshot.state_arguments()) is SearchStatus.FORBIDDEN
+    assert page.box_accessed is False
+    assert context.closed and browser.closed
+
+
+@pytest.mark.parametrize(
+    ("response_status", "expected"),
+    [(403, SearchStatus.FORBIDDEN), (429, SearchStatus.RATE_LIMITED)],
+)
+def test_session_uses_initial_response_status_before_theme_contract(
+    response_status: int, expected: SearchStatus,
+) -> None:
+    page = RestrictedPage("", response_status)
+    context = _Closable()
+    context.new_page = lambda: page  # type: ignore[attr-defined]
+    browser = _Closable()
+    browser.new_context = lambda **_kwargs: context  # type: ignore[attr-defined]
+
+    class Factory:
+        def launch_ephemeral(self) -> _Closable:
+            return browser
+
+    session = PublicCnkiSession(browser_factory=Factory())
+    with session:
+        snapshot = session.search("主题")
+        assert snapshot.http_status == response_status
+        assert session_module.classify_public_search_state(**snapshot.state_arguments()) is expected
     assert page.box_accessed is False
     assert context.closed and browser.closed

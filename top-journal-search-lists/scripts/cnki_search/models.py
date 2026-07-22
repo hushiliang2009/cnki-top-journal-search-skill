@@ -98,5 +98,9 @@ def _has_complete_bibliography(record: PaperRecord) -> bool:
         and bool(record.journal_raw.strip())
         and isinstance(record.publication_year, int)
         and not isinstance(record.publication_year, bool)
-        and 1900 <= record.publication_year <= date.today().year + 1
+        and is_verifiable_publication_year(record.publication_year)
     )
+
+
+def is_verifiable_publication_year(value: int | None) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 1900 <= value <= date.today().year + 1

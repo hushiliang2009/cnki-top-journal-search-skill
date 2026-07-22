@@ -67,6 +67,7 @@ class PublicCnkiSession:
         self.browser: Any = None
         self.context: Any = None
         self.page: Any = None
+        self._home_response_status: int | None = None
 
     def __enter__(self) -> "PublicCnkiSession":
         if self._browser_factory is None:
@@ -75,14 +76,17 @@ class PublicCnkiSession:
         self.browser = self._browser_factory.launch_ephemeral()
         self.context = self.browser.new_context(locale="zh-CN", accept_downloads=False)
         self.page = self.context.new_page()
-        self.page.goto(CNKI_HOME_URL, wait_until="domcontentloaded")
+        response = self.page.goto(CNKI_HOME_URL, wait_until="domcontentloaded")
+        self._home_response_status = getattr(response, "status", None)
         return self
 
     def search(self, query: str) -> SearchSnapshot:
         if self.page is None:
             raise RuntimeError("公开检索会话未启动")
         body = self.page.locator("body").inner_text(timeout=10_000)
-        initial = SearchSnapshot(self.page.content(), self.page.url, self.page.title(), body)
+        initial = SearchSnapshot(
+            self.page.content(), self.page.url, self.page.title(), body, self._home_response_status,
+        )
         if classify_public_search_state(**initial.state_arguments()) in {
             SearchStatus.CHALLENGE_DETECTED,
             SearchStatus.LOGIN_REQUIRED,
@@ -110,3 +114,4 @@ class PublicCnkiSession:
         self.context = None
         self.browser = None
         self.page = None
+        self._home_response_status = None

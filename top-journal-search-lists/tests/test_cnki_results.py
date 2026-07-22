@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import date
 
 import pytest
 
@@ -74,3 +75,16 @@ def test_no_results_page_contains_no_records(fixtures: Path) -> None:
 def test_visible_result_markers_without_public_table_stop_on_contract_change() -> None:
     with pytest.raises(PageContractChanged, match="结果表"):
         results.parse_public_result_page("<main>题名 作者 来源 日期 数据库</main>", query="主题", limit=20)
+
+
+def test_future_year_beyond_shared_range_is_incomplete() -> None:
+    year = date.today().year + 2
+    html = (
+        "<table class='result-table-list'><tr>"
+        "<td class='seq'>1</td><td class='name'><a>题录</a></td>"
+        "<td class='source'><a>期刊</a></td><td class='date'>"
+        f"{year}</td><td class='data'>期刊</td></tr></table>"
+    )
+    parsed = results.parse_public_result_page(html, query="主题", limit=20)
+    assert parsed.records == []
+    assert [item.publication_year for item in parsed.incomplete_records] == [year]

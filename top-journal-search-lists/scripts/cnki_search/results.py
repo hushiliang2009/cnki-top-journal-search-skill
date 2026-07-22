@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date
 from html.parser import HTMLParser
 
-from .models import PaperRecord
+from .models import PaperRecord, is_verifiable_publication_year
 from .search import PageContractChanged
 
 
@@ -143,7 +143,7 @@ def parse_public_result_page(html: str, *, query: str, limit: int) -> ParsedResu
             excluded += 1
             continue
         record = _to_record(raw, query=query)
-        if not record.title or not record.journal_raw or record.publication_year is None:
+        if not record.title or not record.journal_raw or not is_verifiable_publication_year(record.publication_year):
             incomplete.append(record)
         elif len(records) < limit:
             records.append(record)

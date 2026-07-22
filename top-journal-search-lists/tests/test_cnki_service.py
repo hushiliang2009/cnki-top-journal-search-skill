@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import date
 
 import pytest
 
@@ -103,3 +104,19 @@ def test_cache_hit_skips_session_and_gate() -> None:
     assert service.search("主题").status is SearchStatus.NO_RESULTS
     assert service.search("主题").status is SearchStatus.NO_RESULTS
     assert (factory.calls, gate.calls) == (1, 1)
+
+
+def test_service_returns_partial_for_future_year_beyond_shared_range() -> None:
+    year = date.today().year + 2
+    html = (
+        "<table class='result-table-list'><tr>"
+        "<td class='seq'>1</td><td class='name'><a>题录</a></td>"
+        "<td class='source'><a>期刊</a></td><td class='date'>"
+        f"{year}</td><td class='data'>期刊</td></tr></table>"
+    )
+    outcome = CnkiPublicSearchService(
+        session_factory=lambda: FakeSession(html), catalog=CATALOG
+    ).search("主题")
+    assert outcome.status is SearchStatus.PARTIAL
+    assert outcome.records == []
+    assert len(outcome.incomplete_records) == 1
