@@ -113,9 +113,18 @@ def test_install_script_review_contracts(skill_root: Path) -> None:
             "$RuntimeRoot = if ($Codex) { Join-Path $CodexHome 'runtimes\\cnki-search' } else { Join-Path $ClaudeHome 'runtimes\\cnki-search' }"
             in content
         )
+        assert "merge-codex" in content
+        assert "codex mcp remove" not in content
+        assert "codex mcp add" not in content
+        assert "if (-not (Test-Path -LiteralPath $RuntimePython -PathType Leaf))" in content
+        assert "$LASTEXITCODE" in content
     for script in shell_scripts:
         content = script.read_text(encoding="utf-8")
         assert "*) usage; exit 2 ;;" in content
+        assert "merge-codex" in content
+        assert "codex mcp remove" not in content
+        assert "codex mcp add" not in content
+        assert '-x "$runtime_python"' in content
 
 
 def test_powershell_installers_return_two_for_missing_and_unknown_targets(

@@ -44,25 +44,32 @@ if ($ClaudeCode -or $ClaudeDesktop) { Install-SkillCopy $ClaudeSkill }
 
 $RuntimeRoot = if ($Codex) { Join-Path $CodexHome 'runtimes\cnki-search' } else { Join-Path $ClaudeHome 'runtimes\cnki-search' }
 New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
-$Python = (Get-Command python -ErrorAction Stop).Source
-& $Python -m venv (Join-Path $RuntimeRoot '.venv')
 $RuntimePython = Join-Path $RuntimeRoot '.venv\Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $RuntimePython -PathType Leaf)) {
+    $Python = (Get-Command python -ErrorAction Stop).Source
+    & $Python -m venv (Join-Path $RuntimeRoot '.venv')
+    if ($LASTEXITCODE -ne 0) { throw "创建 CNKI 运行时失败，退出码：$LASTEXITCODE" }
+}
 & $RuntimePython -m pip install 'mcp>=1,<2' 'playwright>=1.45,<2'
+if ($LASTEXITCODE -ne 0) { throw "安装 CNKI 运行时依赖失败，退出码：$LASTEXITCODE" }
 
-if ($Codex -and (Get-Command codex -ErrorAction SilentlyContinue)) {
-    Backup-File (Join-Path $CodexHome 'config.toml')
-    & codex mcp remove cnki-search 2>$null
-    & codex mcp add cnki-search --env "PYTHONPATH=$(Join-Path $CodexSkill 'scripts')" --env PYTHONUTF8=1 --env PYTHONIOENCODING=utf-8 -- $RuntimePython -m cnki_search.mcp_server
+if ($Codex) {
+    $CodexConfig = Join-Path $CodexHome 'config.toml'
+    Backup-File $CodexConfig
+    & $RuntimePython (Join-Path $CodexSkill 'scripts\cnki_search\install_config.py') merge-codex --config $CodexConfig --skill-root $CodexSkill --python $RuntimePython
+    if ($LASTEXITCODE -ne 0) { throw "写入 Codex 配置失败，退出码：$LASTEXITCODE" }
 }
 if ($ClaudeCode) {
     $ClaudeCodeConfig = Join-Path $env:USERPROFILE '.claude.json'
     Backup-File $ClaudeCodeConfig
     & $RuntimePython (Join-Path $ClaudeSkill 'scripts\cnki_search\install_config.py') merge-claude --config $ClaudeCodeConfig --skill-root $ClaudeSkill --python $RuntimePython
+    if ($LASTEXITCODE -ne 0) { throw "写入 Claude Code 配置失败，退出码：$LASTEXITCODE" }
 }
 if ($ClaudeDesktop) {
     $ClaudeDesktopConfig = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
     Backup-File $ClaudeDesktopConfig
     & $RuntimePython (Join-Path $ClaudeSkill 'scripts\cnki_search\install_config.py') merge-claude --config $ClaudeDesktopConfig --skill-root $ClaudeSkill --python $RuntimePython
+    if ($LASTEXITCODE -ne 0) { throw "写入 Claude Desktop 配置失败，退出码：$LASTEXITCODE" }
 }
 
 Write-Host 'cnki-search installation completed. Restart the clients before verification.'

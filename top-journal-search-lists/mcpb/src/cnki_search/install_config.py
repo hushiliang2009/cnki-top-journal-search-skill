@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import argparse
 import json
+import re
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Mapping
@@ -72,6 +74,118 @@ def merge_claude_config(
     return result
 
 
+_TOML_TABLE_HEADER = re.compile(
+    r"(?m)^[\t ]*\[(?!\[)(?P<path>[^\]\r\n]+)\][\t ]*(?:#.*)?(?:\r?\n|$)"
+)
+
+
+def _toml_key_path(value: str) -> tuple[str, ...] | None:
+    keys: list[str] = []
+    index = 0
+    length = len(value)
+    while index < length:
+        while index < length and value[index] in " \t":
+            index += 1
+        if index >= length:
+            return None
+        if value[index] == '"':
+            end = index + 1
+            while end < length:
+                if value[end] == "\\":
+                    end += 2
+                    continue
+                if value[end] == '"':
+                    break
+                end += 1
+            if end >= length:
+                return None
+            try:
+                key = json.loads(value[index : end + 1])
+            except json.JSONDecodeError:
+                return None
+            index = end + 1
+        elif value[index] == "'":
+            end = value.find("'", index + 1)
+            if end < 0:
+                return None
+            key = value[index + 1 : end]
+            index = end + 1
+        else:
+            end = index
+            while end < length and value[end] not in ". \t":
+                end += 1
+            key = value[index:end]
+            if not key:
+                return None
+            index = end
+        keys.append(key)
+        while index < length and value[index] in " \t":
+            index += 1
+        if index == length:
+            return tuple(keys)
+        if value[index] != ".":
+            return None
+        index += 1
+    return None
+
+
+def _is_cnki_table(path: tuple[str, ...] | None) -> bool:
+    return bool(
+        path
+        and len(path) >= 2
+        and path[0] == "mcp_servers"
+        and path[1] == "cnki-search"
+    )
+
+
+def _toml_string(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Codex MCP 配置值必须是字符串")
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _render_codex_server_config(server_config: Mapping[str, object]) -> str:
+    command = _toml_string(server_config["command"])
+    args = server_config["args"]
+    env = server_config["env"]
+    if not isinstance(args, list) or not isinstance(env, Mapping):
+        raise ValueError("CNKI MCP 配置格式无效")
+    rendered_args = ", ".join(_toml_string(argument) for argument in args)
+    lines = [
+        "[mcp_servers.cnki-search]",
+        f"command = {command}",
+        f"args = [{rendered_args}]",
+        "",
+        "[mcp_servers.cnki-search.env]",
+    ]
+    lines.extend(f"{key} = {_toml_string(value)}" for key, value in env.items())
+    return "\n".join(lines) + "\n"
+
+
+def merge_codex_config(existing_toml: str, server_config: Mapping[str, object]) -> str:
+    headers = [
+        (match.start(), _toml_key_path(match.group("path")))
+        for match in _TOML_TABLE_HEADER.finditer(existing_toml)
+    ]
+    retained: list[str] = []
+    cursor = 0
+    for index, (start, path) in enumerate(headers):
+        if not _is_cnki_table(path):
+            continue
+        end = headers[index + 1][0] if index + 1 < len(headers) else len(existing_toml)
+        if start < cursor:
+            continue
+        retained.append(existing_toml[cursor:start])
+        cursor = end
+    retained.append(existing_toml[cursor:])
+    merged = "".join(retained)
+    if merged and not merged.endswith(("\n", "\r")):
+        merged += "\n"
+    merged += _render_codex_server_config(server_config)
+    tomllib.loads(merged)
+    return merged
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="增量配置 CNKI MCP")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -79,24 +193,31 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("--config", type=Path, required=True)
     merge.add_argument("--skill-root", type=Path, required=True)
     merge.add_argument("--python", type=Path, required=True)
+    codex = commands.add_parser("merge-codex")
+    codex.add_argument("--config", type=Path, required=True)
+    codex.add_argument("--skill-root", type=Path, required=True)
+    codex.add_argument("--python", type=Path, required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config_path: Path = args.config
-    if config_path.is_file():
+    if args.command == "merge-claude" and config_path.is_file():
         existing = json.loads(config_path.read_text(encoding="utf-8-sig"))
     else:
         existing = {}
-    merged = merge_claude_config(
-        existing, cnki_server_config(args.skill_root, args.python)
-    )
+    server_config = cnki_server_config(args.skill_root, args.python)
+    if args.command == "merge-claude":
+        merged = json.dumps(
+            merge_claude_config(existing, server_config), ensure_ascii=False, indent=2
+        ) + "\n"
+    else:
+        current = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
+        merged = merge_codex_config(current, server_config)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = config_path.with_name(f"{config_path.name}.tmp")
-    temporary.write_text(
-        json.dumps(merged, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    temporary.write_text(merged, encoding="utf-8")
     temporary.replace(config_path)
     return 0
 

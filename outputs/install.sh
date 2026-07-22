@@ -58,12 +58,18 @@ else
   runtime_root="$claude_home/runtimes/cnki-search"
 fi
 mkdir -p "$runtime_root"
-python3 -m venv "$runtime_root/.venv"
 runtime_python="$runtime_root/.venv/bin/python"
+if [ ! -x "$runtime_python" ]; then
+  python3 -m venv "$runtime_root/.venv"
+fi
 "$runtime_python" -m pip install 'mcp>=1,<2' 'playwright>=1.45,<2'
-if [ "$codex" = true ] && command -v codex >/dev/null 2>&1; then
-  codex mcp remove cnki-search >/dev/null 2>&1 || true
-  codex mcp add cnki-search --env "PYTHONPATH=$codex_skill/scripts" --env PYTHONUTF8=1 --env PYTHONIOENCODING=utf-8 -- "$runtime_python" -m cnki_search.mcp_server
+if [ "$codex" = true ]; then
+  codex_config="$codex_home/config.toml"
+  if [ -f "$codex_config" ]; then
+    cp "$codex_config" "$codex_config.backup-$timestamp"
+    printf 'Backup: %s\n' "$codex_config.backup-$timestamp"
+  fi
+  "$runtime_python" "$codex_skill/scripts/cnki_search/install_config.py" merge-codex --config "$codex_config" --skill-root "$codex_skill" --python "$runtime_python"
 fi
 if [ "$claude_code" = true ]; then
   claude_code_config="$HOME/.claude.json"
