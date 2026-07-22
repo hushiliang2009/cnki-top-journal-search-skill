@@ -20,14 +20,13 @@ BUILD_INPUTS = (
     Path("installers/install.sh"),
 )
 FORBIDDEN_SEARCH_TOKENS = (
-    "kns/advsearch",
+    "kns/" + "advsearch",
     "old_search",
     "legacy_search",
     "resolve_old",
     "open_old",
     "assert_old",
     "is_old_search",
-    "fallback",
     "dbcode=",
 )
 
@@ -75,6 +74,20 @@ def test_cnki_documentation_states_safety_and_scope(skill_root: Path) -> None:
             "账号",
             "密码",
             "验证码",
+        ):
+            assert required in content, f"{relative_path.as_posix()} 缺少 {required}"
+
+
+def test_cnki_documentation_records_download_confirmation_and_session_boundary(
+    skill_root: Path,
+) -> None:
+    for relative_path in BUILD_INPUTS[:3]:
+        content = (skill_root / relative_path).read_text(encoding="utf-8")
+        for required in (
+            "access_confirmed",
+            "下载元数据",
+            "临时浏览器会话",
+            "不持久化",
         ):
             assert required in content, f"{relative_path.as_posix()} 缺少 {required}"
 

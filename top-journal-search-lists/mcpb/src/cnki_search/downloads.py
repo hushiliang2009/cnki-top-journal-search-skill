@@ -88,7 +88,8 @@ class DownloadRunner:
 
         output_dir.mkdir(parents=True, exist_ok=True)
         completed: list[Path] = []
-        for position, index in enumerate(indices):
+        for index in indices:
+            self.sleeper(self.random_uniform(8.0, 15.0))
             record = records[index - 1]
             temporary = output_dir / f"{safe_filename(record.title)}.download"
             path = self.driver.download_selected(index, temporary)
@@ -105,6 +106,4 @@ class DownloadRunner:
             path.replace(final_path)
             record.download_status = "downloaded"
             completed.append(final_path)
-            if position < len(indices) - 1:
-                self.sleeper(self.random_uniform(8.0, 15.0))
         return completed

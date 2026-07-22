@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -78,15 +79,15 @@ class CnkiMcpServer:
                 mode=SearchMode(mode), query=query, pages=pages,
                 fields=fields or [], filters=filters or {},
             )
-            old_page_status = self.session.open_old_search()
-            if old_page_status is not SessionStatus.READY:
+            search_page_status = self.session.open_search()
+            if search_page_status is not SessionStatus.READY:
                 return ToolResponse.failure(
-                    old_page_status,
-                    "知网旧版检索页面尚未就绪",
+                    search_page_status,
+                    "知网新版检索页面尚未就绪",
                     next_action="请在可见浏览器中手工完成登录或验证。",
                 ).to_dict()
             driver = PlaywrightPageDriver(self.session.page)
-            driver.assert_old_search_page()
+            driver.assert_new_search_page()
             if request.mode is SearchMode.PROFESSIONAL:
                 ProfessionalSearchRunner().run(driver, query)
             else:
@@ -165,7 +166,17 @@ class CnkiMcpServer:
             self.session.status(), {name: str(path) for name, path in paths.items()}
         ).to_dict()
 
-    def cnki_download(self, selected_indices: list[int], output_dir: str) -> dict[str, Any]:
+    def cnki_download(
+        self,
+        selected_indices: list[int],
+        output_dir: str,
+        access_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        if not access_confirmed:
+            return ToolResponse.failure(
+                SessionStatus.PERMISSION_DENIED,
+                "下载前必须由用户确认具有相应访问权限",
+            ).to_dict()
         blocked = self._ready()
         if blocked:
             return blocked.to_dict()
@@ -175,7 +186,15 @@ class CnkiMcpServer:
                 self.records, selected_indices=selected_indices, output_dir=Path(output_dir)
             )
             return ToolResponse.success(
-                SessionStatus.READY, [str(path) for path in paths]
+                SessionStatus.READY,
+                [
+                    {
+                        "path": str(path),
+                        "size_bytes": path.stat().st_size,
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    }
+                    for path in paths
+                ],
             ).to_dict()
         except (IndexError, ValueError, RuntimeError) as exc:
             return ToolResponse.failure(self.session.status(), str(exc)).to_dict()

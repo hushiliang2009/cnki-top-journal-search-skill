@@ -101,7 +101,7 @@ python scripts/catalog_lookup.py --catalog path/to/Academic_Journal_Master_Direc
 
 调用 `cnki_login` 后，程序打开河海大学 WebVPN 登录页。用户在可见浏览器中手工登录，并自行处理验证码。程序不接收账号、密码或验证码。
 
-每次启动只使用临时内存浏览器上下文，不持久化 Cookie，不导入 Chrome、Edge 或其他浏览器的历史会话，也不使用扫描包中的 Local State。关闭会话后需要重新登录。
+每次启动只使用临时浏览器会话，不持久化 Cookie，不导入 Chrome、Edge 或其他浏览器的历史会话，也不使用扫描包中的 Local State。关闭会话后需要重新登录。
 
 ## CNKI 检索、限流和结果
 
@@ -117,7 +117,7 @@ python scripts/catalog_lookup.py --catalog path/to/Academic_Journal_Master_Direc
 
 ## 下载规则
 
-检索结果先编号展示。只有用户明确选择具体结果、确认具有访问权限并指定保存目录后，才调用下载工具。每次最多 5 篇，只点击当前知网页面的知网官方全文按钮。
+检索结果先编号展示。只有用户明确选择具体结果、确认具有访问权限、指定保存目录，并将 `access_confirmed` 设为 `true` 后，才调用下载工具。每次最多 5 篇，只点击当前知网页面的知网官方全文按钮。下载完成后返回的下载元数据包括文件路径、文件大小和 SHA-256。
 
 下载后检查 PDF 或 CAJ 文件头。若返回 HTML 登录页或未知格式，程序删除无效文件并停止。不得构造隐藏下载链接或地址，不访问第三方全文站点。
 
