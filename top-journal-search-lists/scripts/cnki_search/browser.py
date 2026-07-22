@@ -34,8 +34,8 @@ class BrowserFactory:
         self.playwright = playwright
         self.executable_path = executable_path
 
-    def launch_visible(self) -> Any:
-        kwargs: dict[str, Any] = {"headless": False}
+    def launch_ephemeral(self) -> Any:
+        kwargs: dict[str, Any] = {"headless": True}
         executable = self.executable_path or discover_browser_executable()
         if executable:
             kwargs["executable_path"] = executable

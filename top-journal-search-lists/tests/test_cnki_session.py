@@ -1,153 +1,39 @@
+from pathlib import Path
+
 import pytest
 
 import cnki_search.session as session_module
 from cnki_search.browser import BrowserFactory
-from cnki_search.models import SessionStatus
-from cnki_search.session import (
-    CnkiSession,
-    DIRECT_CNKI_SEARCH_URL,
-    HHU_CNKI_SEARCH_URL,
-    classify_public_state,
-    is_new_search_page_contract,
-    resolve_search_url,
-)
+from cnki_search.models import SearchStatus
 
 
-HHU_NEW_SEARCH_URL = (
-    "https://webvpn.hhu.edu.cn/https/"
-    "77726476706e69737468656265737421fbf952d2243e635930068cb8/kns8s/AdvSearch"
-)
-
-
-def test_resolve_search_url_uses_new_entry_only() -> None:
-    assert resolve_search_url("https://kns.cnki.net/") == DIRECT_CNKI_SEARCH_URL
-    assert resolve_search_url("https://webvpn.hhu.edu.cn/") == HHU_CNKI_SEARCH_URL
-    assert DIRECT_CNKI_SEARCH_URL == "https://kns.cnki.net/kns8s/AdvSearch"
-    assert HHU_CNKI_SEARCH_URL == HHU_NEW_SEARCH_URL
-    assert resolve_search_url("https://example.com/") is None
-
-
-def test_session_exposes_only_new_search_navigation() -> None:
-    assert not hasattr(session_module, "HHU_CNKI_URL")
-    assert not hasattr(CnkiSession, "open_cnki")
-
-
-class RecordingPage:
-    def __init__(
-        self,
-        url: str,
-        *,
-        redirected_url: str | None = None,
-        title: str = "中国知网 高级检索",
-        visible_text: str = "中国知网 高级检索",
-    ) -> None:
-        self.url = url
-        self.visited: list[str] = []
-        self.redirected_url = redirected_url
-        self._title = title
-        self._visible_text = visible_text
-
-    def goto(self, url: str, *, wait_until: str) -> None:
-        assert wait_until == "domcontentloaded"
-        self.visited.append(url)
-        self.url = self.redirected_url or url
-
-    def title(self) -> str:
-        return self._title
-
-    def locator(self, selector: str):
-        assert selector == "body"
-        return self
-
-    def inner_text(self, *, timeout: int) -> str:
-        assert timeout == 5_000
-        return self._visible_text
-
-
-def test_session_opens_new_search_for_webvpn() -> None:
-    page = RecordingPage("https://webvpn.hhu.edu.cn/")
-    session = CnkiSession()
-    session.page = page
-
-    assert session.open_search() is SessionStatus.READY
-    assert page.visited == [HHU_CNKI_SEARCH_URL]
-
-
-def test_session_rejects_unrelated_host() -> None:
-    page = RecordingPage("https://example.com/")
-    session = CnkiSession()
-    session.page = page
-
-    assert session.open_search() is SessionStatus.SESSION_EXPIRED
-    assert page.visited == []
-
-
-def test_session_rejects_redirected_lookalike_host() -> None:
-    page = RecordingPage(
-        "https://webvpn.hhu.edu.cn/",
-        redirected_url="https://example.com/kns8s/AdvSearch",
-    )
-    session = CnkiSession()
-    session.page = page
-
-    assert session.open_search() is SessionStatus.SESSION_EXPIRED
-
-
-def test_session_rejects_redirected_path_change() -> None:
-    page = RecordingPage(
-        "https://webvpn.hhu.edu.cn/",
-        redirected_url="https://webvpn.hhu.edu.cn/kns8s/AdvSearch/redirected",
-    )
-    session = CnkiSession()
-    session.page = page
-
-    assert session.open_search() is SessionStatus.SESSION_EXPIRED
-
-
-def test_session_rejects_new_search_without_stable_visible_marker() -> None:
-    page = RecordingPage(
-        "https://kns.cnki.net/",
-        title="",
-        visible_text="",
-    )
-    session = CnkiSession()
-    session.page = page
-
-    assert session.open_search() is SessionStatus.SESSION_EXPIRED
+def test_public_session_uses_only_cnki_home() -> None:
+    assert session_module.CNKI_HOME_URL == "https://www.cnki.net/"
+    source = Path(session_module.__file__).read_text(encoding="utf-8").casefold()
+    assert "webvpn" not in source
+    assert "advsearch" not in source
+    assert "brief/grid" not in source
 
 
 @pytest.mark.parametrize(
-    "url",
+    ("url", "text", "expected"),
     [
-        "https://evil.cnki.net/kns8s/AdvSearch",
-        "https://webvpn.hhu.edu.cn/https/not-the-cnki-proxy/kns8s/AdvSearch",
-        "https://kns.cnki.net:443/kns8s/AdvSearch",
-        "https://user@kns.cnki.net/kns8s/AdvSearch",
-        "https://user:password@kns.cnki.net/kns8s/AdvSearch",
-        "https://kns.cnki.net/kns8s/AdvSearch;v=1",
+        ("https://kns.cnki.net/captcha", "请完成拼图验证", SearchStatus.CHALLENGE_DETECTED),
+        ("https://login.cnki.net/", "用户登录", SearchStatus.LOGIN_REQUIRED),
+        ("https://kns.cnki.net/", "403 Forbidden", SearchStatus.FORBIDDEN),
+        ("https://kns.cnki.net/", "访问过于频繁", SearchStatus.RATE_LIMITED),
+        ("https://kns.cnki.net/", "未检索到相关文献", SearchStatus.NO_RESULTS),
     ],
 )
-def test_new_search_contract_rejects_lookalike_urls(url: str) -> None:
-    assert not is_new_search_page_contract(
-        url=url,
-        title="中国知网 高级检索",
-        visible_text="高级检索",
-    )
-
-
-def test_new_search_contract_allows_ordinary_query_and_fragment() -> None:
-    assert is_new_search_page_contract(
-        url=f"{DIRECT_CNKI_SEARCH_URL}?page=1#results",
-        title="中国知网 高级检索",
-        visible_text="高级检索",
-    )
+def test_restrictions_stop_without_fallback(url: str, text: str, expected: SearchStatus) -> None:
+    assert session_module.classify_public_search_state(url=url, title="", visible_text=text) is expected
 
 
 class FakeBrowserType:
     def __init__(self) -> None:
-        self.launch_kwargs: dict = {}
+        self.launch_kwargs: dict[str, object] = {}
 
-    def launch(self, **kwargs):
+    def launch(self, **kwargs: object) -> object:
         self.launch_kwargs = kwargs
         return object()
 
@@ -157,168 +43,10 @@ class FakePlaywright:
         self.chromium = FakeBrowserType()
 
 
-def test_browser_launch_is_visible_and_ephemeral() -> None:
+def test_browser_launch_is_headless_and_has_no_persistent_state() -> None:
     fake = FakePlaywright()
-    BrowserFactory(fake).launch_visible()
-    assert fake.chromium.launch_kwargs["headless"] is False
+    BrowserFactory(fake).launch_ephemeral()
+    assert fake.chromium.launch_kwargs["headless"] is True
     assert "user_data_dir" not in fake.chromium.launch_kwargs
     assert "storage_state" not in fake.chromium.launch_kwargs
-
-
-@pytest.mark.parametrize(
-    ("url", "title", "visible_text", "expected"),
-    [
-        (
-            "https://webvpn.hhu.edu.cn/authserver/login",
-            "河海大学统一身份认证",
-            "用户名\n密码\n登录",
-            SessionStatus.LOGIN_REQUIRED,
-        ),
-        (
-            HHU_CNKI_SEARCH_URL,
-            "高级检索-中国知网",
-            "中国知网\n高级检索\n专业检索\n主题\n检索",
-            SessionStatus.READY,
-        ),
-    ],
-)
-def test_status_from_visible_page_state(
-    url: str,
-    title: str,
-    visible_text: str,
-    expected: SessionStatus,
-) -> None:
-    assert classify_public_state(
-        url=url,
-        title=title,
-        visible_text=visible_text,
-    ) is expected
-
-
-def test_authenticated_resource_page_ignores_residual_login_url() -> None:
-    status = classify_public_state(
-        url="https://webvpn.hhu.edu.cn/authserver/login?service=resource-list",
-        title="河海大学WebVPN系统 - 资源站点",
-        visible_text="资源站点\n中国知网",
-    )
-
-    assert status is SessionStatus.READY
-
-
-def test_new_search_page_ignores_ordinary_security_verification_notice() -> None:
-    status = classify_public_state(
-        url=HHU_CNKI_SEARCH_URL,
-        title="高级检索-中国知网",
-        visible_text="高级检索\n安全验证说明\n请勿向他人泄露账号信息",
-    )
-
-    assert status is SessionStatus.READY
-
-
-def test_verify_path_is_captcha_evidence() -> None:
-    assert classify_public_state(
-        url="https://webvpn.hhu.edu.cn/verify/home",
-        title="河海大学WebVPN系统",
-        visible_text="访问服务",
-    ) is SessionStatus.CAPTCHA
-
-
-@pytest.mark.parametrize("query_key", ["captcha", "verify"])
-def test_captcha_or_verify_query_parameter_is_captcha_evidence(
-    query_key: str,
-) -> None:
-    assert classify_public_state(
-        url=f"{HHU_CNKI_SEARCH_URL}?{query_key}=required",
-        title="高级检索-中国知网",
-        visible_text="中国知网\n高级检索",
-    ) is SessionStatus.CAPTCHA
-
-
-def test_security_verification_title_is_captcha_evidence() -> None:
-    assert classify_public_state(
-        url="https://webvpn.hhu.edu.cn/security-check",
-        title="安全验证",
-        visible_text="访问服务",
-    ) is SessionStatus.CAPTCHA
-
-
-@pytest.mark.parametrize(
-    "visible_text",
-    [
-        "滑动下方拼图完成验证",
-        "请完成拼图验证",
-    ],
-)
-def test_explicit_puzzle_interaction_is_captcha_evidence(
-    visible_text: str,
-) -> None:
-    assert classify_public_state(
-        url=HHU_CNKI_SEARCH_URL,
-        title="高级检索-中国知网",
-        visible_text=visible_text,
-    ) is SessionStatus.CAPTCHA
-
-
-@pytest.mark.parametrize(
-    ("blocking_text", "expected"),
-    [
-        ("HTTP 429", SessionStatus.RATE_LIMITED),
-        ("HTTP 403", SessionStatus.PERMISSION_DENIED),
-        ("权限不足", SessionStatus.PERMISSION_DENIED),
-    ],
-)
-def test_http_and_permission_blocks_take_priority_over_ready_markers(
-    blocking_text: str,
-    expected: SessionStatus,
-) -> None:
-    assert classify_public_state(
-        url=HHU_CNKI_SEARCH_URL,
-        title="高级检索-中国知网",
-        visible_text=f"高级检索 中国知网 {blocking_text}",
-    ) is expected
-
-
-def test_status_classifier_does_not_accept_form_values() -> None:
-    with pytest.raises(TypeError):
-        classify_public_state(url="x", title="x", visible_text="x", password="secret")
-
-
-class CaptchaPage:
-    url = HHU_NEW_SEARCH_URL
-
-    def title(self) -> str:
-        return ""
-
-    def locator(self, selector: str):
-        assert selector == "body"
-        return self
-
-    def inner_text(self, *, timeout: int) -> str:
-        assert timeout == 5_000
-        return ""
-
-
-def test_session_keeps_captcha_status_without_search_page_recovery(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        session_module,
-        "classify_public_state",
-        lambda **_kwargs: SessionStatus.CAPTCHA,
-    )
-    session = CnkiSession()
-    session.page = CaptchaPage()
-
-    assert session.status() is SessionStatus.CAPTCHA
-
-
-@pytest.mark.parametrize("ordinary_number", ["429", "403"])
-def test_ready_cnki_page_does_not_treat_bare_numbers_as_http_errors(
-    ordinary_number: str,
-) -> None:
-    status = classify_public_state(
-        url="https://webvpn.hhu.edu.cn/https/cnki/",
-        title="中国知网",
-        visible_text=f"高级检索 期刊目录页 {ordinary_number} 种",
-    )
-    assert status is SessionStatus.READY
+    assert "proxy" not in fake.chromium.launch_kwargs
