@@ -1,7 +1,7 @@
 # CNKI 公开主题检索与期刊级别标注设计
 
 设计日期：2026-07-22
-状态：待最终复核
+状态：已批准
 适用范围：`cnki-research`、`top-journal-search-lists`、MCP、Skill、插件与跨客户端安装包
 
 ## 一、最终决定
