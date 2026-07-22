@@ -10,6 +10,9 @@ class RecordingLocator:
     def count(self) -> int:
         return 1
 
+    def inner_text(self) -> str:
+        return "主题 ▼"
+
     def fill(self, value: str) -> None:
         self.page.actions.append(("fill", value))
 
@@ -41,6 +44,10 @@ class RecordingPage:
         self.actions.append((role, name))
         return RecordingLocator(self)
 
+    def locator(self, selector: str) -> RecordingLocator:
+        assert selector == ".sort .sort-default"
+        return RecordingLocator(self)
+
     def expect_navigation(self, **_kwargs: object) -> Navigation:
         return Navigation()
 
@@ -57,10 +64,27 @@ def test_runner_fills_only_default_theme_box() -> None:
 
 def test_runner_stops_when_public_home_contract_changes() -> None:
     class MissingFieldPage(RecordingPage):
-        def get_by_text(self, value: str, exact: bool = False) -> RecordingLocator:
-            locator = super().get_by_text(value, exact)
+        def locator(self, selector: str) -> RecordingLocator:
+            locator = super().locator(selector)
             locator.count = lambda: 0  # type: ignore[method-assign]
             return locator
 
     with pytest.raises(search.PageContractChanged):
         search.PublicThemeSearchRunner().run(MissingFieldPage(), "主题")
+
+
+def test_runner_accepts_unique_current_theme_control_with_duplicate_theme_texts() -> None:
+    class DuplicateThemeTextPage(RecordingPage):
+        def get_by_text(self, value: str, exact: bool = False) -> RecordingLocator:
+            assert (value, exact) == ("主题", True)
+            locator = RecordingLocator(self)
+            locator.count = lambda: 2  # type: ignore[method-assign]
+            return locator
+
+        def locator(self, selector: str) -> RecordingLocator:
+            control = super().locator(selector)
+            control.inner_text = lambda: "主题 ▼"  # type: ignore[method-assign]
+            return control
+
+    page = DuplicateThemeTextPage()
+    assert search.PublicThemeSearchRunner().run(page, "数字化转型") == 200

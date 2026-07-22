@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 from .browser import BrowserFactory, start_playwright
 from .models import SearchStatus
-from .search import PageContractChanged, PublicThemeSearchRunner
+from .search import PageContractChanged, PublicThemeSearchRunner, validate_public_theme_search_contract
 
 
 CNKI_HOME_URL = "https://www.cnki.net/"
@@ -96,10 +96,9 @@ class PublicCnkiSession:
             SearchStatus.NO_RESULTS,
         }:
             return initial
-        home_box = self.page.get_by_role("textbox", name="中文文献、外文文献")
-        theme_field = self.page.get_by_text("主题", exact=True)
-        if self.page.url != CNKI_HOME_URL or home_box.count() != 1 or theme_field.count() != 1:
+        if self.page.url != CNKI_HOME_URL:
             raise PageContractChanged("知网公开首页未就绪")
+        validate_public_theme_search_contract(self.page)
         http_status = PublicThemeSearchRunner().run(self.page, query)
         body = self.page.locator("body").inner_text(timeout=10_000)
         return SearchSnapshot(self.page.content(), self.page.url, self.page.title(), body, http_status)

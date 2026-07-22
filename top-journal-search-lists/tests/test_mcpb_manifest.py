@@ -22,6 +22,28 @@ CNKI_MODULES = (
     "service.py",
     "session.py",
 )
+TEST_RELATIVE = (
+    "tests/conftest.py",
+    "tests/test_catalog_lookup.py",
+    "tests/test_cnki_cache.py",
+    "tests/test_cnki_mcp.py",
+    "tests/test_cnki_merge.py",
+    "tests/test_cnki_models.py",
+    "tests/test_cnki_package_contract.py",
+    "tests/test_cnki_ranking.py",
+    "tests/test_cnki_rate_limit.py",
+    "tests/test_cnki_results.py",
+    "tests/test_cnki_search.py",
+    "tests/test_cnki_service.py",
+    "tests/test_cnki_session.py",
+    "tests/test_installers.py",
+    "tests/test_mcpb_manifest.py",
+    "tests/fixtures/public_challenge.html",
+    "tests/fixtures/public_home.html",
+    "tests/fixtures/public_incomplete_results.html",
+    "tests/fixtures/public_no_results.html",
+    "tests/fixtures/public_results.html",
+)
 EXPECTED_SKILL_RELATIVE = (
     "README.md",
     "SKILL.md",
@@ -40,6 +62,7 @@ EXPECTED_SKILL_RELATIVE = (
     "scripts/build_release.py",
     "scripts/catalog_lookup.py",
     *(f"scripts/cnki_search/{name}" for name in CNKI_MODULES),
+    *TEST_RELATIVE,
 )
 EXPECTED_MCPB_RELATIVE = tuple(
     relative.removeprefix("mcpb/")
@@ -132,7 +155,7 @@ def test_release_archives_have_exact_allowlisted_members_and_source_bytes(skill_
 
     with zipfile.ZipFile(skill_zip) as archive:
         assert archive.namelist() == [
-            f"top-journal-search-lists/{relative}" for relative in EXPECTED_SKILL_RELATIVE
+            f"top-journal-search-lists/{relative}" for relative in sorted(EXPECTED_SKILL_RELATIVE)
         ]
         for relative in EXPECTED_SKILL_RELATIVE:
             assert archive.read(f"top-journal-search-lists/{relative}") == (
@@ -192,7 +215,7 @@ def test_release_build_excludes_unlisted_and_state_baits(skill_root: Path, tmp_p
 
     with zipfile.ZipFile(skill_zip) as archive:
         assert archive.namelist() == [
-            f"top-journal-search-lists/{relative}" for relative in EXPECTED_SKILL_RELATIVE
+            f"top-journal-search-lists/{relative}" for relative in sorted(EXPECTED_SKILL_RELATIVE)
         ]
     with zipfile.ZipFile(mcpb_zip) as archive:
         assert archive.namelist() == list(EXPECTED_MCPB_RELATIVE)

@@ -23,6 +23,28 @@ CNKI_MODULES = (
     "service.py",
     "session.py",
 )
+TEST_ALLOWLIST = (
+    "tests/conftest.py",
+    "tests/test_catalog_lookup.py",
+    "tests/test_cnki_cache.py",
+    "tests/test_cnki_mcp.py",
+    "tests/test_cnki_merge.py",
+    "tests/test_cnki_models.py",
+    "tests/test_cnki_package_contract.py",
+    "tests/test_cnki_ranking.py",
+    "tests/test_cnki_rate_limit.py",
+    "tests/test_cnki_results.py",
+    "tests/test_cnki_search.py",
+    "tests/test_cnki_service.py",
+    "tests/test_cnki_session.py",
+    "tests/test_installers.py",
+    "tests/test_mcpb_manifest.py",
+    "tests/fixtures/public_challenge.html",
+    "tests/fixtures/public_home.html",
+    "tests/fixtures/public_incomplete_results.html",
+    "tests/fixtures/public_no_results.html",
+    "tests/fixtures/public_results.html",
+)
 MCPB_ALLOWLIST = (
     "manifest.json",
     "pyproject.toml",
@@ -44,6 +66,7 @@ SKILL_ALLOWLIST = (
     "scripts/build_release.py",
     "scripts/catalog_lookup.py",
     *(f"scripts/cnki_search/{name}" for name in CNKI_MODULES),
+    *TEST_ALLOWLIST,
 )
 ALLOWLIST = SKILL_ALLOWLIST
 ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)

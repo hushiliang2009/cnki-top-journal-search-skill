@@ -24,6 +24,10 @@
 - 二进制交付包不提交普通 Git 历史，只保存在 `outputs` 或私有 GitHub Release。
 - 各任务的pytest命令从 `top-journal-search-lists` 目录运行；Git、构建、安装和推送命令从工作树根目录运行。
 
+### 2026-07-23 用户批准的 Task 8 验收调整
+
+用户批准：修复后，公开首页检索已进入 `kns.cnki.net` 且返回 `challenge_detected`，可作为反爬安全停止边界验证通过。该调整仅适用于 Task 8 的发布门槛，不表示 CNKI 检索成功或已有可用题录。运行时遇到 `challenge_detected`、登录、401、403、429 或 `page_contract_changed`，必须立即停止 CNKI，回退 ai4scholar；不得绕过、切换入口或自动重试。公开检索的无登录、无 Cookie、无用户 profile、无代理、无详情和无下载边界不变。
+
 ## Execution Units
 
 - 原任务1、3、4、5、6共同构成公开检索迁移单元。旧模型被替换后，旧结果解析、会话、检索和MCP模块无法继续导入，因此这五项按测试先行顺序连续实施，完成后统一运行全量测试并接受独立复核。
