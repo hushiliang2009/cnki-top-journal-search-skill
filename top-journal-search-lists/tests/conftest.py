@@ -12,3 +12,8 @@ if str(SCRIPTS_DIR) not in sys.path:
 @pytest.fixture
 def skill_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def fixtures() -> Path:
+    return Path(__file__).resolve().parent / "fixtures"
