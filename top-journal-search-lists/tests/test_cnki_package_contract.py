@@ -11,6 +11,16 @@ SOURCE_ROOTS = (
     Path("scripts/cnki_search"),
     Path("mcpb/src/cnki_search"),
 )
+ENTRY_IMPLEMENTATION_FILES = tuple(
+    root / name
+    for root in SOURCE_ROOTS
+    for name in ("session.py", "search.py", "mcp_server.py")
+)
+ENTRY_DOCUMENTATION_FILES = (
+    Path("SKILL.md"),
+    Path("README.md"),
+    Path("references/cnki-search-reference.md"),
+)
 BUILD_INPUTS = (
     Path("SKILL.md"),
     Path("README.md"),
@@ -92,6 +102,22 @@ def test_cnki_documentation_records_download_confirmation_and_session_boundary(
             assert required in content, f"{relative_path.as_posix()} 缺少 {required}"
 
 
+def test_cnki_entry_selection_excludes_english_fallbacks(skill_root: Path) -> None:
+    forbidden = "fall" + "back"
+    for relative_path in (*ENTRY_IMPLEMENTATION_FILES, *ENTRY_DOCUMENTATION_FILES):
+        content = (skill_root / relative_path).read_text(encoding="utf-8").casefold()
+        assert forbidden not in content, f"{relative_path.as_posix()} 包含入口回退实现"
+
+
+def test_cnki_documentation_disallows_other_entry_or_fallback_mode(
+    skill_root: Path,
+) -> None:
+    required = "不提供其他入口或回退模式"
+    for relative_path in ENTRY_DOCUMENTATION_FILES:
+        content = (skill_root / relative_path).read_text(encoding="utf-8")
+        assert required in content, f"{relative_path.as_posix()} 缺少 {required}"
+
+
 def test_cnki_documentation_excludes_evasion_and_password_collection(skill_root: Path) -> None:
     combined = "\n".join(
         (skill_root / name).read_text(encoding="utf-8")
@@ -147,6 +173,6 @@ def test_mcpb_cnki_python_copy_matches_main_source_file_by_file(skill_root: Path
         f"MCPB={', '.join(path.as_posix() for path in mcpb_files)}"
     )
     for relative_path in main_files:
-        main_text = (main_root / relative_path).read_text(encoding="utf-8")
-        mcpb_text = (mcpb_root / relative_path).read_text(encoding="utf-8")
-        assert main_text == mcpb_text, f"Python 副本不一致: {relative_path.as_posix()}"
+        assert (mcpb_root / relative_path).read_bytes() == (
+            main_root / relative_path
+        ).read_bytes(), f"Python 字节副本不一致: {relative_path.as_posix()}"
