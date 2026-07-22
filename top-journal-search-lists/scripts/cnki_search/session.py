@@ -83,7 +83,17 @@ def classify_public_state(*, url: str, title: str, visible_text: str) -> Session
 
 def is_new_search_page_contract(*, url: str, title: str, visible_text: str) -> bool:
     parsed_url = urlparse(url)
+    hostname = (parsed_url.hostname or "").casefold()
+    if not (
+        hostname == "webvpn.hhu.edu.cn"
+        or hostname == "cnki.net"
+        or hostname.endswith(".cnki.net")
+    ):
+        return False
     if not parsed_url.path.casefold().endswith("/kns8s/advsearch"):
+        return False
+    visible_identity = f"{title}\n{visible_text}".casefold()
+    if "\u9ad8\u7ea7\u68c0\u7d22" not in visible_identity:
         return False
     return classify_public_state(
         url=url,
@@ -129,10 +139,21 @@ class CnkiSession:
         if target is None:
             return SessionStatus.SESSION_EXPIRED
         self.page.goto(target, wait_until="domcontentloaded")
-        status = self.status()
+        url = self.page.url
+        title = self.page.title()
+        visible_text = self.page.locator("body").inner_text(timeout=5_000)
+        status = classify_public_state(
+            url=url,
+            title=title,
+            visible_text=visible_text,
+        )
         if status is not SessionStatus.READY:
             return status
-        if "/kns8s/advsearch" not in self.page.url.casefold():
+        if not is_new_search_page_contract(
+            url=url,
+            title=title,
+            visible_text=visible_text,
+        ):
             return SessionStatus.SESSION_EXPIRED
         return SessionStatus.READY
 

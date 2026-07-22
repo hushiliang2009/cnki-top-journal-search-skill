@@ -30,17 +30,27 @@ def test_resolve_search_url_uses_new_entry_only() -> None:
 
 
 class RecordingPage:
-    def __init__(self, url: str) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        redirected_url: str | None = None,
+        title: str = "中国知网 高级检索",
+        visible_text: str = "中国知网 高级检索",
+    ) -> None:
         self.url = url
         self.visited: list[str] = []
+        self.redirected_url = redirected_url
+        self._title = title
+        self._visible_text = visible_text
 
     def goto(self, url: str, *, wait_until: str) -> None:
         assert wait_until == "domcontentloaded"
         self.visited.append(url)
-        self.url = url
+        self.url = self.redirected_url or url
 
     def title(self) -> str:
-        return "中国知网 高级检索"
+        return self._title
 
     def locator(self, selector: str):
         assert selector == "body"
@@ -48,7 +58,7 @@ class RecordingPage:
 
     def inner_text(self, *, timeout: int) -> str:
         assert timeout == 5_000
-        return "中国知网 高级检索"
+        return self._visible_text
 
 
 def test_session_opens_new_search_for_webvpn() -> None:
@@ -67,6 +77,40 @@ def test_session_rejects_unrelated_host() -> None:
 
     assert session.open_search() is SessionStatus.SESSION_EXPIRED
     assert page.visited == []
+
+
+def test_session_rejects_redirected_lookalike_host() -> None:
+    page = RecordingPage(
+        "https://webvpn.hhu.edu.cn/",
+        redirected_url="https://example.com/kns8s/AdvSearch",
+    )
+    session = CnkiSession()
+    session.page = page
+
+    assert session.open_search() is SessionStatus.SESSION_EXPIRED
+
+
+def test_session_rejects_redirected_path_change() -> None:
+    page = RecordingPage(
+        "https://webvpn.hhu.edu.cn/",
+        redirected_url="https://webvpn.hhu.edu.cn/kns8s/AdvSearch/redirected",
+    )
+    session = CnkiSession()
+    session.page = page
+
+    assert session.open_search() is SessionStatus.SESSION_EXPIRED
+
+
+def test_session_rejects_new_search_without_stable_visible_marker() -> None:
+    page = RecordingPage(
+        "https://kns.cnki.net/",
+        title="",
+        visible_text="",
+    )
+    session = CnkiSession()
+    session.page = page
+
+    assert session.open_search() is SessionStatus.SESSION_EXPIRED
 
 
 class FakeBrowserType:
