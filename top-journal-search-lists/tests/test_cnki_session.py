@@ -181,6 +181,75 @@ def test_status_from_public_page_state(fixture: str, url: str, expected: Session
     assert classify_public_state(url=url, title="", visible_text=html) is expected
 
 
+def test_authenticated_resource_page_ignores_residual_login_url() -> None:
+    status = classify_public_state(
+        url="https://webvpn.hhu.edu.cn/authserver/login?service=resource-list",
+        title="河海大学WebVPN系统 - 资源站点",
+        visible_text="资源站点\n中国知网",
+    )
+
+    assert status is SessionStatus.READY
+
+
+def test_new_search_page_ignores_ordinary_security_verification_notice() -> None:
+    status = classify_public_state(
+        url=HHU_CNKI_SEARCH_URL,
+        title="高级检索-中国知网",
+        visible_text="高级检索\n安全验证说明\n请勿向他人泄露账号信息",
+    )
+
+    assert status is SessionStatus.READY
+
+
+@pytest.mark.parametrize(
+    ("url", "title", "visible_text", "expected"),
+    [
+        (
+            "https://webvpn.hhu.edu.cn/verify/home",
+            "安全验证",
+            "请完成拼图验证",
+            SessionStatus.CAPTCHA,
+        ),
+        (
+            "https://webvpn.hhu.edu.cn/authserver/login",
+            "统一身份认证",
+            "用户名 密码",
+            SessionStatus.LOGIN_REQUIRED,
+        ),
+    ],
+)
+def test_strong_blocking_page_identity_is_preserved(
+    url: str,
+    title: str,
+    visible_text: str,
+    expected: SessionStatus,
+) -> None:
+    assert classify_public_state(
+        url=url,
+        title=title,
+        visible_text=visible_text,
+    ) is expected
+
+
+@pytest.mark.parametrize(
+    ("blocking_text", "expected"),
+    [
+        ("HTTP 429", SessionStatus.RATE_LIMITED),
+        ("HTTP 403", SessionStatus.PERMISSION_DENIED),
+        ("权限不足", SessionStatus.PERMISSION_DENIED),
+    ],
+)
+def test_http_and_permission_blocks_take_priority_over_ready_markers(
+    blocking_text: str,
+    expected: SessionStatus,
+) -> None:
+    assert classify_public_state(
+        url=HHU_CNKI_SEARCH_URL,
+        title="高级检索-中国知网",
+        visible_text=f"高级检索 中国知网 {blocking_text}",
+    ) is expected
+
+
 def test_status_classifier_does_not_accept_form_values() -> None:
     with pytest.raises(TypeError):
         classify_public_state(url="x", title="x", visible_text="x", password="secret")

@@ -45,12 +45,6 @@ def classify_public_state(*, url: str, title: str, visible_text: str) -> Session
         )
     ):
         return SessionStatus.PERMISSION_DENIED
-    if (
-        "authserver/login" in haystack
-        or "\u7edf\u4e00\u8eab\u4efd\u8ba4\u8bc1" in haystack
-        or 'type="password"' in haystack
-    ):
-        return SessionStatus.LOGIN_REQUIRED
     parsed_url = urlparse(url)
     path = parsed_url.path.casefold()
     verification_url = any(token in path for token in ("captcha", "verify"))
@@ -63,13 +57,32 @@ def classify_public_state(*, url: str, title: str, visible_text: str) -> Session
         token in haystack
         for token in (
             "\u8bf7\u8f93\u5165\u9a8c\u8bc1\u7801",
-            "\u5b89\u5168\u9a8c\u8bc1",
             "\u6ed1\u52a8\u4e0b\u65b9\u62fc\u56fe\u5b8c\u6210\u9a8c\u8bc1",
             "\u8bf7\u5b8c\u6210\u62fc\u56fe\u9a8c\u8bc1",
         )
     )
-    if verification_url or explicit_verification or verification_query_keys:
+    verification_title = title.strip().casefold() == "\u5b89\u5168\u9a8c\u8bc1"
+    if (
+        verification_url
+        or verification_title
+        or explicit_verification
+        or verification_query_keys
+    ):
         return SessionStatus.CAPTCHA
+    title_identity = title.casefold()
+    authenticated_resource_page = (
+        "webvpn\u7cfb\u7edf" in title_identity
+        and "\u8d44\u6e90\u7ad9\u70b9" in title_identity
+        and "\u4e2d\u56fd\u77e5\u7f51" in visible_text.casefold()
+    )
+    if authenticated_resource_page:
+        return SessionStatus.READY
+    if (
+        "authserver/login" in haystack
+        or "\u7edf\u4e00\u8eab\u4efd\u8ba4\u8bc1" in haystack
+        or 'type="password"' in haystack
+    ):
+        return SessionStatus.LOGIN_REQUIRED
     if any(
         token in haystack
         for token in ("\u4e2d\u56fd\u77e5\u7f51", "\u9ad8\u7ea7\u68c0\u7d22", "\u4e13\u4e1a\u68c0\u7d22", "kns.cnki")
