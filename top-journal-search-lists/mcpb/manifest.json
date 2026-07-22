@@ -1,0 +1,34 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "cnki-search",
+  "display_name": "CNKI Search through HHU WebVPN",
+  "version": "0.1.0",
+  "description": "Visible-browser CNKI search with manual WebVPN login, conservative rate limits, structured export, and authorized downloads.",
+  "author": {
+    "name": "Top Journal Search Lists"
+  },
+  "server": {
+    "type": "uv",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "src/server.py"]
+    }
+  },
+  "tools": [
+    {"name": "cnki_status", "description": "Check session status without opening a browser."},
+    {"name": "cnki_login", "description": "Open the visible HHU WebVPN page for manual login."},
+    {"name": "cnki_search", "description": "Run an advanced or professional CNKI search in the visible page."},
+    {"name": "cnki_fetch_details", "description": "Read up to ten user-selected detail pages serially."},
+    {"name": "cnki_export", "description": "Export current records in five bibliographic formats."},
+    {"name": "cnki_download", "description": "Download up to five user-selected papers using official page controls."},
+    {"name": "cnki_close_session", "description": "Close the browser and discard the in-memory session."}
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"],
+    "runtimes": {"python": ">=3.11"}
+  },
+  "keywords": ["CNKI", "literature", "academic-search", "WebVPN"],
+  "license": "Apache-2.0"
+}

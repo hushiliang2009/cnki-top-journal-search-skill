@@ -1,0 +1,6 @@
+interface:
+  display_name: "Top Journal and CNKI Search"
+  short_description: "按期刊层级检索国际数据库与中国知网文献"
+  default_prompt: "Use $top-journal-search-lists to search CNKI and international databases, then organize verified literature by journal priority."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,63 @@
+# Local agent and editor state
+.agents/
+.codex/
+.superpowers/
+.vscode/
+.idea/
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+pytest-cache-files-*/
+.coverage
+htmlcov/
+
+# Node caches and dependencies
+node_modules/
+npm-cache/
+
+# Secrets and machine-local configuration
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime logs and command streams
+*.log
+*.jsonl
+*.pid
+
+# Browser profiles and session material
+Local State
+Cookies
+Network/
+User Data/
+user-data-dir/
+
+# Downloads and generated packages
+*.download
+*.pdf
+*.caj
+*.mcpb
+*.zip
+*.7z
+*.tar
+*.gz
+
+# Generated output; keep installer sources under version control
+outputs/*
+!outputs/install.ps1
+!outputs/install.sh
+
+# Working and audit material stays local
+work/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
