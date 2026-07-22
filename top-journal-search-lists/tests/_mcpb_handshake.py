@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from pathlib import Path
 
@@ -24,9 +23,9 @@ async def run() -> None:
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             tools = await session.list_tools()
-            response = await session.call_tool("cnki_status", {})
-            payload = json.loads(response.content[0].text)
-            print(json.dumps({"tool_count": len(tools.tools), "status": payload["status"]}))
+            names = [tool.name for tool in tools.tools]
+            assert names == ["cnki_search"]
+            print({"tools": names})
 
 
 if __name__ == "__main__":

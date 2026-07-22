@@ -53,24 +53,13 @@ def main() -> None:
         send(process, {"jsonrpc": "2.0", "method": "notifications/initialized"})
         send(process, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         tools = receive(process)
-        send(
-            process,
-            {
-                "jsonrpc": "2.0",
-                "id": 3,
-                "method": "tools/call",
-                "params": {"name": "cnki_status", "arguments": {}},
-            },
-        )
-        status = receive(process)
-        result_text = status["result"]["content"][0]["text"]
-        result = json.loads(result_text)
+        names = [tool["name"] for tool in tools["result"]["tools"]]
+        assert names == ["cnki_search"]
         print(
             json.dumps(
                 {
                     "server": initialized["result"]["serverInfo"]["name"],
-                    "tools": [tool["name"] for tool in tools["result"]["tools"]],
-                    "status": result["status"],
+                    "tools": names,
                 },
                 ensure_ascii=False,
             )
