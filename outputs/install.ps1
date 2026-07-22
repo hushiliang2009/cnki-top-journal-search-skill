@@ -1,12 +1,14 @@
 param(
     [switch]$Codex,
     [switch]$ClaudeCode,
-    [switch]$ClaudeDesktop
+    [switch]$ClaudeDesktop,
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$RemainingArguments
 )
 
 $ErrorActionPreference = 'Stop'
-if (-not ($Codex -or $ClaudeCode -or $ClaudeDesktop)) {
-    Write-Error 'Usage: .\install.ps1 -Codex | -ClaudeCode | -ClaudeDesktop (one or more targets)'
+if ($RemainingArguments.Count -gt 0 -or -not ($Codex -or $ClaudeCode -or $ClaudeDesktop)) {
+    [Console]::Error.WriteLine('Usage: .\install.ps1 -Codex | -ClaudeCode | -ClaudeDesktop (one or more targets)')
     exit 2
 }
 
