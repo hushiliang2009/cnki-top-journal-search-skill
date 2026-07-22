@@ -24,6 +24,16 @@ class FakeDownloadDriver:
         return target
 
 
+class RecordingDownloadDriver(FakeDownloadDriver):
+    def __init__(self, events: list[str], payload: bytes = b"%PDF-1.7 test") -> None:
+        super().__init__(payload)
+        self.events = events
+
+    def download_selected(self, selected_index: int, target: Path) -> Path:
+        self.events.append(f"download:{selected_index}")
+        return super().download_selected(selected_index, target)
+
+
 def _record(index: int) -> PaperRecord:
     return PaperRecord(title=f"论文/{index}:测试", detail_url=f"https://kns.cnki.net/detail/{index}")
 
@@ -55,6 +65,29 @@ def test_download_runner_is_serial_and_selected_only(skill_root: Path) -> None:
         assert driver.visited == ["1", "3"]
         assert all(item.download_status == "downloaded" for item in (records[0], records[2]))
         assert records[1].download_status == "not_requested"
+    finally:
+        for path in target.iterdir():
+            path.unlink()
+        target.rmdir()
+
+
+def test_each_download_waits_before_click(skill_root: Path) -> None:
+    events: list[str] = []
+    driver = RecordingDownloadDriver(events)
+    runner = DownloadRunner(
+        driver,
+        sleeper=lambda seconds: events.append(f"wait:{seconds}"),
+        random_uniform=lambda low, high: 9.0,
+    )
+
+    target = skill_root / "tests" / "_download_wait_test"
+    target.mkdir(exist_ok=True)
+    try:
+        runner.download_selected(
+            [_record(1), _record(2)], selected_indices=[1, 2], output_dir=target
+        )
+
+        assert events == ["wait:9.0", "download:1", "wait:9.0", "download:2"]
     finally:
         for path in target.iterdir():
             path.unlink()

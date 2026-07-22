@@ -1,4 +1,5 @@
 import inspect
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -96,6 +97,56 @@ class FakeReadySession:
 
     def status(self) -> SessionStatus:
         return SessionStatus.READY
+
+
+class AccessDeniedSession:
+    @property
+    def page(self):
+        raise AssertionError("权限确认缺失时不得访问会话或驱动")
+
+    def status(self) -> SessionStatus:
+        raise AssertionError("权限确认缺失时不得访问会话")
+
+
+class FakeMcpDownloadDriver:
+    def __init__(self, _page) -> None:
+        pass
+
+    def download_selected(self, selected_index: int, target: Path) -> Path:
+        target.write_bytes(b"%PDF-1.7 test")
+        return target
+
+
+def test_mcp_download_requires_access_confirmation_before_session_access() -> None:
+    server = CnkiMcpServer(session=AccessDeniedSession())
+
+    response = server.cnki_download([1], "not-created", access_confirmed=False)
+
+    assert response["ok"] is False
+    assert response["status"] == SessionStatus.PERMISSION_DENIED.value
+    assert "访问权限" in response["message"]
+
+
+def test_mcp_download_reports_path_size_and_sha256(monkeypatch, skill_root: Path) -> None:
+    monkeypatch.setattr("cnki_search.mcp_server.PlaywrightDownloadDriver", FakeMcpDownloadDriver)
+    server = CnkiMcpServer(session=FakeReadySession())
+    server.records = [PaperRecord(title="下载测试")]
+    target = skill_root / "tests" / "_mcp_download_metadata_test"
+    target.mkdir(exist_ok=True)
+
+    try:
+        response = server.cnki_download([1], str(target), access_confirmed=True)
+
+        assert response["ok"] is True
+        assert response["data"] == [{
+            "path": str(target / "下载测试.pdf"),
+            "size_bytes": len(b"%PDF-1.7 test"),
+            "sha256": hashlib.sha256(b"%PDF-1.7 test").hexdigest(),
+        }]
+    finally:
+        for path in target.iterdir():
+            path.unlink()
+        target.rmdir()
 
 
 class FakeNavigator:

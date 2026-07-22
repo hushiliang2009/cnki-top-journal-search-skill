@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -165,7 +166,17 @@ class CnkiMcpServer:
             self.session.status(), {name: str(path) for name, path in paths.items()}
         ).to_dict()
 
-    def cnki_download(self, selected_indices: list[int], output_dir: str) -> dict[str, Any]:
+    def cnki_download(
+        self,
+        selected_indices: list[int],
+        output_dir: str,
+        access_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        if not access_confirmed:
+            return ToolResponse.failure(
+                SessionStatus.PERMISSION_DENIED,
+                "下载前必须由用户确认具有相应访问权限",
+            ).to_dict()
         blocked = self._ready()
         if blocked:
             return blocked.to_dict()
@@ -175,7 +186,15 @@ class CnkiMcpServer:
                 self.records, selected_indices=selected_indices, output_dir=Path(output_dir)
             )
             return ToolResponse.success(
-                SessionStatus.READY, [str(path) for path in paths]
+                SessionStatus.READY,
+                [
+                    {
+                        "path": str(path),
+                        "size_bytes": path.stat().st_size,
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    }
+                    for path in paths
+                ],
             ).to_dict()
         except (IndexError, ValueError, RuntimeError) as exc:
             return ToolResponse.failure(self.session.status(), str(exc)).to_dict()
