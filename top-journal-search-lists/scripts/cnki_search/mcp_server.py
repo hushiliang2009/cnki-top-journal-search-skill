@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import hashlib
 from pathlib import Path
 from typing import Any, Callable
@@ -35,6 +38,7 @@ class CnkiMcpServer:
         self.detail_navigator = detail_navigator or PlaywrightResultNavigator()
         self.records: list[Any] = []
         self.limiter = SerialRateLimiter()
+        self._tool_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cnki-mcp")
 
     def tool_names(self) -> list[str]:
         return list(REQUIRED_TOOLS)
@@ -203,6 +207,15 @@ class CnkiMcpServer:
         status = self.session.close()
         return ToolResponse(ok=True, status=status, message="知网浏览器会话已关闭").to_dict()
 
+    def _async_tool(self, function: Callable[..., dict[str, Any]]) -> Callable[..., Any]:
+        async def invoke(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                self._tool_executor, partial(function, *args, **kwargs)
+            )
+
+        return invoke
+
     def build_fastmcp(self, fastmcp_class: type | None = None) -> Any:
         if fastmcp_class is None:
             from mcp.server.fastmcp import FastMCP
@@ -220,7 +233,7 @@ class CnkiMcpServer:
         }
         for name in REQUIRED_TOOLS:
             function: Callable[..., dict[str, Any]] = getattr(self, name)
-            mcp.tool(name=name, description=descriptions[name])(function)
+            mcp.tool(name=name, description=descriptions[name])(self._async_tool(function))
         return mcp
 
 

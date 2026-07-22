@@ -1,6 +1,8 @@
+import asyncio
 import inspect
 import hashlib
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -59,6 +61,51 @@ def test_build_fastmcp_is_lazy_when_sdk_is_unavailable(monkeypatch) -> None:
     mcp = server.build_fastmcp(FakeFastMCP)
     assert mcp is not None
     assert registered == REQUIRED_TOOLS
+
+
+def test_registered_tools_run_on_one_worker_outside_the_asyncio_loop() -> None:
+    server = CnkiMcpServer()
+    registered: dict[str, object] = {}
+    worker_threads: list[int] = []
+
+    for name in REQUIRED_TOOLS:
+        def tool(name: str = name) -> str:
+            worker_threads.append(threading.get_ident())
+            return name
+
+        setattr(server, name, tool)
+
+    class FakeFastMCP:
+        def __init__(self, _name: str) -> None:
+            pass
+
+        def tool(self, *, name: str, description: str):
+            assert description
+
+            def register(function):
+                registered[name] = function
+                return function
+
+            return register
+
+    server.build_fastmcp(FakeFastMCP)
+
+    async def invoke_registered_tools() -> tuple[list[str], int]:
+        event_loop_thread = threading.get_ident()
+        results: list[str] = []
+        for name in REQUIRED_TOOLS:
+            tool = registered[name]
+            result = tool()
+            assert inspect.isawaitable(result)
+            results.append(await result)
+        return results, event_loop_thread
+
+    results, event_loop_thread = asyncio.run(invoke_registered_tools())
+
+    assert results == REQUIRED_TOOLS
+    assert len(worker_threads) == len(REQUIRED_TOOLS)
+    assert set(worker_threads) != {event_loop_thread}
+    assert len(set(worker_threads)) == 1
 
 
 class FakeBody:
