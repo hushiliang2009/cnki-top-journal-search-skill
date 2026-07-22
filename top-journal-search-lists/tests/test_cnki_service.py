@@ -5,7 +5,7 @@ import pytest
 
 from cnki_search.models import SearchStatus
 from cnki_search.service import CnkiPublicSearchService
-from cnki_search.session import SearchSnapshot
+from cnki_search.session import PublicCnkiSession, SearchSnapshot
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,6 +77,55 @@ def test_network_error_retries_once_only() -> None:
     outcome = CnkiPublicSearchService(session_factory=factory, catalog=CATALOG, gate=gate).search("主题")
     assert outcome.status is SearchStatus.NETWORK_ERROR
     assert (factory.calls, gate.calls) == (2, 2)
+
+
+PlaywrightTimeoutBase = type(
+    "TimeoutError", (RuntimeError,), {"__module__": "playwright._impl._errors"}
+)
+
+
+class DerivedPlaywrightTimeout(PlaywrightTimeoutBase):
+    pass
+
+
+class _Closable:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class GotoTimeoutFactory:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.resources: list[tuple[_Closable, _Closable, _Closable]] = []
+
+    def __call__(self) -> PublicCnkiSession:
+        self.calls += 1
+        page = _Closable()
+        page.goto = lambda *_args, **_kwargs: (_ for _ in ()).throw(DerivedPlaywrightTimeout("timeout"))  # type: ignore[attr-defined]
+        context = _Closable()
+        context.new_page = lambda: page  # type: ignore[attr-defined]
+        browser = _Closable()
+        browser.new_context = lambda **_kwargs: context  # type: ignore[attr-defined]
+
+        class Factory:
+            def launch_ephemeral(self) -> _Closable:
+                return browser
+
+        session = PublicCnkiSession(browser_factory=Factory())
+        self.resources.append((page, context, browser))
+        return session
+
+
+def test_playwright_style_timeout_retries_once_then_returns_network_error_and_closes_sessions() -> None:
+    factory = GotoTimeoutFactory()
+    gate = CountingGate()
+    outcome = CnkiPublicSearchService(session_factory=factory, catalog=CATALOG, gate=gate).search("主题")
+    assert outcome.status is SearchStatus.NETWORK_ERROR
+    assert (factory.calls, gate.calls) == (2, 2)
+    assert all(page.closed and context.closed and browser.closed for page, context, browser in factory.resources)
 
 
 @pytest.mark.parametrize(

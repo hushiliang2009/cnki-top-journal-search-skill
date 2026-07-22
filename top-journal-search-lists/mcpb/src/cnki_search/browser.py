@@ -35,7 +35,10 @@ class BrowserFactory:
         self.executable_path = executable_path
 
     def launch_ephemeral(self) -> Any:
-        kwargs: dict[str, Any] = {"headless": True}
+        kwargs: dict[str, Any] = {
+            "headless": True,
+            "args": ["--no-proxy-server", "--proxy-bypass-list=*"],
+        }
         executable = self.executable_path or discover_browser_executable()
         if executable:
             kwargs["executable_path"] = executable

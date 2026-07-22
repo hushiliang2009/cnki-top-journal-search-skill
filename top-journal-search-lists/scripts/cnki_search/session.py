@@ -14,6 +14,17 @@ CNKI_RESULT_HOST = "kns.cnki.net"
 CNKI_RESULT_PATH_PREFIX = "/kns8s/defaultresult/"
 
 
+class TransientBrowserError(RuntimeError):
+    """可安全重试一次的公开浏览器访问失败。"""
+
+
+def _is_playwright_timeout(error: BaseException) -> bool:
+    return any(
+        item.__name__ == "TimeoutError" and item.__module__.startswith("playwright.")
+        for item in type(error).__mro__
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SearchSnapshot:
     html: str
@@ -35,6 +46,10 @@ def classify_public_search_state(
     *, url: str, title: str, visible_text: str, http_status: int | None = None,
 ) -> SearchStatus:
     identity = f"{url}\n{title}\n{visible_text}".casefold()
+    parsed = urlparse(url)
+    url_identity = f"{parsed.hostname or ''}{parsed.path}{parsed.query}".casefold()
+    title_identity = title.casefold()
+    visible_identity = visible_text.casefold()
     if http_status in {401, 403} or any(
         token in identity for token in ("401 unauthorized", "403 forbidden", "无权访问", "拒绝访问")
     ):
@@ -45,11 +60,17 @@ def classify_public_search_state(
         return SearchStatus.RATE_LIMITED
     if http_status is not None and 500 <= http_status <= 599:
         return SearchStatus.NETWORK_ERROR
-    if any(token in identity for token in ("captcha", "请完成拼图验证", "请输入验证码", "安全验证")):
+    if (
+        "captcha" in url_identity
+        or any(token in title_identity for token in ("验证码", "安全验证", "拼图验证"))
+        or any(
+            token in visible_identity
+            for token in ("请完成拼图验证", "请输入验证码", "请完成安全验证", "拖动滑块完成验证")
+        )
+    ):
         return SearchStatus.CHALLENGE_DETECTED
     if any(token in identity for token in ("login.cnki.net", "authserver", "用户登录", "统一身份认证")):
         return SearchStatus.LOGIN_REQUIRED
-    parsed = urlparse(url)
     if "未检索到相关文献" in visible_text:
         return SearchStatus.NO_RESULTS
     if parsed.hostname == "www.cnki.net" and "中国知网" in identity:
@@ -70,47 +91,67 @@ class PublicCnkiSession:
         self._home_response_status: int | None = None
 
     def __enter__(self) -> "PublicCnkiSession":
-        if self._browser_factory is None:
-            self._playwright = start_playwright()
-            self._browser_factory = BrowserFactory(self._playwright)
-        self.browser = self._browser_factory.launch_ephemeral()
-        self.context = self.browser.new_context(locale="zh-CN", accept_downloads=False)
-        self.page = self.context.new_page()
-        response = self.page.goto(CNKI_HOME_URL, wait_until="domcontentloaded")
-        self._home_response_status = getattr(response, "status", None)
-        return self
+        try:
+            if self._browser_factory is None:
+                self._playwright = start_playwright()
+                self._browser_factory = BrowserFactory(self._playwright)
+            self.browser = self._browser_factory.launch_ephemeral()
+            self.context = self.browser.new_context(locale="zh-CN", accept_downloads=False)
+            self.page = self.context.new_page()
+            response = self.page.goto(CNKI_HOME_URL, wait_until="domcontentloaded")
+            self._home_response_status = getattr(response, "status", None)
+            return self
+        except Exception as exc:
+            self._close_resources()
+            if _is_playwright_timeout(exc):
+                raise TransientBrowserError("知网公开首页访问超时") from exc
+            raise
 
     def search(self, query: str) -> SearchSnapshot:
-        if self.page is None:
-            raise RuntimeError("公开检索会话未启动")
-        body = self.page.locator("body").inner_text(timeout=10_000)
-        initial = SearchSnapshot(
-            self.page.content(), self.page.url, self.page.title(), body, self._home_response_status,
-        )
-        if classify_public_search_state(**initial.state_arguments()) in {
-            SearchStatus.CHALLENGE_DETECTED,
-            SearchStatus.LOGIN_REQUIRED,
-            SearchStatus.FORBIDDEN,
-            SearchStatus.RATE_LIMITED,
-            SearchStatus.NETWORK_ERROR,
-            SearchStatus.NO_RESULTS,
-        }:
-            return initial
-        if self.page.url != CNKI_HOME_URL:
-            raise PageContractChanged("知网公开首页未就绪")
-        validate_public_theme_search_contract(self.page)
-        http_status = PublicThemeSearchRunner().run(self.page, query)
-        body = self.page.locator("body").inner_text(timeout=10_000)
-        return SearchSnapshot(self.page.content(), self.page.url, self.page.title(), body, http_status)
+        try:
+            if self.page is None:
+                raise RuntimeError("公开检索会话未启动")
+            body = self.page.locator("body").inner_text(timeout=10_000)
+            initial = SearchSnapshot(
+                self.page.content(), self.page.url, self.page.title(), body, self._home_response_status,
+            )
+            if classify_public_search_state(**initial.state_arguments()) in {
+                SearchStatus.CHALLENGE_DETECTED,
+                SearchStatus.LOGIN_REQUIRED,
+                SearchStatus.FORBIDDEN,
+                SearchStatus.RATE_LIMITED,
+                SearchStatus.NETWORK_ERROR,
+                SearchStatus.NO_RESULTS,
+            }:
+                return initial
+            if self.page.url != CNKI_HOME_URL:
+                raise PageContractChanged("知网公开首页未就绪")
+            validate_public_theme_search_contract(self.page)
+            http_status = PublicThemeSearchRunner().run(self.page, query)
+            body = self.page.locator("body").inner_text(timeout=10_000)
+            return SearchSnapshot(self.page.content(), self.page.url, self.page.title(), body, http_status)
+        except Exception as exc:
+            if _is_playwright_timeout(exc):
+                raise TransientBrowserError("知网公开检索超时") from exc
+            raise
 
     def __exit__(self, *_exc: object) -> None:
-        if self.context is not None:
-            self.context.close()
-        if self.browser is not None:
-            self.browser.close()
-        if self._playwright is not None:
-            self._playwright.stop()
+        self._close_resources()
+
+    def _close_resources(self) -> None:
+        for resource, method in (
+            (self.page, "close"),
+            (self.context, "close"),
+            (self.browser, "close"),
+            (self._playwright, "stop"),
+        ):
+            if resource is not None:
+                try:
+                    getattr(resource, method)()
+                except Exception:
+                    pass
         self.context = None
         self.browser = None
         self.page = None
         self._home_response_status = None
+        self._playwright = None

@@ -10,7 +10,7 @@ from .models import SearchOutcome, SearchRequest, SearchStatus
 from .ranking import annotate_and_sort_records
 from .rate_limit import SerialSearchGate
 from .results import parse_public_result_page
-from .session import PublicCnkiSession, classify_public_search_state
+from .session import PublicCnkiSession, TransientBrowserError, classify_public_search_state
 from .search import PageContractChanged
 
 
@@ -63,7 +63,7 @@ class CnkiPublicSearchService:
                 return outcome
             except PageContractChanged as exc:
                 return empty_outcome(SearchStatus.PAGE_CONTRACT_CHANGED, request.query, str(exc))
-            except (TimeoutError, OSError) as exc:
+            except (TransientBrowserError, TimeoutError, OSError) as exc:
                 if attempt == 1:
                     return empty_outcome(SearchStatus.NETWORK_ERROR, request.query, str(exc))
         raise AssertionError("unreachable")

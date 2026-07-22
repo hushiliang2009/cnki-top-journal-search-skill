@@ -48,6 +48,7 @@ def test_browser_launch_is_headless_and_has_no_persistent_state() -> None:
     fake = FakePlaywright()
     BrowserFactory(fake).launch_ephemeral()
     assert fake.chromium.launch_kwargs["headless"] is True
+    assert fake.chromium.launch_kwargs["args"] == ["--no-proxy-server", "--proxy-bypass-list=*"]
     assert "user_data_dir" not in fake.chromium.launch_kwargs
     assert "storage_state" not in fake.chromium.launch_kwargs
     assert "proxy" not in fake.chromium.launch_kwargs
@@ -59,6 +60,57 @@ class _Closable:
 
     def close(self) -> None:
         self.closed = True
+
+    def stop(self) -> None:
+        self.closed = True
+
+
+PlaywrightTimeoutBase = type(
+    "TimeoutError", (RuntimeError,), {"__module__": "playwright._impl._errors"}
+)
+
+
+class DerivedPlaywrightTimeout(PlaywrightTimeoutBase):
+    pass
+
+
+class _GotoTimeoutPage(_Closable):
+    def goto(self, _url: str, *, wait_until: str) -> object:
+        assert wait_until == "domcontentloaded"
+        raise DerivedPlaywrightTimeout("navigation timed out")
+
+
+def test_session_converts_playwright_style_timeout_and_closes_initialization_resources() -> None:
+    page = _GotoTimeoutPage()
+    context = _Closable()
+    context.new_page = lambda: page  # type: ignore[attr-defined]
+    browser = _Closable()
+    browser.new_context = lambda **_kwargs: context  # type: ignore[attr-defined]
+    playwright = _Closable()
+
+    class Factory:
+        def launch_ephemeral(self) -> _Closable:
+            return browser
+
+    session = PublicCnkiSession(browser_factory=Factory())
+    session._playwright = playwright
+    with pytest.raises(RuntimeError) as raised:
+        session.__enter__()
+    assert type(raised.value).__name__ == "TransientBrowserError"
+    assert page.closed and context.closed and browser.closed and playwright.closed
+    assert session.page is None and session.context is None and session.browser is None
+
+
+def test_challenge_classifier_ignores_ordinary_safety_description() -> None:
+    assert session_module.classify_public_search_state(
+        url="https://kns.cnki.net/kns8s/defaultresult/", title="", visible_text="安全验证说明"
+    ) is SearchStatus.PAGE_CONTRACT_CHANGED
+
+
+def test_challenge_classifier_accepts_captcha_url_without_generic_text() -> None:
+    assert session_module.classify_public_search_state(
+        url="https://kns.cnki.net/captcha", title="", visible_text="请稍候"
+    ) is SearchStatus.CHALLENGE_DETECTED
 
 
 class RestrictedPage:
