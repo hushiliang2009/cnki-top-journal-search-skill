@@ -366,7 +366,7 @@ git commit -m "feat: classify CNKI journals with master catalog"
 <table class="result-table-list">
   <thead><tr><th>序号</th><th>篇名</th><th>作者</th><th>来源</th><th>日期</th><th>数据库</th><th>被引</th><th>下载</th></tr></thead>
   <tbody>
-    <tr><td class="seq">1</td><td class="name"><a>数字化转型与企业创新</a><i>网络首发</i></td><td class="author">张三;李四</td><td class="source">经济研究</td><td class="date">2026-07-20</td><td class="data">期刊</td><td class="quote">12</td><td class="download">108</td></tr>
+    <tr><td class="seq">1</td><td class="name"><a>数字化转型与企业创新</a><i>网络首发</i></td><td class="author">张三;李四</td><td class="source"><a>经济研究</a><span>CSSCI</span></td><td class="date">2026-07-20 10:20</td><td class="data">期刊</td><td class="quote">12</td><td class="download">108</td></tr>
     <tr><td class="seq">2</td><td class="name"><a>数字经济研究</a></td><td class="author">王五</td><td class="source">某大学</td><td class="date">2025</td><td class="data">博士</td><td class="quote">3</td><td class="download">20</td></tr>
   </tbody>
 </table>
@@ -433,12 +433,18 @@ class ParsedResultPage:
 
 
 def extract_publication_year(value: str) -> int | None:
-    match = re.fullmatch(r"\s*((?:19|20)\d{2})(?:-(\d{2})(?:-(\d{2}))?)?\s*", value)
+    match = re.fullmatch(
+        r"\s*((?:19|20)\d{2})(?:-(\d{2})(?:-(\d{2}))?)?"
+        r"(?:\s+(\d{1,2}):(\d{2}))?\s*",
+        value,
+    )
     if not match:
         return None
-    year, month, day = int(match[1]), match[2], match[3]
+    year, month, day, hour, minute = int(match[1]), match[2], match[3], match[4], match[5]
     try:
         date(year, int(month or 1), int(day or 1))
+        if hour is not None and not (0 <= int(hour) <= 23 and 0 <= int(minute) <= 59):
+            return None
     except ValueError:
         return None
     return year
@@ -471,6 +477,7 @@ class _PublicTableParser(HTMLParser):
         self.cell: str | None = None
         self.buffer: list[str] = []
         self.rows: list[_RawRow] = []
+        self.in_primary_link = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         classes = set((dict(attrs).get("class") or "").split())
@@ -481,16 +488,21 @@ class _PublicTableParser(HTMLParser):
         elif self.current is not None and tag == "td":
             self.cell = next((name for name in self._MAP if name in classes), None)
             self.buffer = []
+        elif self.current is not None and tag == "a" and self.cell in {"name", "source"}:
+            self.in_primary_link = True
 
     def handle_data(self, data: str) -> None:
         text = data.strip()
-        if self.current is not None and self.cell and text:
+        capture = self.cell not in {"name", "source"} or self.in_primary_link
+        if self.current is not None and self.cell and text and capture:
             self.buffer.append(text)
-            if self.cell == "name" and text == "网络首发":
-                self.current.is_online_first = True
+        if self.current is not None and self.cell == "name" and text == "网络首发":
+            self.current.is_online_first = True
 
     def handle_endtag(self, tag: str) -> None:
-        if tag == "td" and self.current is not None and self.cell:
+        if tag == "a":
+            self.in_primary_link = False
+        elif tag == "td" and self.current is not None and self.cell:
             value = "".join(text for text in self.buffer if text != "网络首发").strip()
             setattr(self.current, self._MAP[self.cell], value)
             self.cell, self.buffer = None, []
@@ -709,7 +721,7 @@ def classify_public_search_state(
     parsed = urlparse(url)
     if "未检索到相关文献" in visible_text:
         return SearchStatus.NO_RESULTS
-    if parsed.hostname == "www.cnki.net" and "中文文献、外文文献" in visible_text:
+    if parsed.hostname == "www.cnki.net" and "中国知网" in identity:
         return SearchStatus.SUCCESS
     if parsed.hostname == CNKI_RESULT_HOST and parsed.path.casefold().startswith(CNKI_RESULT_PATH_PREFIX):
         if "题名" in visible_text and "来源" in visible_text:
@@ -727,11 +739,9 @@ class PublicCnkiSession:
         return self
 
     def search(self, query: str) -> SearchSnapshot:
-        if classify_public_search_state(
-            url=self.page.url,
-            title=self.page.title(),
-            visible_text=self.page.locator("body").inner_text(timeout=5_000),
-        ) is not SearchStatus.SUCCESS:
+        home_box = self.page.get_by_role("textbox", name="中文文献、外文文献")
+        theme_field = self.page.get_by_text("主题", exact=True)
+        if self.page.url != CNKI_HOME_URL or home_box.count() != 1 or theme_field.count() != 1:
             raise PageContractChanged("知网公开首页未就绪")
         http_status = PublicThemeSearchRunner().run(self.page, query)
         body = self.page.locator("body").inner_text(timeout=10_000)
@@ -1389,7 +1399,7 @@ Expected: 解压副本全量测试PASS；目录版本、十级层级和五个来
 
 - [ ] **Step 4: 新增并运行无状态实机冒烟脚本**
 
-`_public_cnki_live_smoke.py` 调用 `CnkiPublicSearchService`，主题词固定由 `--query` 传入，`--limit`限制1至20；输出前递归断言不存在包含 `url`、`cookie`、`token`、`download`、`detail` 的字段；断言正式记录均有篇名、期刊和年度；无论成功或异常都由上下文管理器关闭浏览器。证据只保存脱敏状态、查询、题录和目录判定。
+`_public_cnki_live_smoke.py` 调用 `CnkiPublicSearchService`，主题词固定由 `--query` 传入，`--limit`限制1至20；输出前递归断言不存在 `detail_url`、`download_url`、`pdf_url`、`caj_url`、`cookie`、`token` 等会话或地址字段，但允许公开统计字段 `downloads`；断言正式记录均有篇名、期刊和年度；无论成功或异常都由上下文管理器关闭浏览器。证据只保存脱敏状态、查询、题录和目录判定。
 
 Run:
 
