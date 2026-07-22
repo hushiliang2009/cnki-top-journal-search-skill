@@ -82,14 +82,25 @@ def classify_public_state(*, url: str, title: str, visible_text: str) -> Session
 
 def is_new_search_page_contract(*, url: str, title: str, visible_text: str) -> bool:
     parsed_url = urlparse(url)
-    hostname = (parsed_url.hostname or "").casefold()
-    if not (
-        hostname == "webvpn.hhu.edu.cn"
-        or hostname == "cnki.net"
-        or hostname.endswith(".cnki.net")
-    ):
+    try:
+        location = (
+            parsed_url.scheme.casefold(),
+            (parsed_url.hostname or "").casefold(),
+            parsed_url.port,
+            parsed_url.path,
+        )
+    except ValueError:
         return False
-    if not parsed_url.path.casefold().endswith("/kns8s/advsearch"):
+    allowed_locations = {
+        (
+            allowed.scheme.casefold(),
+            (allowed.hostname or "").casefold(),
+            allowed.port,
+            allowed.path,
+        )
+        for allowed in map(urlparse, (DIRECT_CNKI_SEARCH_URL, HHU_CNKI_SEARCH_URL))
+    }
+    if location not in allowed_locations:
         return False
     visible_identity = f"{title}\n{visible_text}".casefold()
     if "\u9ad8\u7ea7\u68c0\u7d22" not in visible_identity:

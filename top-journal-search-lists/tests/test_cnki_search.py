@@ -1,3 +1,4 @@
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,17 @@ from cnki_search.search import AdvancedSearchRunner, PlaywrightPageDriver, Profe
 
 
 FIXTURES = Path(__file__).with_name("fixtures")
+
+
+class TextInputValueParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.has_prefilled_text_input = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag == "input" and attributes.get("type", "").casefold() == "text":
+            self.has_prefilled_text_input = bool((attributes.get("value") or "").strip())
 
 
 def test_new_search_fixtures_are_sanitized_and_cover_form_controls() -> None:
@@ -46,9 +58,14 @@ def test_new_search_html_fixtures_exclude_sensitive_or_prefilled_content() -> No
 
     for content in fixtures:
         assert not any(token in content.casefold() for token in forbidden_tokens)
-        assert 'input type="text" value=' not in content.casefold()
         assert "<textarea" not in content.casefold() or "></textarea>" in content.casefold()
+        parser = TextInputValueParser()
+        parser.feed(content)
+        assert not parser.has_prefilled_text_input
 
+    parser = TextInputValueParser()
+    parser.feed('<input value="示例检索词" data-fixture="test" type="text">')
+    assert parser.has_prefilled_text_input
     assert 'a value="="' in fixtures[0]
 
 

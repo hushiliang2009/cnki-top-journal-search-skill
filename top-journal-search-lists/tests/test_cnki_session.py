@@ -10,6 +10,7 @@ from cnki_search.session import (
     DIRECT_CNKI_SEARCH_URL,
     HHU_CNKI_SEARCH_URL,
     classify_public_state,
+    is_new_search_page_contract,
     resolve_search_url,
 )
 
@@ -116,6 +117,30 @@ def test_session_rejects_new_search_without_stable_visible_marker() -> None:
     session.page = page
 
     assert session.open_search() is SessionStatus.SESSION_EXPIRED
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://evil.cnki.net/kns8s/AdvSearch",
+        "https://webvpn.hhu.edu.cn/https/not-the-cnki-proxy/kns8s/AdvSearch",
+        "https://kns.cnki.net:443/kns8s/AdvSearch",
+    ],
+)
+def test_new_search_contract_rejects_lookalike_urls(url: str) -> None:
+    assert not is_new_search_page_contract(
+        url=url,
+        title="中国知网 高级检索",
+        visible_text="高级检索",
+    )
+
+
+def test_new_search_contract_allows_ordinary_query_and_fragment() -> None:
+    assert is_new_search_page_contract(
+        url=f"{DIRECT_CNKI_SEARCH_URL}?page=1#results",
+        title="中国知网 高级检索",
+        visible_text="高级检索",
+    )
 
 
 class FakeBrowserType:
