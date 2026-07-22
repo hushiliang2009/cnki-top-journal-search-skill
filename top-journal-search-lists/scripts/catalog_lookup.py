@@ -41,7 +41,7 @@ TOP5 = [
 ]
 CATALOG_VERSION = "2026-07-15"
 CatalogIndex = dict[str, list[dict[str, Any]]]
-_DISPLAY_SUFFIX = re.compile(r"\s*(?:[（(\[【]网络首发[）)\]】]|网络首发)\s*$")
+_DISPLAY_SUFFIX = re.compile(r"\s*(?:\(网络首发\)|\[网络首发\]|【网络首发】|网络首发)\s*$")
 GENERIC_NCS_LABELS = (
     "五大",
     "部分",

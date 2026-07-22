@@ -46,6 +46,11 @@ class CatalogLookupTests(unittest.TestCase):
         self.assertEqual(result["matched_title"], "经济研究")
         self.assertEqual(result["match_method"], "controlled_display_suffix")
 
+    def test_malformed_online_first_suffix_is_not_cleaned(self):
+        result = self.module.lookup_journals(CATALOG, ["经济研究(网络首发]"])[0]
+        self.assertEqual(result["status"], "unmatched")
+        self.assertEqual(result["match_method"], None)
+
     def test_cssci_subject_category_and_all_sources_are_preserved(self):
         result = self.module.lookup_journals(CATALOG, ["经济研究"])[0]
         self.assertEqual(result["priority_level"], 6)
