@@ -97,6 +97,13 @@ def test_cnki_package_declares_the_two_exact_new_search_urls(skill_root: Path) -
         assert HHU_NEW_SEARCH_URL in content, f"{session_file.relative_to(skill_root)} 缺少 WebVPN 入口"
 
 
+def test_cnki_documentation_declares_the_two_exact_new_search_urls(skill_root: Path) -> None:
+    for relative_path in BUILD_INPUTS[:3]:
+        content = (skill_root / relative_path).read_text(encoding="utf-8")
+        assert DIRECT_NEW_SEARCH_URL in content, f"{relative_path.as_posix()} 缺少直接入口"
+        assert HHU_NEW_SEARCH_URL in content, f"{relative_path.as_posix()} 缺少 WebVPN 入口"
+
+
 def test_cnki_package_contains_only_new_search_entry(skill_root: Path) -> None:
     files = _scanned_files(skill_root)
     contents = {path: path.read_text(encoding="utf-8").casefold() for path in files}
