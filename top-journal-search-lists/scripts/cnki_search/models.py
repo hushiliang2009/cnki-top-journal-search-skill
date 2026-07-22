@@ -1,98 +1,85 @@
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any
 
 
-class SessionStatus(StrEnum):
-    LOGIN_REQUIRED = "login_required"
-    WAITING_FOR_USER = "waiting_for_user"
-    READY = "ready"
-    CAPTCHA = "captcha"
-    PERMISSION_DENIED = "permission_denied"
+class SearchStatus(StrEnum):
+    SUCCESS = "success"
+    NO_RESULTS = "no_results"
+    PARTIAL = "partial"
     RATE_LIMITED = "rate_limited"
-    SESSION_EXPIRED = "session_expired"
-    CLOSED = "closed"
+    CHALLENGE_DETECTED = "challenge_detected"
+    LOGIN_REQUIRED = "login_required"
+    FORBIDDEN = "forbidden"
+    PAGE_CONTRACT_CHANGED = "page_contract_changed"
+    NETWORK_ERROR = "network_error"
 
 
-class SearchMode(StrEnum):
-    ADVANCED = "advanced"
-    PROFESSIONAL = "professional"
-    AUTHOR = "author"
-    SENTENCE = "sentence"
-
-
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class SearchRequest:
-    mode: SearchMode
     query: str
-    pages: int = 1
-    fields: list[dict[str, Any]] = field(default_factory=list)
-    filters: dict[str, Any] = field(default_factory=dict)
+    limit: int = 20
 
     def __post_init__(self) -> None:
-        if not self.query.strip() and not self.fields:
-            raise ValueError("检索式或检索字段不能为空")
-        if not 1 <= self.pages <= 3:
-            raise ValueError("检索页数必须为 1 到 3")
+        normalized = unicodedata.normalize("NFKC", self.query).strip()
+        if not normalized:
+            raise ValueError("主题检索词不能为空")
+        if not 1 <= self.limit <= 20:
+            raise ValueError("返回数量必须为 1 到 20")
+        object.__setattr__(self, "query", normalized)
 
 
 @dataclass(slots=True)
 class PaperRecord:
     title: str
-    authors: list[str] = field(default_factory=list)
-    first_author: str = ""
-    affiliations: list[str] = field(default_factory=list)
-    journal: str = ""
-    year: int | None = None
-    volume: str = ""
-    issue: str = ""
-    pages: str = ""
-    abstract: str = ""
-    keywords: list[str] = field(default_factory=list)
-    funds: list[str] = field(default_factory=list)
-    doi: str = ""
-    detail_url: str = ""
-    source_mode: str = ""
-    searched_at: str = ""
-    download_status: str = "not_requested"
-    journal_level: str = "未匹配"
+    authors: list[str]
+    journal_raw: str
+    publication_date: str
+    publication_year: int | None
+    document_type: str
+    citations: int | None
+    downloads: int | None
+    is_online_first: bool
+    result_rank: int
+    source_database: str
+    search_query: str
+    journal_matched_title: str | None = None
+    journal_match_status: str = "unmatched"
+    journal_match_method: str | None = None
+    priority_level: int | None = None
+    priority_group: str | None = None
+    source_catalogs: list[str] = field(default_factory=list)
+    subject_categories: list[str] = field(default_factory=list)
+    ncs_internal_rank: int | None = None
+    catalog_version: str = "2026-07-15"
+    manual_review_required: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 @dataclass(slots=True)
-class ToolResponse:
-    ok: bool
-    status: SessionStatus
-    message: str = ""
-    data: Any = None
-    warnings: list[str] = field(default_factory=list)
-    next_action: str | None = None
-
-    @classmethod
-    def success(cls, status: SessionStatus, data: Any = None) -> "ToolResponse":
-        return cls(ok=True, status=status, data=data)
-
-    @classmethod
-    def failure(
-        cls,
-        status: SessionStatus,
-        message: str,
-        *,
-        next_action: str | None = None,
-    ) -> "ToolResponse":
-        return cls(ok=False, status=status, message=message, next_action=next_action)
+class SearchOutcome:
+    status: SearchStatus
+    query: str
+    records: list[PaperRecord]
+    incomplete_records: list[PaperRecord]
+    excluded_non_journal_rows: int
+    warnings: list[str]
+    searched_at: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "ok": self.ok,
+            "ok": self.status
+            in {SearchStatus.SUCCESS, SearchStatus.NO_RESULTS, SearchStatus.PARTIAL},
             "status": self.status.value,
-            "message": self.message,
-            "data": self.data,
+            "query": self.query,
+            "records": [record.to_dict() for record in self.records],
+            "incomplete_records": [record.to_dict() for record in self.incomplete_records],
+            "excluded_non_journal_rows": self.excluded_non_journal_rows,
             "warnings": list(self.warnings),
-            "next_action": self.next_action,
+            "searched_at": self.searched_at,
         }
-
