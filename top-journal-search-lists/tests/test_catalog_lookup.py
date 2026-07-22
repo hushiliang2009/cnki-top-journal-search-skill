@@ -36,6 +36,31 @@ class CatalogLookupTests(unittest.TestCase):
         self.assertEqual(result["priority_levels"], 10)
         self.assertEqual(result["source_blocks"], 5)
 
+    def test_validate_reports_exact_catalog_version(self):
+        result = self.module.validate_catalog(CATALOG)
+        self.assertEqual(result["catalog_version"], "2026-07-15")
+
+    def test_controlled_online_first_suffix_matches_without_overwriting_input(self):
+        result = self.module.lookup_journals(CATALOG, ["经济研究（网络首发）"])[0]
+        self.assertEqual(result["input"], "经济研究（网络首发）")
+        self.assertEqual(result["matched_title"], "经济研究")
+        self.assertEqual(result["match_method"], "controlled_display_suffix")
+
+    def test_cssci_subject_category_and_all_sources_are_preserved(self):
+        result = self.module.lookup_journals(CATALOG, ["经济研究"])[0]
+        self.assertEqual(result["priority_level"], 6)
+        self.assertIn("经济学", result["subject_categories"])
+        self.assertIn("CSSCI_2025_2026.md", result["source_catalogs"])
+
+    def test_normalized_key_collision_is_ambiguous(self):
+        index = {}
+        self.module._add(index, "A.B", 8, "ssci", "one.md")
+        self.module._add(index, "AB", 9, "cssci", "two.md")
+        result = self.module.lookup_journal(index, "AB")
+        self.assertEqual(result["status"], "ambiguous")
+        self.assertIsNone(result["priority_level"])
+        self.assertEqual(result["candidates"], ["A.B", "AB"])
+
     def test_default_catalog_is_bundled_reference(self):
         self.assertEqual(self.module.DEFAULT_CATALOG.resolve(), CATALOG.resolve())
 
@@ -153,7 +178,7 @@ class CatalogLookupTests(unittest.TestCase):
         )
         key = self.module.normalize_title("Ｊｏｕｒｎａｌ ｏｆ Ｌａｗ ＆ Ｅｃｏｎｏｍｉｃｓ")
         self.assertIn(key, index)
-        self.assertEqual(index[key]["matched_title"], "The Journal of Law & Economics")
+        self.assertEqual(index[key][0]["matched_title"], "The Journal of Law & Economics")
 
     def test_overlap_uses_highest_priority(self):
         result = self.module.lookup_journals(CATALOG, ["Nature"])[0]
