@@ -29,6 +29,11 @@ def test_resolve_search_url_uses_new_entry_only() -> None:
     assert resolve_search_url("https://example.com/") is None
 
 
+def test_session_exposes_only_new_search_navigation() -> None:
+    assert not hasattr(session_module, "HHU_CNKI_URL")
+    assert not hasattr(CnkiSession, "open_cnki")
+
+
 class RecordingPage:
     def __init__(
         self,

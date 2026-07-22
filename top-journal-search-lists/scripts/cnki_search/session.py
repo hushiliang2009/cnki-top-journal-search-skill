@@ -8,7 +8,6 @@ from .models import SessionStatus
 
 
 HHU_LOGIN_URL = "https://webvpn.hhu.edu.cn/https/77726476706e69737468656265737421f1e2559434357a467b1ac7a490406d301894467e2b/authserver/login?service=https%3A%2F%2Fwebvpn.hhu.edu.cn%2Flogin%3Fcas_login%3Dtrue"
-HHU_CNKI_URL = "https://webvpn.hhu.edu.cn/https/77726476706e69737468656265737421e7e056d2243e635930068cb8/"
 DIRECT_CNKI_SEARCH_URL = "https://kns.cnki.net/kns8s/AdvSearch"
 HHU_CNKI_SEARCH_URL = "https://webvpn.hhu.edu.cn/https/77726476706e69737468656265737421fbf952d2243e635930068cb8/kns8s/AdvSearch"
 
@@ -123,12 +122,6 @@ class CnkiSession:
             self.page = self.context.new_page()
         self.page.goto(HHU_LOGIN_URL, wait_until="domcontentloaded")
         return SessionStatus.WAITING_FOR_USER
-
-    def open_cnki(self) -> SessionStatus:
-        if self.page is None:
-            return SessionStatus.LOGIN_REQUIRED
-        self.page.goto(HHU_CNKI_URL, wait_until="domcontentloaded")
-        return self.status()
 
     def open_search(self) -> SessionStatus:
         if self._closed:
