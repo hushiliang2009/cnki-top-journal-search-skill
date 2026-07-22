@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import asdict, dataclass, field
+from datetime import date
 from enum import StrEnum
 from typing import Any
 
@@ -97,4 +98,5 @@ def _has_complete_bibliography(record: PaperRecord) -> bool:
         and bool(record.journal_raw.strip())
         and isinstance(record.publication_year, int)
         and not isinstance(record.publication_year, bool)
+        and 1900 <= record.publication_year <= date.today().year + 1
     )

@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from cnki_search import results
+from cnki_search.search import PageContractChanged
 
 
 def test_public_result_requires_title_journal_and_valid_year(fixtures: Path) -> None:
@@ -32,8 +33,10 @@ def test_incomplete_rows_never_enter_formal_records(fixtures: Path) -> None:
 
 
 def test_public_record_serialization_contains_no_url_fields(fixtures: Path) -> None:
+    html = (fixtures / "public_results.html").read_text(encoding="utf-8")
+    assert "href=" in html
     payload = results.parse_public_result_page(
-        (fixtures / "public_results.html").read_text(encoding="utf-8"),
+        html,
         query="主题",
         limit=20,
     ).records[0].to_dict()
@@ -49,6 +52,8 @@ def test_public_record_serialization_contains_no_url_fields(fixtures: Path) -> N
         ("2026-13-40", None),
         ("2026-07-20 24:00", None),
         ("2026年07月", None),
+        ("1899", None),
+        ("2100", None),
     ],
 )
 def test_publication_year_requires_a_valid_iso_date(value: str, expected: int | None) -> None:
@@ -64,3 +69,8 @@ def test_no_results_page_contains_no_records(fixtures: Path) -> None:
     assert parsed.records == []
     assert parsed.incomplete_records == []
     assert parsed.total_rows == 0
+
+
+def test_visible_result_markers_without_public_table_stop_on_contract_change() -> None:
+    with pytest.raises(PageContractChanged, match="结果表"):
+        results.parse_public_result_page("<main>题名 作者 来源 日期 数据库</main>", query="主题", limit=20)

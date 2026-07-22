@@ -6,6 +6,7 @@ from datetime import date
 from html.parser import HTMLParser
 
 from .models import PaperRecord
+from .search import PageContractChanged
 
 
 @dataclass(slots=True)
@@ -67,11 +68,13 @@ class _PublicTableParser(HTMLParser):
         self.buffer: list[str] = []
         self.rows: list[_RawRow] = []
         self.in_primary_link = False
+        self.found_public_table = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         classes = set((dict(attrs).get("class") or "").split())
         if tag == "table" and "result-table-list" in classes:
             self.in_table = True
+            self.found_public_table = True
         elif self.in_table and tag == "tr":
             self.current = _RawRow()
         elif self.current is not None and tag == "td":
@@ -130,6 +133,8 @@ def parse_public_result_page(html: str, *, query: str, limit: int) -> ParsedResu
         raise ValueError("返回数量必须为 1 到 20")
     parser = _PublicTableParser()
     parser.feed(html)
+    if not parser.found_public_table and "题名" in html and "来源" in html:
+        raise PageContractChanged("知网公开结果表结构已变化")
     records: list[PaperRecord] = []
     incomplete: list[PaperRecord] = []
     excluded = 0

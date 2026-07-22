@@ -5,6 +5,7 @@ import pytest
 import cnki_search.session as session_module
 from cnki_search.browser import BrowserFactory
 from cnki_search.models import SearchStatus
+from cnki_search.session import PublicCnkiSession
 
 
 def test_public_session_uses_only_cnki_home() -> None:
@@ -50,3 +51,62 @@ def test_browser_launch_is_headless_and_has_no_persistent_state() -> None:
     assert "user_data_dir" not in fake.chromium.launch_kwargs
     assert "storage_state" not in fake.chromium.launch_kwargs
     assert "proxy" not in fake.chromium.launch_kwargs
+
+
+class _Closable:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class RestrictedPage:
+    def __init__(self, text: str) -> None:
+        self.url = "https://www.cnki.net/"
+        self.text = text
+        self.box_accessed = False
+
+    def title(self) -> str:
+        return "中国知网"
+
+    def goto(self, url: str, *, wait_until: str) -> None:
+        assert (url, wait_until) == (session_module.CNKI_HOME_URL, "domcontentloaded")
+
+    def locator(self, selector: str) -> "RestrictedPage":
+        assert selector == "body"
+        return self
+
+    def inner_text(self, *, timeout: int) -> str:
+        assert timeout == 10_000
+        return self.text
+
+    def content(self) -> str:
+        return "<main>restricted</main>"
+
+    def get_by_role(self, *_args: object, **_kwargs: object) -> object:
+        self.box_accessed = True
+        raise AssertionError("受限首页不得访问主题框")
+
+    def get_by_text(self, *_args: object, **_kwargs: object) -> object:
+        self.box_accessed = True
+        raise AssertionError("受限首页不得访问主题框")
+
+
+def test_session_returns_initial_restriction_before_theme_contract_and_closes_resources() -> None:
+    page = RestrictedPage("403 Forbidden")
+    context = _Closable()
+    context.new_page = lambda: page  # type: ignore[attr-defined]
+    browser = _Closable()
+    browser.new_context = lambda **_kwargs: context  # type: ignore[attr-defined]
+
+    class Factory:
+        def launch_ephemeral(self) -> _Closable:
+            return browser
+
+    session = PublicCnkiSession(browser_factory=Factory())
+    with session:
+        snapshot = session.search("主题")
+        assert session_module.classify_public_search_state(**snapshot.state_arguments()) is SearchStatus.FORBIDDEN
+    assert page.box_accessed is False
+    assert context.closed and browser.closed

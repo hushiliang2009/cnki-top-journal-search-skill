@@ -80,3 +80,17 @@ def test_catalog_version_is_fixed_and_not_a_constructor_argument() -> None:
             is_online_first=False, result_rank=1, source_database="CNKI", search_query="主题",
             catalog_version="other-version",
         )
+
+
+@pytest.mark.parametrize("year", [1899, 2100])
+def test_outcome_rejects_formal_records_with_unverifiable_year(year: int) -> None:
+    with pytest.raises(ValueError, match="发表年度"):
+        SearchOutcome(
+            SearchStatus.SUCCESS,
+            "主题",
+            [_record(year=year)],
+            [],
+            0,
+            [],
+            "2026-07-22T00:00:00+00:00",
+        )

@@ -81,6 +81,17 @@ class PublicCnkiSession:
     def search(self, query: str) -> SearchSnapshot:
         if self.page is None:
             raise RuntimeError("公开检索会话未启动")
+        body = self.page.locator("body").inner_text(timeout=10_000)
+        initial = SearchSnapshot(self.page.content(), self.page.url, self.page.title(), body)
+        if classify_public_search_state(**initial.state_arguments()) in {
+            SearchStatus.CHALLENGE_DETECTED,
+            SearchStatus.LOGIN_REQUIRED,
+            SearchStatus.FORBIDDEN,
+            SearchStatus.RATE_LIMITED,
+            SearchStatus.NETWORK_ERROR,
+            SearchStatus.NO_RESULTS,
+        }:
+            return initial
         home_box = self.page.get_by_role("textbox", name="中文文献、外文文献")
         theme_field = self.page.get_by_text("主题", exact=True)
         if self.page.url != CNKI_HOME_URL or home_box.count() != 1 or theme_field.count() != 1:
