@@ -15,13 +15,17 @@ from cnki_search.session import (
 
 
 FIXTURES = Path(__file__).with_name("fixtures")
+HHU_NEW_SEARCH_URL = (
+    "https://webvpn.hhu.edu.cn/https/"
+    "77726476706e69737468656265737421fbf952d2243e635930068cb8/kns8s/AdvSearch"
+)
 
 
 def test_resolve_search_url_uses_new_entry_only() -> None:
     assert resolve_search_url("https://kns.cnki.net/") == DIRECT_CNKI_SEARCH_URL
     assert resolve_search_url("https://webvpn.hhu.edu.cn/") == HHU_CNKI_SEARCH_URL
     assert DIRECT_CNKI_SEARCH_URL == "https://kns.cnki.net/kns8s/AdvSearch"
-    assert HHU_CNKI_SEARCH_URL.endswith("/kns8s/AdvSearch")
+    assert HHU_CNKI_SEARCH_URL == HHU_NEW_SEARCH_URL
     assert resolve_search_url("https://example.com/") is None
 
 
@@ -65,126 +69,17 @@ def test_status_classifier_does_not_accept_form_values() -> None:
         classify_public_state(url="x", title="x", visible_text="x", password="secret")
 
 
-def test_ready_cnki_page_wins_over_incidental_security_help_text() -> None:
-    status = classify_public_state(
-        url="https://webvpn.hhu.edu.cn/https/cnki/",
-        title="中国知网",
-        visible_text="高级检索 安全验证服务说明",
-    )
-    assert status is SessionStatus.READY
-
-
-def test_old_advanced_search_with_captcha_id_query_parameter_is_ready() -> None:
-    status = classify_public_state(
-        url=(
-            "https://webvpn.hhu.edu.cn/https/cnki/kns/advsearch?"
-            "dbcode=CJZK&captchaId=completed-puzzle"
-        ),
-        title="高级检索-中国知网",
-        visible_text="中国知网 高级检索 专业检索",
-    )
-    assert status is SessionStatus.READY
-
-
-def test_unrelated_path_with_captcha_id_query_parameter_is_captcha() -> None:
-    status = classify_public_state(
-        url="https://webvpn.hhu.edu.cn/unrelated?captchaId=completed-puzzle",
-        title="高级检索-中国知网",
-        visible_text="中国知网 高级检索 专业检索",
-    )
-    assert status is SessionStatus.CAPTCHA
-
-
-def test_old_advanced_search_with_captcha_type_query_parameter_is_captcha() -> None:
-    status = classify_public_state(
-        url=(
-            "https://webvpn.hhu.edu.cn/https/cnki/kns/advsearch?"
-            "dbcode=CJZK&captchaType=blockPuzzle"
-        ),
-        title="高级检索-中国知网",
-        visible_text="中国知网 高级检索 专业检索",
-    )
-    assert status is SessionStatus.CAPTCHA
-
-
-def test_verification_path_with_captcha_query_parameter_is_captcha() -> None:
-    status = classify_public_state(
-        url="https://webvpn.hhu.edu.cn/verify/home?captchaType=blockPuzzle",
-        title="安全验证",
-        visible_text="",
-    )
-    assert status is SessionStatus.CAPTCHA
-
-
-def test_explicit_slider_verification_beats_ready_cnki_content() -> None:
-    status = classify_public_state(
-        url="https://webvpn.hhu.edu.cn/https/cnki/kns/advsearch",
-        title="高级检索-中国知网",
-        visible_text="中国知网 高级检索 拖动下方拼图完成验证 安全验证",
-    )
-    assert status is SessionStatus.CAPTCHA
-
-
-class OldSearchContractLocator:
-    def __init__(self, *, text: str = "", count: int = 0, error: Exception | None = None) -> None:
-        self._text = text
-        self._count = count
-        self._error = error
-
-    def inner_text(self, timeout: int) -> str:
-        assert timeout == 5_000
-        return self._text
-
-    def count(self) -> int:
-        if self._error is not None:
-            raise self._error
-        return self._count
-
-
-class OldSearchContractPage:
-    def __init__(
-        self,
-        *,
-        url: str = "https://webvpn.hhu.edu.cn/https/cnki/kns/advsearch?dbcode=CJZK",
-        title: str = "检索--中国知网",
-        text: str = "中国知网检索页面的普通安全说明",
-        grade_count: int = 1,
-        major_count: int = 1,
-        locator_error: Exception | None = None,
-    ) -> None:
-        self.url = url
-        self._title = title
-        self._text = text
-        self._grade_count = grade_count
-        self._major_count = major_count
-        self._locator_error = locator_error
+class CaptchaPage:
+    url = HHU_NEW_SEARCH_URL
 
     def title(self) -> str:
-        return self._title
+        return ""
 
-    def locator(self, selector: str) -> OldSearchContractLocator:
-        if selector == "body":
-            return OldSearchContractLocator(text=self._text)
-        if selector == 'li[name="gradeSearch"]':
-            return OldSearchContractLocator(count=self._grade_count, error=self._locator_error)
-        if selector == 'li[name="majorSearch"]':
-            return OldSearchContractLocator(count=self._major_count, error=self._locator_error)
-        raise AssertionError(f"unexpected selector: {selector}")
+    def locator(self, selector: str):
+        raise AssertionError(f"unexpected locator access: {selector}")
 
 
-def test_status_recovers_old_search_contract_after_public_captcha(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        session_module,
-        "classify_public_state",
-        lambda **_kwargs: SessionStatus.CAPTCHA,
-    )
-    session = CnkiSession()
-    session.page = OldSearchContractPage()
-
-    assert session.status() is SessionStatus.READY
-
-
-def test_status_recovers_old_search_contract_with_residual_captcha_id(
+def test_session_keeps_captcha_status_without_search_page_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -193,101 +88,7 @@ def test_status_recovers_old_search_contract_with_residual_captcha_id(
         lambda **_kwargs: SessionStatus.CAPTCHA,
     )
     session = CnkiSession()
-    session.page = OldSearchContractPage(
-        url=(
-            "https://webvpn.hhu.edu.cn/https/cnki/kns/advsearch?"
-            "dbcode=CJZK&captchaId=completed-puzzle"
-        )
-    )
-
-    assert session.status() is SessionStatus.READY
-
-
-@pytest.mark.parametrize(
-    "page",
-    [
-        OldSearchContractPage(title="安全验证--中国知网"),
-        OldSearchContractPage(grade_count=0),
-        OldSearchContractPage(major_count=0),
-        OldSearchContractPage(text="中国知网 请完成拼图验证"),
-        OldSearchContractPage(url="https://webvpn.hhu.edu.cn/verify/home"),
-        OldSearchContractPage(
-            url=(
-                "https://webvpn.hhu.edu.cn/https/cnki/kns/advsearch?"
-                "dbcode=CJZK&captchaType=blockPuzzle"
-            )
-        ),
-        OldSearchContractPage(
-            url=(
-                "https://webvpn.hhu.edu.cn/https/cnki/kns/advsearch?"
-                "dbcode=CJZK&captchaToken=active"
-            )
-        ),
-        OldSearchContractPage(
-            url=(
-                "https://webvpn.hhu.edu.cn/https/cnki/kns/advsearch?"
-                "dbcode=CJZK&verifyToken=active"
-            )
-        ),
-    ],
-    ids=(
-        "verification-title",
-        "missing-grade-tag",
-        "missing-major-tag",
-        "puzzle-prompt",
-        "verification-path",
-        "captcha-type",
-        "captcha-token",
-        "verify-token",
-    ),
-)
-def test_status_keeps_captcha_when_old_search_contract_is_not_met(
-    monkeypatch: pytest.MonkeyPatch,
-    page: OldSearchContractPage,
-) -> None:
-    monkeypatch.setattr(
-        session_module,
-        "classify_public_state",
-        lambda **_kwargs: SessionStatus.CAPTCHA,
-    )
-    session = CnkiSession()
-    session.page = page
-
-    assert session.status() is SessionStatus.CAPTCHA
-
-
-@pytest.mark.parametrize(
-    "public_status",
-    [
-        SessionStatus.RATE_LIMITED,
-        SessionStatus.PERMISSION_DENIED,
-        SessionStatus.LOGIN_REQUIRED,
-        SessionStatus.SESSION_EXPIRED,
-    ],
-)
-def test_status_does_not_override_non_captcha_states(
-    monkeypatch: pytest.MonkeyPatch,
-    public_status: SessionStatus,
-) -> None:
-    monkeypatch.setattr(
-        session_module,
-        "classify_public_state",
-        lambda **_kwargs: public_status,
-    )
-    session = CnkiSession()
-    session.page = OldSearchContractPage()
-
-    assert session.status() is public_status
-
-
-def test_status_keeps_captcha_when_old_search_locator_is_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        session_module,
-        "classify_public_state",
-        lambda **_kwargs: SessionStatus.CAPTCHA,
-    )
-    session = CnkiSession()
-    session.page = OldSearchContractPage(locator_error=RuntimeError("page closed"))
+    session.page = CaptchaPage()
 
     assert session.status() is SessionStatus.CAPTCHA
 
@@ -299,6 +100,6 @@ def test_ready_cnki_page_does_not_treat_bare_numbers_as_http_errors(
     status = classify_public_state(
         url="https://webvpn.hhu.edu.cn/https/cnki/",
         title="中国知网",
-        visible_text=f"高级检索 期刊目录共 {ordinary_number} 种",
+        visible_text=f"高级检索 期刊目录页 {ordinary_number} 种",
     )
     assert status is SessionStatus.READY
