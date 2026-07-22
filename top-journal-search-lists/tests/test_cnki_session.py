@@ -6,79 +6,23 @@ import cnki_search.session as session_module
 from cnki_search.browser import BrowserFactory
 from cnki_search.models import SessionStatus
 from cnki_search.session import (
-    DIRECT_CNKI_OLD_SEARCH_URL,
-    HHU_CNKI_OLD_SEARCH_URL,
     CnkiSession,
+    DIRECT_CNKI_SEARCH_URL,
+    HHU_CNKI_SEARCH_URL,
     classify_public_state,
-    resolve_old_search_url,
+    resolve_search_url,
 )
 
 
 FIXTURES = Path(__file__).with_name("fixtures")
 
 
-def test_session_module_exposes_old_search_contract() -> None:
-    assert hasattr(session_module, "DIRECT_CNKI_OLD_SEARCH_URL")
-    assert hasattr(session_module, "HHU_CNKI_OLD_SEARCH_URL")
-    assert hasattr(session_module, "resolve_old_search_url")
-
-
-def test_hhu_cnki_home_url_does_not_fix_record_visit_parameter() -> None:
-    assert "wrdrecordvisit" not in session_module.HHU_CNKI_URL
-
-
-@pytest.mark.parametrize(
-    ("current_url", "expected"),
-    [
-        ("https://webvpn.hhu.edu.cn/", HHU_CNKI_OLD_SEARCH_URL),
-        ("https://kns.cnki.net/starter/index", DIRECT_CNKI_OLD_SEARCH_URL),
-    ],
-)
-def test_resolve_old_search_url_by_current_session(
-    current_url: str,
-    expected: str,
-) -> None:
-    assert resolve_old_search_url(current_url) == expected
-    assert "wrdrecordvisit" not in expected
-
-
-def test_resolve_old_search_url_rejects_unrelated_page() -> None:
-    assert resolve_old_search_url("https://example.com/") is None
-
-
-def test_session_exposes_old_search_navigation() -> None:
-    assert hasattr(CnkiSession, "open_old_search")
-
-
-class ReadyBody:
-    def inner_text(self, timeout: int) -> str:
-        assert timeout == 5_000
-        return "中国知网 高级检索 专业检索"
-
-
-class RecordingOldSearchPage:
-    def __init__(self, current_url: str) -> None:
-        self.url = current_url
-        self.visited: list[str] = []
-
-    def goto(self, url: str, *, wait_until: str) -> None:
-        assert wait_until == "domcontentloaded"
-        self.visited.append(url)
-        self.url = url
-
-    def title(self) -> str:
-        return "高级检索-中国知网"
-
-    def locator(self, selector: str) -> ReadyBody:
-        assert selector == "body"
-        return ReadyBody()
-
-
-def test_session_opens_old_search_for_webvpn() -> None:
-    session = CnkiSession()
-    session.page = RecordingOldSearchPage("https://webvpn.hhu.edu.cn/")
-    assert session.open_old_search() is SessionStatus.READY
-    assert session.page.visited == [HHU_CNKI_OLD_SEARCH_URL]
+def test_resolve_search_url_uses_new_entry_only() -> None:
+    assert resolve_search_url("https://kns.cnki.net/") == DIRECT_CNKI_SEARCH_URL
+    assert resolve_search_url("https://webvpn.hhu.edu.cn/") == HHU_CNKI_SEARCH_URL
+    assert DIRECT_CNKI_SEARCH_URL == "https://kns.cnki.net/kns8s/AdvSearch"
+    assert HHU_CNKI_SEARCH_URL.endswith("/kns8s/AdvSearch")
+    assert resolve_search_url("https://example.com/") is None
 
 
 class FakeBrowserType:

@@ -47,25 +47,22 @@ def test_cnki_documentation_excludes_evasion_and_password_collection(skill_root:
     assert "绕过反爬" not in combined
 
 
-def test_cnki_documentation_requires_old_search_entry(skill_root: Path) -> None:
-    documents = (
-        "SKILL.md",
-        "README.md",
-        "references/cnki-search-reference.md",
-    )
-    for document in documents:
-        content = (skill_root / document).read_text(encoding="utf-8")
-        for required in (
-            "https://kns.cnki.net/kns/advsearch?dbcode=CJZK",
-            "https://webvpn.hhu.edu.cn/https/77726476706e69737468656265737421fbf952d2243e635930068cb8/kns/advsearch?dbcode=CJZK",
-            "高级检索和专业检索均使用旧版",
-            "按当前会话主机",
-            "不固定 `wrdrecordvisit`",
-            "验证码",
-            "403",
-            "429",
-            "权限不足",
-            "会话失效",
-            "停止",
-        ):
-            assert required in content, f"{document} 缺少 {required}"
+def test_cnki_package_contains_only_new_search_entry(skill_root: Path) -> None:
+    included = [
+        skill_root / "scripts" / "cnki_search",
+        skill_root / "mcpb" / "src" / "cnki_search",
+        skill_root / "SKILL.md",
+        skill_root / "README.md",
+        skill_root / "references" / "cnki-search-reference.md",
+    ]
+    text = "\n".join(
+        path.read_text(encoding="utf-8")
+        if path.is_file()
+        else "\n".join(p.read_text(encoding="utf-8") for p in path.rglob("*.py"))
+        for path in included
+    ).casefold()
+    assert "kns8s/advsearch" in text
+    assert "kns/advsearch" not in text
+    assert "resolve_old_search_url" not in text
+    assert "open_old_search" not in text
+    assert "assert_old_search_page" not in text
