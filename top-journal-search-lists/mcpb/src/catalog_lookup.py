@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,9 @@ TOP5 = [
     "Quarterly Journal of Economics",
     "Review of Economic Studies",
 ]
+CATALOG_VERSION = "2026-07-15"
+CatalogIndex = dict[str, list[dict[str, Any]]]
+_DISPLAY_SUFFIX = re.compile(r"\s*(?:\(网络首发\)|\[网络首发\]|【网络首发】|网络首发)\s*$")
 GENERIC_NCS_LABELS = (
     "五大",
     "部分",
@@ -82,6 +86,7 @@ def validate_catalog(path: Path = DEFAULT_CATALOG) -> dict[str, Any]:
     levels = [int(value) for value in re.findall(r"(?m)^  - level: (\d+)$", text)]
     groups = re.findall(r'(?m)^    group: "([^"]+)"$', text)
     blocks = _extract_source_blocks(text)
+    version_match = re.search(r'(?m)^catalog_version: "([^"]+)"$', text)
     if levels != list(range(1, 11)):
         raise ValueError(f"综合目录检索层级无效：{levels}")
     if groups != EXPECTED_GROUPS:
@@ -89,6 +94,8 @@ def validate_catalog(path: Path = DEFAULT_CATALOG) -> dict[str, Any]:
     sources = list(blocks)
     if sources != EXPECTED_SOURCES:
         raise ValueError(f"综合目录来源文件无效：{sources}")
+    if version_match is None or version_match.group(1) != CATALOG_VERSION:
+        raise ValueError("综合目录版本无效")
     return {
         "valid": True,
         "catalog": str(path),
@@ -96,6 +103,7 @@ def validate_catalog(path: Path = DEFAULT_CATALOG) -> dict[str, Any]:
         "priority_groups": groups,
         "source_blocks": len(blocks),
         "sources": sources,
+        "catalog_version": CATALOG_VERSION,
     }
 
 
@@ -118,31 +126,51 @@ def _keys_for_title(title: str) -> set[str]:
     return keys
 
 
+def clean_lookup_title(value: str) -> tuple[str, str]:
+    """Remove only the supported online-first display suffix."""
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    cleaned = _DISPLAY_SUFFIX.sub("", normalized).strip()
+    method = "controlled_display_suffix" if cleaned != normalized else "normalized_exact"
+    return cleaned, method
+
+
 def _add(
-    index: dict[str, dict[str, Any]],
+    index: CatalogIndex,
     title: str,
     level: int,
     group: str,
     source: str,
     *,
     ncs_internal_rank: int | None = None,
+    subject_category: str | None = None,
 ) -> None:
     title = _clean_title(title)
     keys = _keys_for_title(title)
     if not keys or max(map(len, keys)) < 2:
         return
 
-    existing = next((index[key] for key in keys if key in index), None)
+    existing = next(
+        (
+            candidate
+            for key in keys
+            for candidate in index.get(key, [])
+            if candidate["matched_title"] == title
+        ),
+        None,
+    )
     if existing is None:
         existing = {
             "matched_title": title,
             "priority_level": level,
             "priority_group": group,
             "source_catalogs": [],
+            "subject_categories": [],
             "ncs_internal_rank": ncs_internal_rank,
         }
     if source not in existing["source_catalogs"]:
         existing["source_catalogs"].append(source)
+    if subject_category and subject_category not in existing["subject_categories"]:
+        existing["subject_categories"].append(subject_category)
     if level < existing["priority_level"]:
         existing["matched_title"] = title
         existing["priority_level"] = level
@@ -153,10 +181,11 @@ def _add(
             ncs_internal_rank if old_rank is None else min(old_rank, ncs_internal_rank)
         )
     for key in keys:
-        index[key] = existing
+        if existing not in index.setdefault(key, []):
+            index[key].append(existing)
 
 
-def _index_ncs(index: dict[str, dict[str, Any]], text: str) -> None:
+def _index_ncs(index: CatalogIndex, text: str) -> None:
     social_heading = "### 🌟 置顶板块：人文、哲学与社会科学（含交叉研究）期刊"
     first_main_heading = "### 第一部分：Nature"
     social_start = text.find(social_heading)
@@ -183,7 +212,7 @@ def _index_ncs(index: dict[str, dict[str, Any]], text: str) -> None:
             )
 
 
-def _index_top(index: dict[str, dict[str, Any]], text: str) -> None:
+def _index_top(index: CatalogIndex, text: str) -> None:
     current_level = 7
     current_group = "other_top_journals"
     for line in text.splitlines():
@@ -208,34 +237,60 @@ def _index_top(index: dict[str, dict[str, Any]], text: str) -> None:
 
 
 def _index_numbered_source(
-    index: dict[str, dict[str, Any]],
+    index: CatalogIndex,
     text: str,
     level: int,
     group: str,
     source: str,
 ) -> None:
+    category: str | None = None
     for line in text.splitlines():
+        heading = re.match(r"^###\s+(.+)$", line)
+        if heading:
+            category = heading.group(1).strip()
+            continue
         match = re.match(r"^\d+\.\s+(.+)$", line)
         if match:
-            _add(index, match.group(1), level, group, source)
+            _add(
+                index,
+                match.group(1),
+                level,
+                group,
+                source,
+                subject_category=category,
+            )
 
 
-def _index_cssci(index: dict[str, dict[str, Any]], text: str) -> None:
+def _index_cssci(index: CatalogIndex, text: str) -> None:
     for line in text.splitlines():
-        match = re.match(r"^\|\s*\d+\s*\|\s*([^|]+?)\s*\|", line)
+        match = re.match(r"^\|\s*\d+\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|", line)
         if match:
-            _add(index, match.group(1), 9, "cssci", "CSSCI_2025_2026.md")
+            _add(
+                index,
+                match.group(1),
+                9,
+                "cssci",
+                "CSSCI_2025_2026.md",
+                subject_category=match.group(2).strip(),
+            )
 
 
-def build_index(path: Path = DEFAULT_CATALOG) -> dict[str, dict[str, Any]]:
+def build_index(path: Path = DEFAULT_CATALOG) -> CatalogIndex:
     """Build a normalized journal index and retain each journal's best rank."""
     validate_catalog(path)
     text = _read_catalog(path)
     blocks = _extract_source_blocks(text)
-    index: dict[str, dict[str, Any]] = {}
+    index: CatalogIndex = {}
 
     for title in TOP5:
-        _add(index, title, 1, "economics_top5", "Top_Academic_Journals_all.md")
+        _add(
+            index,
+            title,
+            1,
+            "economics_top5",
+            "Top_Academic_Journals_all.md",
+            subject_category="经济学 Top 5",
+        )
 
     _index_ncs(index, blocks["NCS_PNAS_Directory.md"])
     _index_top(index, blocks["Top_Academic_Journals_all.md"])
@@ -257,36 +312,50 @@ def build_index(path: Path = DEFAULT_CATALOG) -> dict[str, dict[str, Any]]:
     return index
 
 
+def lookup_journal(index: CatalogIndex, journal: str) -> dict[str, Any]:
+    """Look up one journal while preserving ambiguous normalized matches."""
+    cleaned, method = clean_lookup_title(journal)
+    candidates: list[dict[str, Any]] = []
+    for key in _keys_for_title(cleaned):
+        for candidate in index.get(key, []):
+            if candidate not in candidates:
+                candidates.append(candidate)
+    base = {
+        "input": journal,
+        "normalized": normalize_title(cleaned),
+        "catalog_version": CATALOG_VERSION,
+        "manual_review_required": True,
+    }
+    empty = {
+        "matched_title": None,
+        "priority_level": None,
+        "priority_group": None,
+        "source_catalogs": [],
+        "subject_categories": [],
+        "ncs_internal_rank": None,
+    }
+    if not candidates:
+        return base | {"status": "unmatched", "match_method": None, "candidates": [], **empty}
+    if len(candidates) > 1:
+        return base | {
+            "status": "ambiguous",
+            "match_method": None,
+            "candidates": [item["matched_title"] for item in candidates],
+            **empty,
+        }
+    return base | {
+        "status": "matched",
+        "match_method": method,
+        "candidates": [],
+        "manual_review_required": False,
+        **candidates[0],
+    }
+
+
 def lookup_journals(path: Path, journals: list[str]) -> list[dict[str, Any]]:
     """Look up journals and return their highest priority memberships."""
     index = build_index(path)
-    results: list[dict[str, Any]] = []
-    for journal in journals:
-        keys = _keys_for_title(journal)
-        match = next((index[key] for key in keys if key in index), None)
-        if match is None:
-            results.append(
-                {
-                    "input": journal,
-                    "normalized": normalize_title(journal),
-                    "matched_title": None,
-                    "priority_level": None,
-                    "priority_group": None,
-                    "source_catalogs": [],
-                    "ncs_internal_rank": None,
-                    "status": "unmatched",
-                }
-            )
-        else:
-            results.append(
-                {
-                    "input": journal,
-                    "normalized": normalize_title(journal),
-                    "status": "matched",
-                    **match,
-                }
-            )
-    return results
+    return [lookup_journal(index, journal) for journal in journals]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -307,6 +376,8 @@ def main() -> int:
         result: Any = validate_catalog(args.catalog)
     else:
         result = lookup_journals(args.catalog, args.journals)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

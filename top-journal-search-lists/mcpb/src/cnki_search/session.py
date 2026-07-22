@@ -1,197 +1,110 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import urlparse
 
 from .browser import BrowserFactory, start_playwright
-from .models import SessionStatus
+from .models import SearchStatus
+from .search import PageContractChanged, PublicThemeSearchRunner
 
 
-HHU_LOGIN_URL = "https://webvpn.hhu.edu.cn/https/77726476706e69737468656265737421f1e2559434357a467b1ac7a490406d301894467e2b/authserver/login?service=https%3A%2F%2Fwebvpn.hhu.edu.cn%2Flogin%3Fcas_login%3Dtrue"
-DIRECT_CNKI_SEARCH_URL = "https://kns.cnki.net/kns8s/AdvSearch"
-HHU_CNKI_SEARCH_URL = "https://webvpn.hhu.edu.cn/https/77726476706e69737468656265737421fbf952d2243e635930068cb8/kns8s/AdvSearch"
+CNKI_HOME_URL = "https://www.cnki.net/"
+CNKI_RESULT_HOST = "kns.cnki.net"
+CNKI_RESULT_PATH_PREFIX = "/kns8s/defaultresult/"
 
 
-def resolve_search_url(current_url: str) -> str | None:
-    hostname = (urlparse(current_url).hostname or "").casefold()
-    if hostname == "webvpn.hhu.edu.cn":
-        return HHU_CNKI_SEARCH_URL
-    if hostname == "cnki.net" or hostname.endswith(".cnki.net"):
-        return DIRECT_CNKI_SEARCH_URL
-    return None
+@dataclass(frozen=True, slots=True)
+class SearchSnapshot:
+    html: str
+    url: str
+    title: str
+    visible_text: str
+    http_status: int | None = None
+
+    def state_arguments(self) -> dict[str, Any]:
+        return {
+            "url": self.url,
+            "title": self.title,
+            "visible_text": self.visible_text,
+            "http_status": self.http_status,
+        }
 
 
-def classify_public_state(*, url: str, title: str, visible_text: str) -> SessionStatus:
-    haystack = f"{url}\n{title}\n{visible_text}".casefold()
-    if any(
-        token in haystack
-        for token in (
-            "http 429",
-            "429 too many requests",
-            "\u8bbf\u95ee\u8fc7\u4e8e\u9891\u7e41",
-            "\u64cd\u4f5c\u9891\u7e41",
-            "too many requests",
-        )
+def classify_public_search_state(
+    *, url: str, title: str, visible_text: str, http_status: int | None = None,
+) -> SearchStatus:
+    identity = f"{url}\n{title}\n{visible_text}".casefold()
+    if http_status in {401, 403} or any(
+        token in identity for token in ("401 unauthorized", "403 forbidden", "无权访问", "拒绝访问")
     ):
-        return SessionStatus.RATE_LIMITED
-    if any(
-        token in haystack
-        for token in (
-            "http 403",
-            "403 forbidden",
-            "\u65e0\u6743\u8bbf\u95ee",
-            "\u6743\u9650\u4e0d\u8db3",
-            "permission denied",
-        )
+        return SearchStatus.FORBIDDEN
+    if http_status == 429 or any(
+        token in identity for token in ("429 too many requests", "访问过于频繁", "操作频繁")
     ):
-        return SessionStatus.PERMISSION_DENIED
-    parsed_url = urlparse(url)
-    path = parsed_url.path.casefold()
-    verification_url = any(token in path for token in ("captcha", "verify"))
-    verification_query_keys = {
-        key.casefold()
-        for key, _value in parse_qsl(parsed_url.query, keep_blank_values=True)
-        if "captcha" in key.casefold() or "verify" in key.casefold()
-    }
-    explicit_verification = any(
-        token in haystack
-        for token in (
-            "\u8bf7\u8f93\u5165\u9a8c\u8bc1\u7801",
-            "\u6ed1\u52a8\u4e0b\u65b9\u62fc\u56fe\u5b8c\u6210\u9a8c\u8bc1",
-            "\u8bf7\u5b8c\u6210\u62fc\u56fe\u9a8c\u8bc1",
-        )
-    )
-    verification_title = title.strip().casefold() == "\u5b89\u5168\u9a8c\u8bc1"
-    if (
-        verification_url
-        or verification_title
-        or explicit_verification
-        or verification_query_keys
-    ):
-        return SessionStatus.CAPTCHA
-    title_identity = title.casefold()
-    authenticated_resource_page = (
-        "webvpn\u7cfb\u7edf" in title_identity
-        and "\u8d44\u6e90\u7ad9\u70b9" in title_identity
-        and "\u4e2d\u56fd\u77e5\u7f51" in visible_text.casefold()
-    )
-    if authenticated_resource_page:
-        return SessionStatus.READY
-    if (
-        "authserver/login" in haystack
-        or "\u7edf\u4e00\u8eab\u4efd\u8ba4\u8bc1" in haystack
-        or 'type="password"' in haystack
-    ):
-        return SessionStatus.LOGIN_REQUIRED
-    if any(
-        token in haystack
-        for token in ("\u4e2d\u56fd\u77e5\u7f51", "\u9ad8\u7ea7\u68c0\u7d22", "\u4e13\u4e1a\u68c0\u7d22", "kns.cnki")
-    ):
-        return SessionStatus.READY
-    if "webvpn.hhu.edu.cn" in haystack:
-        return SessionStatus.SESSION_EXPIRED
-    return SessionStatus.LOGIN_REQUIRED
+        return SearchStatus.RATE_LIMITED
+    if http_status is not None and 500 <= http_status <= 599:
+        return SearchStatus.NETWORK_ERROR
+    if any(token in identity for token in ("captcha", "请完成拼图验证", "请输入验证码", "安全验证")):
+        return SearchStatus.CHALLENGE_DETECTED
+    if any(token in identity for token in ("login.cnki.net", "authserver", "用户登录", "统一身份认证")):
+        return SearchStatus.LOGIN_REQUIRED
+    parsed = urlparse(url)
+    if "未检索到相关文献" in visible_text:
+        return SearchStatus.NO_RESULTS
+    if parsed.hostname == "www.cnki.net" and "中国知网" in identity:
+        return SearchStatus.SUCCESS
+    if parsed.hostname == CNKI_RESULT_HOST and parsed.path.casefold().startswith(CNKI_RESULT_PATH_PREFIX):
+        if "题名" in visible_text and "来源" in visible_text:
+            return SearchStatus.SUCCESS
+    return SearchStatus.PAGE_CONTRACT_CHANGED
 
 
-def is_new_search_page_contract(*, url: str, title: str, visible_text: str) -> bool:
-    parsed_url = urlparse(url)
-    if (
-        parsed_url.username is not None
-        or parsed_url.password is not None
-        or parsed_url.params
-    ):
-        return False
-    try:
-        location = (
-            parsed_url.scheme.casefold(),
-            (parsed_url.hostname or "").casefold(),
-            parsed_url.port,
-            parsed_url.path,
-        )
-    except ValueError:
-        return False
-    allowed_locations = {
-        (
-            allowed.scheme.casefold(),
-            (allowed.hostname or "").casefold(),
-            allowed.port,
-            allowed.path,
-        )
-        for allowed in map(urlparse, (DIRECT_CNKI_SEARCH_URL, HHU_CNKI_SEARCH_URL))
-    }
-    if location not in allowed_locations:
-        return False
-    visible_identity = f"{title}\n{visible_text}".casefold()
-    if "\u9ad8\u7ea7\u68c0\u7d22" not in visible_identity:
-        return False
-    return classify_public_state(
-        url=url,
-        title=title,
-        visible_text=visible_text,
-    ) is SessionStatus.READY
-
-
-class CnkiSession:
+class PublicCnkiSession:
     def __init__(self, browser_factory: BrowserFactory | None = None) -> None:
         self._playwright: Any = None
         self._browser_factory = browser_factory
         self.browser: Any = None
         self.context: Any = None
         self.page: Any = None
-        self._closed = False
+        self._home_response_status: int | None = None
 
-    def login(self) -> SessionStatus:
-        if self._closed:
-            raise RuntimeError("\u4f1a\u8bdd\u5df2\u5173\u95ed")
+    def __enter__(self) -> "PublicCnkiSession":
         if self._browser_factory is None:
             self._playwright = start_playwright()
             self._browser_factory = BrowserFactory(self._playwright)
-        if self.browser is None:
-            self.browser = self._browser_factory.launch_visible()
-            self.context = self.browser.new_context(accept_downloads=True)
-            self.page = self.context.new_page()
-        self.page.goto(HHU_LOGIN_URL, wait_until="domcontentloaded")
-        return SessionStatus.WAITING_FOR_USER
+        self.browser = self._browser_factory.launch_ephemeral()
+        self.context = self.browser.new_context(locale="zh-CN", accept_downloads=False)
+        self.page = self.context.new_page()
+        response = self.page.goto(CNKI_HOME_URL, wait_until="domcontentloaded")
+        self._home_response_status = getattr(response, "status", None)
+        return self
 
-    def open_search(self) -> SessionStatus:
-        if self._closed:
-            return SessionStatus.CLOSED
+    def search(self, query: str) -> SearchSnapshot:
         if self.page is None:
-            return SessionStatus.LOGIN_REQUIRED
-        target = resolve_search_url(self.page.url)
-        if target is None:
-            return SessionStatus.SESSION_EXPIRED
-        self.page.goto(target, wait_until="domcontentloaded")
-        url = self.page.url
-        title = self.page.title()
-        visible_text = self.page.locator("body").inner_text(timeout=5_000)
-        status = classify_public_state(
-            url=url,
-            title=title,
-            visible_text=visible_text,
+            raise RuntimeError("公开检索会话未启动")
+        body = self.page.locator("body").inner_text(timeout=10_000)
+        initial = SearchSnapshot(
+            self.page.content(), self.page.url, self.page.title(), body, self._home_response_status,
         )
-        if status is not SessionStatus.READY:
-            return status
-        if not is_new_search_page_contract(
-            url=url,
-            title=title,
-            visible_text=visible_text,
-        ):
-            return SessionStatus.SESSION_EXPIRED
-        return SessionStatus.READY
+        if classify_public_search_state(**initial.state_arguments()) in {
+            SearchStatus.CHALLENGE_DETECTED,
+            SearchStatus.LOGIN_REQUIRED,
+            SearchStatus.FORBIDDEN,
+            SearchStatus.RATE_LIMITED,
+            SearchStatus.NETWORK_ERROR,
+            SearchStatus.NO_RESULTS,
+        }:
+            return initial
+        home_box = self.page.get_by_role("textbox", name="中文文献、外文文献")
+        theme_field = self.page.get_by_text("主题", exact=True)
+        if self.page.url != CNKI_HOME_URL or home_box.count() != 1 or theme_field.count() != 1:
+            raise PageContractChanged("知网公开首页未就绪")
+        http_status = PublicThemeSearchRunner().run(self.page, query)
+        body = self.page.locator("body").inner_text(timeout=10_000)
+        return SearchSnapshot(self.page.content(), self.page.url, self.page.title(), body, http_status)
 
-    def status(self) -> SessionStatus:
-        if self._closed:
-            return SessionStatus.CLOSED
-        if self.page is None:
-            return SessionStatus.LOGIN_REQUIRED
-        return classify_public_state(
-            url=self.page.url,
-            title=self.page.title(),
-            visible_text=self.page.locator("body").inner_text(timeout=5_000),
-        )
-
-    def close(self) -> SessionStatus:
+    def __exit__(self, *_exc: object) -> None:
         if self.context is not None:
             self.context.close()
         if self.browser is not None:
@@ -201,5 +114,4 @@ class CnkiSession:
         self.context = None
         self.browser = None
         self.page = None
-        self._closed = True
-        return SessionStatus.CLOSED
+        self._home_response_status = None

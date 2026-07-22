@@ -1,57 +1,49 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
+import copy
+import time
+import unicodedata
+from collections.abc import Iterable
 from typing import Any
 
-
-_SENSITIVE_KEYS = {
-    "authorization",
-    "cookie",
-    "cookies",
-    "credential",
-    "credentials",
-    "password",
-    "secret",
-    "storage_state",
-    "token",
-}
+from .models import SearchOutcome
 
 
-def _reject_sensitive(value: Any) -> None:
+def normalize_cache_query(query: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", query).split()).casefold()
+
+
+def _walk_keys(value: Any) -> Iterable[str]:
     if isinstance(value, dict):
         for key, child in value.items():
-            if str(key).casefold() in _SENSITIVE_KEYS:
-                raise ValueError(f"缓存包含敏感字段: {key}")
-            _reject_sensitive(child)
+            yield str(key)
+            yield from _walk_keys(child)
     elif isinstance(value, list):
         for child in value:
-            _reject_sensitive(child)
+            yield from _walk_keys(child)
 
 
-class MetadataCache:
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+class SearchCache:
+    def __init__(self, *, ttl_seconds: float = 86400, now=time.time) -> None:
+        self.ttl_seconds = ttl_seconds
+        self.now = now
+        self._items: dict[tuple[str, int], tuple[float, SearchOutcome]] = {}
 
-    def _load(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {}
-        data = json.loads(self.path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("缓存根节点必须是对象")
-        return data
+    def get(self, query: str, limit: int) -> SearchOutcome | None:
+        key = (normalize_cache_query(query), limit)
+        item = self._items.get(key)
+        if item is None:
+            return None
+        expires_at, outcome = item
+        if self.now() >= expires_at:
+            self._items.pop(key, None)
+            return None
+        return copy.deepcopy(outcome)
 
-    def put(self, key: str, value: dict[str, Any]) -> None:
-        _reject_sensitive(value)
-        data = self._load()
-        data[key] = value
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-
-    def get(self, key: str) -> dict[str, Any] | None:
-        value = self._load().get(key)
-        return value if isinstance(value, dict) else None
-
+    def put(self, query: str, limit: int, outcome: SearchOutcome) -> None:
+        payload = outcome.to_dict()
+        forbidden = {"cookie", "token", "url", "password", "storage_state"}
+        if any(any(part in key.casefold() for part in forbidden) for key in _walk_keys(payload)):
+            raise ValueError("缓存包含会话或地址字段")
+        key = (normalize_cache_query(query), limit)
+        self._items[key] = (self.now() + self.ttl_seconds, copy.deepcopy(outcome))

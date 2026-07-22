@@ -1,154 +1,150 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import date
 from html.parser import HTMLParser
-from urllib.parse import urljoin
 
-from .models import PaperRecord
-
-
-_FIELDS = {"title", "authors", "journal", "year", "doi", "abstract", "keywords"}
+from .models import PaperRecord, is_verifiable_publication_year
+from .search import PageContractChanged
 
 
-class _ResultParser(HTMLParser):
+@dataclass(slots=True)
+class ParsedResultPage:
+    records: list[PaperRecord]
+    incomplete_records: list[PaperRecord]
+    total_rows: int
+    excluded_non_journal_rows: int
+
+
+def extract_publication_year(value: str) -> int | None:
+    match = re.fullmatch(
+        r"\s*((?:19|20)\d{2})(?:-(\d{2})(?:-(\d{2}))?)?"
+        r"(?:\s+(\d{1,2}):(\d{2}))?\s*",
+        value,
+    )
+    if not match:
+        return None
+    year, month, day, hour, minute = int(match[1]), match[2], match[3], match[4], match[5]
+    try:
+        date(year, int(month or 1), int(day or 1))
+        if hour is not None and not (0 <= int(hour) <= 23 and 0 <= int(minute) <= 59):
+            return None
+    except ValueError:
+        return None
+    return year
+
+
+@dataclass(slots=True)
+class _RawRow:
+    title: str = ""
+    authors: str = ""
+    journal: str = ""
+    publication_date: str = ""
+    document_type: str = ""
+    citations: str = ""
+    downloads: str = ""
+    result_rank: str = ""
+    is_online_first: bool = False
+
+
+class _PublicTableParser(HTMLParser):
+    _MAP = {
+        "seq": "result_rank",
+        "name": "title",
+        "author": "authors",
+        "source": "journal",
+        "date": "publication_date",
+        "data": "document_type",
+        "quote": "citations",
+        "download": "downloads",
+    }
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.items: list[dict[str, str]] = []
-        self.current: dict[str, str] | None = None
-        self.field: str | None = None
-        self.depth = 0
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attributes = dict(attrs)
-        classes = set((attributes.get("class") or "").split())
-        if "result-item" in classes:
-            self.current = {}
-            self.depth = 1
-            return
-        if self.current is None:
-            return
-        self.depth += 1
-        selected = next((name for name in _FIELDS if name in classes), None)
-        if selected:
-            self.field = selected
-            if selected == "title" and attributes.get("href"):
-                self.current["detail_url"] = attributes["href"] or ""
-
-    def handle_data(self, data: str) -> None:
-        if self.current is not None and self.field and data.strip():
-            self.current[self.field] = self.current.get(self.field, "") + data.strip()
-
-    def handle_endtag(self, tag: str) -> None:
-        if self.current is None:
-            return
-        self.depth -= 1
-        self.field = None
-        if self.depth == 0:
-            self.items.append(self.current)
-            self.current = None
-
-
-class _TableResultParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.items: list[dict[str, str]] = []
-        self.table_depth = 0
-        self.current: dict[str, str] | None = None
+        self.in_table = False
+        self.current: _RawRow | None = None
         self.cell: str | None = None
-        self.cell_text: list[str] = []
-        self.in_title_link = False
+        self.buffer: list[str] = []
+        self.rows: list[_RawRow] = []
+        self.in_primary_link = False
+        self.found_public_table = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attributes = dict(attrs)
-        classes = set((attributes.get("class") or "").split())
+        classes = set((dict(attrs).get("class") or "").split())
         if tag == "table" and "result-table-list" in classes:
-            self.table_depth = 1
-            return
-        if not self.table_depth:
-            return
-        self.table_depth += 1
-        if tag == "tr":
-            self.current = {}
-        elif tag == "td" and self.current is not None:
-            self.cell = next(iter(classes), "")
-            self.cell_text = []
-        elif (
-            tag == "a"
-            and self.current is not None
-            and self.cell == "name"
-            and attributes.get("href")
-        ):
-            self.current["detail_url"] = attributes["href"] or ""
-            self.in_title_link = True
+            self.in_table = True
+            self.found_public_table = True
+        elif self.in_table and tag == "tr":
+            self.current = _RawRow()
+        elif self.current is not None and tag == "td":
+            self.cell = next((name for name in self._MAP if name in classes), None)
+            self.buffer = []
+        elif self.current is not None and tag == "a" and self.cell in {"name", "source"}:
+            self.in_primary_link = True
 
     def handle_data(self, data: str) -> None:
-        if (
-            self.current is not None
-            and self.cell is not None
-            and data.strip()
-            and (self.cell != "name" or self.in_title_link)
-        ):
-            self.cell_text.append(data.strip())
+        text = data.strip()
+        capture = self.cell not in {"name", "source"} or self.in_primary_link
+        if self.current is not None and self.cell and text and capture:
+            self.buffer.append(text)
+        if self.current is not None and self.cell == "name" and text == "网络首发":
+            self.current.is_online_first = True
 
     def handle_endtag(self, tag: str) -> None:
-        if not self.table_depth:
-            return
-        if tag == "a" and self.cell == "name":
-            self.in_title_link = False
-        if tag == "td" and self.current is not None and self.cell is not None:
-            value = "".join(self.cell_text).strip()
-            mapping = {
-                "name": "title",
-                "author": "authors",
-                "source": "journal",
-                "date": "year",
-            }
-            target = mapping.get(self.cell)
-            if target:
-                self.current[target] = value
-            self.cell = None
-            self.cell_text = []
+        if tag == "a":
+            self.in_primary_link = False
+        elif tag == "td" and self.current is not None and self.cell:
+            value = "".join(text for text in self.buffer if text != "网络首发").strip()
+            setattr(self.current, self._MAP[self.cell], value)
+            self.cell, self.buffer = None, []
         elif tag == "tr" and self.current is not None:
-            if self.current.get("title"):
-                self.items.append(self.current)
+            if any((self.current.title, self.current.journal, self.current.document_type)):
+                self.rows.append(self.current)
             self.current = None
-        self.table_depth -= 1
+        elif tag == "table" and self.in_table:
+            self.in_table = False
 
 
-def _split_people(value: str) -> list[str]:
-    return [part.strip() for part in re.split(r"[;；,，]", value) if part.strip()]
+def _to_int(value: str) -> int | None:
+    return int(value) if re.fullmatch(r"\d+", value.strip()) else None
 
 
-def parse_result_page(html: str, *, base_url: str) -> list[PaperRecord]:
-    parser = _ResultParser()
+def _to_record(raw: _RawRow, *, query: str) -> PaperRecord:
+    authors = [item.strip() for item in re.split(r"[;；,，]", raw.authors) if item.strip()]
+    return PaperRecord(
+        title=raw.title.strip(),
+        authors=authors,
+        journal_raw=raw.journal.strip(),
+        publication_date=raw.publication_date.strip(),
+        publication_year=extract_publication_year(raw.publication_date),
+        document_type=raw.document_type.strip(),
+        citations=_to_int(raw.citations),
+        downloads=_to_int(raw.downloads),
+        is_online_first=raw.is_online_first,
+        result_rank=_to_int(raw.result_rank) or 0,
+        source_database="CNKI",
+        search_query=query,
+    )
+
+
+def parse_public_result_page(html: str, *, query: str, limit: int) -> ParsedResultPage:
+    if not 1 <= limit <= 20:
+        raise ValueError("返回数量必须为 1 到 20")
+    parser = _PublicTableParser()
     parser.feed(html)
-    table_parser = _TableResultParser()
-    table_parser.feed(html)
-    searched_at = datetime.now(timezone.utc).isoformat()
+    if not parser.found_public_table and "题名" in html and "来源" in html:
+        raise PageContractChanged("知网公开结果表结构已变化")
     records: list[PaperRecord] = []
-    for item in [*parser.items, *table_parser.items]:
-        title = item.get("title", "").strip()
-        if not title:
+    incomplete: list[PaperRecord] = []
+    excluded = 0
+    for raw in parser.rows:
+        if raw.document_type != "期刊":
+            excluded += 1
             continue
-        authors = _split_people(item.get("authors", ""))
-        year_text = item.get("year", "")
-        year_match = re.search(r"(?:19|20)\d{2}", year_text)
-        keywords = _split_people(item.get("keywords", ""))
-        doi = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", item.get("doi", "").strip(), flags=re.I)
-        records.append(
-            PaperRecord(
-                title=title,
-                authors=authors,
-                first_author=authors[0] if authors else "",
-                journal=item.get("journal", "").strip(),
-                year=int(year_match.group()) if year_match else None,
-                abstract=item.get("abstract", "").strip(),
-                keywords=keywords,
-                doi=doi,
-                detail_url=urljoin(base_url, item.get("detail_url", "")),
-                source_mode="cnki",
-                searched_at=searched_at,
-            )
-        )
-    return records
+        record = _to_record(raw, query=query)
+        if not record.title or not record.journal_raw or not is_verifiable_publication_year(record.publication_year):
+            incomplete.append(record)
+        elif len(records) < limit:
+            records.append(record)
+    return ParsedResultPage(records, incomplete, len(parser.rows), excluded)

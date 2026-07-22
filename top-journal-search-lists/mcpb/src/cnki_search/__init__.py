@@ -1,5 +1,6 @@
-"""CNKI browser-search runtime for top-journal-search-lists."""
+"""CNKI public-homepage theme-search runtime."""
 
-__all__ = ["__version__"]
+__all__ = ["PUBLIC_TOOL", "__version__"]
+PUBLIC_TOOL = "cnki_search"
 __version__ = "0.1.0"
 

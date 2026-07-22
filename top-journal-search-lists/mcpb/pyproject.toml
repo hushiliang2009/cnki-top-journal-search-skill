@@ -1,10 +1,10 @@
 [project]
 name = "cnki-search-mcp"
-version = "0.1.0"
-description = "Visible-browser CNKI MCP server"
+version = "0.2.0"
+description = "Public CNKI theme-search MCP server"
 requires-python = ">=3.11"
 dependencies = [
-  "mcp>=1.0.0,<2",
+  "mcp>=1,<2",
   "playwright>=1.45,<2",
 ]
 

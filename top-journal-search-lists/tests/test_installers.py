@@ -11,6 +11,15 @@ from cnki_search.install_config import (
 )
 
 
+def test_installers_require_explicit_client_targets(skill_root: Path) -> None:
+    powershell = (skill_root / "installers/install.ps1").read_text(encoding="utf-8")
+    shell = (skill_root / "installers/install.sh").read_text(encoding="utf-8")
+    for token in ("[switch]$Codex", "[switch]$ClaudeCode", "[switch]$ClaudeDesktop"):
+        assert token in powershell
+    for token in ("--codex", "--claude-code", "--claude-desktop"):
+        assert token in shell
+
+
 def test_merge_claude_config_preserves_unrelated_servers() -> None:
     before = {"mcpServers": {"zotero": {"command": "zotero-mcp"}}, "theme": "dark"}
     server = cnki_server_config(Path("C:/skill"), Path("C:/skill/.venv/Scripts/python.exe"))

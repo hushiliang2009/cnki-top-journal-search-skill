@@ -1,6 +1,6 @@
 interface:
-  display_name: "Top Journal and CNKI Search"
-  short_description: "按期刊层级检索国际数据库与中国知网文献"
-  default_prompt: "Use $top-journal-search-lists to search CNKI and international databases, then organize verified literature by journal priority."
+  display_name: "Top Journal and Public CNKI Search"
+  short_description: "以 ai4scholar 为主，补充公开首页中文期刊检索"
+  default_prompt: "Use $top-journal-search-lists to search literature with ai4scholar as the primary source and public CNKI theme search as a supplement, then organize verified records by journal priority."
 policy:
   allow_implicit_invocation: true
