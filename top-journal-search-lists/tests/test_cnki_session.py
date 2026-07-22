@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 import cnki_search.session as session_module
@@ -15,7 +13,6 @@ from cnki_search.session import (
 )
 
 
-FIXTURES = Path(__file__).with_name("fixtures")
 HHU_NEW_SEARCH_URL = (
     "https://webvpn.hhu.edu.cn/https/"
     "77726476706e69737468656265737421fbf952d2243e635930068cb8/kns8s/AdvSearch"
@@ -169,16 +166,33 @@ def test_browser_launch_is_visible_and_ephemeral() -> None:
 
 
 @pytest.mark.parametrize(
-    ("fixture", "url", "expected"),
+    ("url", "title", "visible_text", "expected"),
     [
-        ("login.html", "https://webvpn.hhu.edu.cn/authserver/login", SessionStatus.LOGIN_REQUIRED),
-        ("captcha.html", "https://webvpn.hhu.edu.cn/verify", SessionStatus.CAPTCHA),
-        ("advanced.html", "https://webvpn.hhu.edu.cn/https/cnki", SessionStatus.READY),
+        (
+            "https://webvpn.hhu.edu.cn/authserver/login",
+            "河海大学统一身份认证",
+            "用户名\n密码\n登录",
+            SessionStatus.LOGIN_REQUIRED,
+        ),
+        (
+            HHU_CNKI_SEARCH_URL,
+            "高级检索-中国知网",
+            "中国知网\n高级检索\n专业检索\n主题\n检索",
+            SessionStatus.READY,
+        ),
     ],
 )
-def test_status_from_public_page_state(fixture: str, url: str, expected: SessionStatus) -> None:
-    html = (FIXTURES / fixture).read_text(encoding="utf-8")
-    assert classify_public_state(url=url, title="", visible_text=html) is expected
+def test_status_from_visible_page_state(
+    url: str,
+    title: str,
+    visible_text: str,
+    expected: SessionStatus,
+) -> None:
+    assert classify_public_state(
+        url=url,
+        title=title,
+        visible_text=visible_text,
+    ) is expected
 
 
 def test_authenticated_resource_page_ignores_residual_login_url() -> None:
@@ -201,34 +215,48 @@ def test_new_search_page_ignores_ordinary_security_verification_notice() -> None
     assert status is SessionStatus.READY
 
 
-@pytest.mark.parametrize(
-    ("url", "title", "visible_text", "expected"),
-    [
-        (
-            "https://webvpn.hhu.edu.cn/verify/home",
-            "安全验证",
-            "请完成拼图验证",
-            SessionStatus.CAPTCHA,
-        ),
-        (
-            "https://webvpn.hhu.edu.cn/authserver/login",
-            "统一身份认证",
-            "用户名 密码",
-            SessionStatus.LOGIN_REQUIRED,
-        ),
-    ],
-)
-def test_strong_blocking_page_identity_is_preserved(
-    url: str,
-    title: str,
-    visible_text: str,
-    expected: SessionStatus,
+def test_verify_path_is_captcha_evidence() -> None:
+    assert classify_public_state(
+        url="https://webvpn.hhu.edu.cn/verify/home",
+        title="河海大学WebVPN系统",
+        visible_text="访问服务",
+    ) is SessionStatus.CAPTCHA
+
+
+@pytest.mark.parametrize("query_key", ["captcha", "verify"])
+def test_captcha_or_verify_query_parameter_is_captcha_evidence(
+    query_key: str,
 ) -> None:
     assert classify_public_state(
-        url=url,
-        title=title,
+        url=f"{HHU_CNKI_SEARCH_URL}?{query_key}=required",
+        title="高级检索-中国知网",
+        visible_text="中国知网\n高级检索",
+    ) is SessionStatus.CAPTCHA
+
+
+def test_security_verification_title_is_captcha_evidence() -> None:
+    assert classify_public_state(
+        url="https://webvpn.hhu.edu.cn/security-check",
+        title="安全验证",
+        visible_text="访问服务",
+    ) is SessionStatus.CAPTCHA
+
+
+@pytest.mark.parametrize(
+    "visible_text",
+    [
+        "滑动下方拼图完成验证",
+        "请完成拼图验证",
+    ],
+)
+def test_explicit_puzzle_interaction_is_captcha_evidence(
+    visible_text: str,
+) -> None:
+    assert classify_public_state(
+        url=HHU_CNKI_SEARCH_URL,
+        title="高级检索-中国知网",
         visible_text=visible_text,
-    ) is expected
+    ) is SessionStatus.CAPTCHA
 
 
 @pytest.mark.parametrize(

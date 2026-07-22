@@ -83,6 +83,29 @@ def test_release_zip_uses_portable_entries_when_present(skill_root: Path) -> Non
     )
 
 
+def test_release_archives_match_current_session_sources_when_present(
+    skill_root: Path,
+) -> None:
+    outputs = skill_root.parent / "outputs"
+    mcpb_artifact = outputs / "cnki-search.mcpb"
+    if mcpb_artifact.is_file():
+        with zipfile.ZipFile(mcpb_artifact) as archive:
+            packaged_session = archive.read("src/cnki_search/session.py")
+        assert packaged_session == (
+            skill_root / "mcpb/src/cnki_search/session.py"
+        ).read_bytes()
+
+    skill_artifact = outputs / "top-journal-search-lists_Skill.zip"
+    if skill_artifact.is_file():
+        with zipfile.ZipFile(skill_artifact) as archive:
+            packaged_session = archive.read(
+                "top-journal-search-lists/scripts/cnki_search/session.py"
+            )
+        assert packaged_session == (
+            skill_root / "scripts/cnki_search/session.py"
+        ).read_bytes()
+
+
 def test_install_script_review_contracts(skill_root: Path) -> None:
     root = skill_root.parent
     powershell_scripts = [skill_root / "installers/install.ps1"]
