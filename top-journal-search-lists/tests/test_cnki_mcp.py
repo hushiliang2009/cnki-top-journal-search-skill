@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from cnki_search.mcp_server import CnkiMcpServer, REQUIRED_TOOLS
 from cnki_search.models import PaperRecord, SessionStatus
 
@@ -112,17 +114,17 @@ class FakeSearchSession:
     def __init__(self, open_status: SessionStatus) -> None:
         self.page = FakeSearchPage()
         self.open_status = open_status
-        self.open_calls = 0
+        self.open_search_calls = 0
 
     def status(self) -> SessionStatus:
         return SessionStatus.READY
 
-    def open_old_search(self) -> SessionStatus:
-        self.open_calls += 1
+    def open_search(self) -> SessionStatus:
+        self.open_search_calls += 1
         return self.open_status
 
 
-def test_search_opens_old_page_before_runner(monkeypatch) -> None:
+def test_search_opens_new_page_before_runner(monkeypatch) -> None:
     session = FakeSearchSession(SessionStatus.READY)
     calls: list[str] = []
 
@@ -130,7 +132,7 @@ def test_search_opens_old_page_before_runner(monkeypatch) -> None:
         def __init__(self, _page) -> None:
             pass
 
-        def assert_old_search_page(self) -> None:
+        def assert_new_search_page(self) -> None:
             calls.append("contract")
 
     monkeypatch.setattr("cnki_search.mcp_server.PlaywrightPageDriver", FakeDriver)
@@ -142,17 +144,27 @@ def test_search_opens_old_page_before_runner(monkeypatch) -> None:
     server = CnkiMcpServer(session=session)
     response = server.cnki_search("数字化转型")
     assert response["ok"] is True
-    assert session.open_calls == 1
+    assert response["status"] == SessionStatus.READY.value
+    assert session.open_search_calls == 1
     assert calls == ["contract", "runner"]
 
 
-def test_search_stops_when_old_page_shows_captcha(monkeypatch) -> None:
-    session = FakeSearchSession(SessionStatus.CAPTCHA)
+@pytest.mark.parametrize(
+    "status",
+    [
+        SessionStatus.CAPTCHA,
+        SessionStatus.RATE_LIMITED,
+        SessionStatus.PERMISSION_DENIED,
+        SessionStatus.SESSION_EXPIRED,
+    ],
+)
+def test_search_stops_when_new_page_is_not_ready(status: SessionStatus) -> None:
+    session = FakeSearchSession(status)
     server = CnkiMcpServer(session=session)
     response = server.cnki_search("数字化转型")
     assert response["ok"] is False
-    assert response["status"] == SessionStatus.CAPTCHA.value
-    assert session.open_calls == 1
+    assert response["status"] == status.value
+    assert session.open_search_calls == 1
 
 
 class StatusChangingSearchPage:
@@ -190,7 +202,7 @@ class StatusChangingSearchSession:
         self.status_calls += 1
         return status
 
-    def open_old_search(self) -> SessionStatus:
+    def open_search(self) -> SessionStatus:
         return SessionStatus.READY
 
 
@@ -201,7 +213,7 @@ def test_search_stops_before_parsing_when_first_result_page_shows_captcha(monkey
         def __init__(self, _page) -> None:
             pass
 
-        def assert_old_search_page(self) -> None:
+        def assert_new_search_page(self) -> None:
             pass
 
     monkeypatch.setattr("cnki_search.mcp_server.PlaywrightPageDriver", FakeDriver)
@@ -223,7 +235,7 @@ def test_search_stops_before_parsing_or_advancing_after_page_captcha(monkeypatch
         def __init__(self, _page) -> None:
             pass
 
-        def assert_old_search_page(self) -> None:
+        def assert_new_search_page(self) -> None:
             pass
 
     monkeypatch.setattr("cnki_search.mcp_server.PlaywrightPageDriver", FakeDriver)

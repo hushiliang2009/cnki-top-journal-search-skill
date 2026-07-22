@@ -78,15 +78,15 @@ class CnkiMcpServer:
                 mode=SearchMode(mode), query=query, pages=pages,
                 fields=fields or [], filters=filters or {},
             )
-            old_page_status = self.session.open_old_search()
-            if old_page_status is not SessionStatus.READY:
+            search_page_status = self.session.open_search()
+            if search_page_status is not SessionStatus.READY:
                 return ToolResponse.failure(
-                    old_page_status,
-                    "知网旧版检索页面尚未就绪",
+                    search_page_status,
+                    "知网新版检索页面尚未就绪",
                     next_action="请在可见浏览器中手工完成登录或验证。",
                 ).to_dict()
             driver = PlaywrightPageDriver(self.session.page)
-            driver.assert_old_search_page()
+            driver.assert_new_search_page()
             if request.mode is SearchMode.PROFESSIONAL:
                 ProfessionalSearchRunner().run(driver, query)
             else:
