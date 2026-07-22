@@ -1,5 +1,7 @@
 # CNKI 新版入口统一实施计划
 
+> 状态：已废止，由 `../specs/2026-07-22-cnki-public-theme-search-design.md` 取代。本计划不得继续执行。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将 CNKI 检索实现、测试、文档和安装包统一到新版 `kns8s/AdvSearch` 页面，并删除所有其他入口及其回退能力。

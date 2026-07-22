@@ -1,5 +1,7 @@
 # CNKI 检索 Skill 跨客户端设计
 
+> 状态：已废止，由 `2026-07-22-cnki-public-theme-search-design.md` 取代。本文只保留为历史记录。
+
 ## 1. 目标
 
 在现有 `top-journal-search-lists` Skill 中增加中国知网检索、结果整理、引文导出和授权下载能力，并以同一套 Python 核心服务于 Claude Code、Claude Desktop、Codex CLI 和 Codex Desktop。支持 Windows、Linux 和 macOS；本机只对 Windows 做真实登录与浏览器冒烟测试，其他系统通过安装脚本、路径和浏览器适配测试验证。

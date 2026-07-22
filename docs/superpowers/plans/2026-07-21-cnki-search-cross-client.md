@@ -1,5 +1,7 @@
 # CNKI Search Cross-Client Implementation Plan
 
+> 状态：已废止，由 `../specs/2026-07-22-cnki-public-theme-search-design.md` 取代。本计划不得继续执行。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在 `top-journal-search-lists` 中实现经河海大学 WebVPN 使用可见浏览器的低频 CNKI 检索、导出和授权下载，并交付 Claude 与 Codex 跨客户端安装包。

@@ -1,7 +1,7 @@
 # CNKI 新版入口统一设计
 
 设计日期：2026-07-22  
-状态：已确认  
+状态：已废止，由 `2026-07-22-cnki-public-theme-search-design.md` 取代
 适用范围：CNKI 检索 Skill、MCP、跨客户端封装、安装包及其与 `top-journal-search-lists` 的集成
 
 ## 一、最终决定
