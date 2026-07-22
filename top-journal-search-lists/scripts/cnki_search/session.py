@@ -9,25 +9,16 @@ from .models import SessionStatus
 
 HHU_LOGIN_URL = "https://webvpn.hhu.edu.cn/https/77726476706e69737468656265737421f1e2559434357a467b1ac7a490406d301894467e2b/authserver/login?service=https%3A%2F%2Fwebvpn.hhu.edu.cn%2Flogin%3Fcas_login%3Dtrue"
 HHU_CNKI_URL = "https://webvpn.hhu.edu.cn/https/77726476706e69737468656265737421e7e056d2243e635930068cb8/"
-DIRECT_CNKI_OLD_SEARCH_URL = "https://kns.cnki.net/kns/advsearch?dbcode=CJZK"
-HHU_CNKI_OLD_SEARCH_URL = (
-    "https://webvpn.hhu.edu.cn/https/"
-    "77726476706e69737468656265737421fbf952d2243e635930068cb8/"
-    "kns/advsearch?dbcode=CJZK"
-)
+DIRECT_CNKI_SEARCH_URL = "https://kns.cnki.net/kns8s/AdvSearch"
+HHU_CNKI_SEARCH_URL = "https://webvpn.hhu.edu.cn/https/77726476706e69737468656265737421fbf952d2243e635930068cb8/kns8s/AdvSearch"
 
-_OLD_SEARCH_REQUIRED_SELECTORS = (
-    'li[name="gradeSearch"]',
-    'li[name="majorSearch"]',
-)
-_PUZZLE_PROMPTS = ("拖动下方拼图完成验证", "请完成拼图验证")
 
-def resolve_old_search_url(current_url: str) -> str | None:
+def resolve_search_url(current_url: str) -> str | None:
     hostname = (urlparse(current_url).hostname or "").casefold()
     if hostname == "webvpn.hhu.edu.cn":
-        return HHU_CNKI_OLD_SEARCH_URL
+        return HHU_CNKI_SEARCH_URL
     if hostname == "cnki.net" or hostname.endswith(".cnki.net"):
-        return DIRECT_CNKI_OLD_SEARCH_URL
+        return DIRECT_CNKI_SEARCH_URL
     return None
 
 
@@ -35,15 +26,31 @@ def classify_public_state(*, url: str, title: str, visible_text: str) -> Session
     haystack = f"{url}\n{title}\n{visible_text}".casefold()
     if any(
         token in haystack
-        for token in ("http 429", "429 too many requests", "访问过于频繁", "操作频繁", "too many requests")
+        for token in (
+            "http 429",
+            "429 too many requests",
+            "\u8bbf\u95ee\u8fc7\u4e8e\u9891\u7e41",
+            "\u64cd\u4f5c\u9891\u7e41",
+            "too many requests",
+        )
     ):
         return SessionStatus.RATE_LIMITED
     if any(
         token in haystack
-        for token in ("http 403", "403 forbidden", "无权访问", "权限不足", "permission denied")
+        for token in (
+            "http 403",
+            "403 forbidden",
+            "\u65e0\u6743\u8bbf\u95ee",
+            "\u6743\u9650\u4e0d\u8db3",
+            "permission denied",
+        )
     ):
         return SessionStatus.PERMISSION_DENIED
-    if "authserver/login" in haystack or "统一身份认证" in haystack or "type=\"password\"" in haystack:
+    if (
+        "authserver/login" in haystack
+        or "\u7edf\u4e00\u8eab\u4efd\u8ba4\u8bc1" in haystack
+        or 'type="password"' in haystack
+    ):
         return SessionStatus.LOGIN_REQUIRED
     parsed_url = urlparse(url)
     path = parsed_url.path.casefold()
@@ -56,61 +63,33 @@ def classify_public_state(*, url: str, title: str, visible_text: str) -> Session
     explicit_verification = any(
         token in haystack
         for token in (
-            "拖动下方拼图完成验证",
-            "请完成拼图验证",
+            "\u8bf7\u8f93\u5165\u9a8c\u8bc1\u7801",
+            "\u5b89\u5168\u9a8c\u8bc1",
+            "\u6ed1\u52a8\u4e0b\u65b9\u62fc\u56fe\u5b8c\u6210\u9a8c\u8bc1",
+            "\u8bf7\u5b8c\u6210\u62fc\u56fe\u9a8c\u8bc1",
         )
     )
-    ready_signal = any(
-        token in haystack for token in ("中国知网", "高级检索", "专业检索", "kns.cnki")
-    )
-    residual_captcha_id = (
-        path.endswith("/kns/advsearch")
-        and verification_query_keys == {"captchaid"}
-        and ready_signal
-    )
-    if (
-        verification_url
-        or explicit_verification
-        or (verification_query_keys and not residual_captcha_id)
+    if verification_url or explicit_verification or verification_query_keys:
+        return SessionStatus.CAPTCHA
+    if any(
+        token in haystack
+        for token in ("\u4e2d\u56fd\u77e5\u7f51", "\u9ad8\u7ea7\u68c0\u7d22", "\u4e13\u4e1a\u68c0\u7d22", "kns.cnki")
     ):
-        return SessionStatus.CAPTCHA
-    if ready_signal:
         return SessionStatus.READY
-    if any(token in haystack for token in ("验证码", "安全验证", "captcha")):
-        return SessionStatus.CAPTCHA
     if "webvpn.hhu.edu.cn" in haystack:
         return SessionStatus.SESSION_EXPIRED
     return SessionStatus.LOGIN_REQUIRED
 
 
-def is_old_search_page_contract(
-    *,
-    page: Any,
-    url: str,
-    title: str,
-    visible_text: str,
-) -> bool:
+def is_new_search_page_contract(*, url: str, title: str, visible_text: str) -> bool:
     parsed_url = urlparse(url)
-    if not parsed_url.path.casefold().endswith("/kns/advsearch"):
+    if not parsed_url.path.casefold().endswith("/kns8s/advsearch"):
         return False
-    query_keys = {
-        key.casefold()
-        for key, _value in parse_qsl(parsed_url.query, keep_blank_values=True)
-    }
-    verification_query_keys = {
-        key for key in query_keys if "captcha" in key or "verify" in key
-    }
-    if verification_query_keys and verification_query_keys != {"captchaid"}:
-        return False
-    title_text = title.casefold()
-    if "中国知网" not in title_text or "检索" not in title_text or "安全验证" in title_text:
-        return False
-    if any(prompt in visible_text for prompt in _PUZZLE_PROMPTS):
-        return False
-    try:
-        return all(page.locator(selector).count() > 0 for selector in _OLD_SEARCH_REQUIRED_SELECTORS)
-    except Exception:
-        return False
+    return classify_public_state(
+        url=url,
+        title=title,
+        visible_text=visible_text,
+    ) is SessionStatus.READY
 
 
 class CnkiSession:
@@ -124,7 +103,7 @@ class CnkiSession:
 
     def login(self) -> SessionStatus:
         if self._closed:
-            raise RuntimeError("会话已关闭")
+            raise RuntimeError("\u4f1a\u8bdd\u5df2\u5173\u95ed")
         if self._browser_factory is None:
             self._playwright = start_playwright()
             self._browser_factory = BrowserFactory(self._playwright)
@@ -141,19 +120,19 @@ class CnkiSession:
         self.page.goto(HHU_CNKI_URL, wait_until="domcontentloaded")
         return self.status()
 
-    def open_old_search(self) -> SessionStatus:
+    def open_search(self) -> SessionStatus:
         if self._closed:
             return SessionStatus.CLOSED
         if self.page is None:
             return SessionStatus.LOGIN_REQUIRED
-        target = resolve_old_search_url(self.page.url)
+        target = resolve_search_url(self.page.url)
         if target is None:
             return SessionStatus.SESSION_EXPIRED
         self.page.goto(target, wait_until="domcontentloaded")
         status = self.status()
         if status is not SessionStatus.READY:
             return status
-        if "/kns/advsearch" not in self.page.url.casefold():
+        if "/kns8s/advsearch" not in self.page.url.casefold():
             return SessionStatus.SESSION_EXPIRED
         return SessionStatus.READY
 
@@ -162,17 +141,11 @@ class CnkiSession:
             return SessionStatus.CLOSED
         if self.page is None:
             return SessionStatus.LOGIN_REQUIRED
-        title = self.page.title()
-        visible_text = self.page.locator("body").inner_text(timeout=5_000)
-        status = classify_public_state(url=self.page.url, title=title, visible_text=visible_text)
-        if status is SessionStatus.CAPTCHA and is_old_search_page_contract(
-            page=self.page,
+        return classify_public_state(
             url=self.page.url,
-            title=title,
-            visible_text=visible_text,
-        ):
-            return SessionStatus.READY
-        return status
+            title=self.page.title(),
+            visible_text=self.page.locator("body").inner_text(timeout=5_000),
+        )
 
     def close(self) -> SessionStatus:
         if self.context is not None:

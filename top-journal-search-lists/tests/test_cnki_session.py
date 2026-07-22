@@ -29,6 +29,46 @@ def test_resolve_search_url_uses_new_entry_only() -> None:
     assert resolve_search_url("https://example.com/") is None
 
 
+class RecordingPage:
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.visited: list[str] = []
+
+    def goto(self, url: str, *, wait_until: str) -> None:
+        assert wait_until == "domcontentloaded"
+        self.visited.append(url)
+        self.url = url
+
+    def title(self) -> str:
+        return "中国知网 高级检索"
+
+    def locator(self, selector: str):
+        assert selector == "body"
+        return self
+
+    def inner_text(self, *, timeout: int) -> str:
+        assert timeout == 5_000
+        return "中国知网 高级检索"
+
+
+def test_session_opens_new_search_for_webvpn() -> None:
+    page = RecordingPage("https://webvpn.hhu.edu.cn/")
+    session = CnkiSession()
+    session.page = page
+
+    assert session.open_search() is SessionStatus.READY
+    assert page.visited == [HHU_CNKI_SEARCH_URL]
+
+
+def test_session_rejects_unrelated_host() -> None:
+    page = RecordingPage("https://example.com/")
+    session = CnkiSession()
+    session.page = page
+
+    assert session.open_search() is SessionStatus.SESSION_EXPIRED
+    assert page.visited == []
+
+
 class FakeBrowserType:
     def __init__(self) -> None:
         self.launch_kwargs: dict = {}
@@ -76,7 +116,12 @@ class CaptchaPage:
         return ""
 
     def locator(self, selector: str):
-        raise AssertionError(f"unexpected locator access: {selector}")
+        assert selector == "body"
+        return self
+
+    def inner_text(self, *, timeout: int) -> str:
+        assert timeout == 5_000
+        return ""
 
 
 def test_session_keeps_captcha_status_without_search_page_recovery(
