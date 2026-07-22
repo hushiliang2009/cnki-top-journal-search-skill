@@ -1,9 +1,11 @@
+import inspect
 from pathlib import Path
 
 import pytest
 
 from cnki_search.mcp_server import CnkiMcpServer, REQUIRED_TOOLS
 from cnki_search.models import PaperRecord, SessionStatus
+from cnki_search.session import DIRECT_CNKI_SEARCH_URL
 
 
 def test_mcp_exposes_exact_tool_set() -> None:
@@ -17,6 +19,11 @@ def test_mcp_exposes_exact_tool_set() -> None:
         "cnki_download",
         "cnki_close_session",
     }
+
+
+def test_search_public_signature_has_no_entry_version_parameter() -> None:
+    parameters = inspect.signature(CnkiMcpServer.cnki_search).parameters
+    assert list(parameters) == ["self", "query", "mode", "pages", "fields", "filters"]
 
 
 def test_status_does_not_open_browser_and_has_stable_shape() -> None:
@@ -101,7 +108,7 @@ class FakeNavigator:
 
 
 class FakeSearchPage:
-    url = "https://kns.cnki.net/kns/advsearch?dbcode=CJZK"
+    url = DIRECT_CNKI_SEARCH_URL
 
     def wait_for_load_state(self, state: str) -> None:
         assert state == "domcontentloaded"
@@ -168,7 +175,7 @@ def test_search_stops_when_new_page_is_not_ready(status: SessionStatus) -> None:
 
 
 class StatusChangingSearchPage:
-    url = "https://kns.cnki.net/kns/advsearch?dbcode=CJZK"
+    url = DIRECT_CNKI_SEARCH_URL
 
     def __init__(self) -> None:
         self.waits: list[str] = []
