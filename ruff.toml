@@ -1,0 +1,12 @@
+line-length = 120
+target-version = "py311"
+
+[lint]
+# 与四轮审计使用的规则集一致；不引入 I/UP/B，避免与缺陷无关的全局格式改动
+select = ["E", "F", "W"]
+# E501 仅在既有测试文件里有 4 处超长断言行，重排与本次缺陷修复无关，不纳入门禁
+ignore = ["E501"]
+
+[lint.per-file-ignores]
+# 独立运行的手工冒烟脚本需先把 scripts/ 注入 sys.path 才能导入 cnki_search
+"top-journal-search-lists/tests/_*.py" = ["E402"]

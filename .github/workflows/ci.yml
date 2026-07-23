@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 下限 3.11 由 mcpb/pyproject.toml 的 requires-python 声明，必须持续可用
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 运行全量测试
+        run: >
+          uv run --python ${{ matrix.python-version }}
+          --with pytest --with mcp --with playwright
+          python -m pytest -p no:cacheprovider top-journal-search-lists/tests -q
+
+      # 双布局（Skill / MCPB）的目录定位由 tests/test_cnki_package_contract.py 以子进程断言
+      - name: 校验综合期刊目录
+        working-directory: top-journal-search-lists
+        run: uv run --python ${{ matrix.python-version }} python scripts/catalog_lookup.py validate
+
+  lint:
+    name: ruff + mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: ruff
+        run: uv run --with ruff ruff check .
+
+      - name: mypy
+        working-directory: top-journal-search-lists
+        run: uv run --with mypy --with mcp --with playwright mypy scripts/

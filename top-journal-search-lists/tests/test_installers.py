@@ -185,9 +185,9 @@ def test_merge_codex_cli_writes_parseable_toml_with_windows_paths() -> None:
                 "--config",
                 str(config),
                 "--skill-root",
-                r"C:\\用户\\学术资料\\top-journal-search-lists",
+                r"C:\用户\学术资料\top-journal-search-lists",
                 "--python",
-                r"C:\\用户\\运行时\\python.exe",
+                r"C:\用户\运行时\python.exe",
             ]
         )
 

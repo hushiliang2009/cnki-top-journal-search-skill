@@ -326,7 +326,7 @@ def lookup_journal(index: CatalogIndex, journal: str) -> dict[str, Any]:
         "catalog_version": CATALOG_VERSION,
         "manual_review_required": True,
     }
-    empty = {
+    empty: dict[str, Any] = {
         "matched_title": None,
         "priority_level": None,
         "priority_group": None,

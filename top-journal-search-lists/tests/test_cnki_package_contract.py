@@ -1,3 +1,5 @@
+import ast
+import importlib
 from pathlib import Path
 
 
@@ -53,6 +55,24 @@ def test_main_and_mcpb_sources_and_catalog_are_identical(skill_root: Path) -> No
     assert (skill_root / "references/Academic_Journal_Master_Directory_20260715.md").read_bytes() == (
         skill_root / "mcpb/src/references/Academic_Journal_Master_Directory_20260715.md"
     ).read_bytes()
+
+
+def test_helper_scripts_reference_only_existing_runtime_symbols(skill_root: Path) -> None:
+    """辅助脚本不随契约测试执行，需显式校验其引用的运行时符号仍然存在。"""
+    helpers = sorted((skill_root / "tests").glob("_*.py"))
+    assert helpers, "tests/ 下应至少保留一个辅助脚本"
+    for helper in helpers:
+        tree = ast.parse(helper.read_text(encoding="utf-8"), filename=str(helper))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.level:
+                continue
+            if node.module is None or not node.module.startswith("cnki_search"):
+                continue
+            module = importlib.import_module(node.module)
+            for alias in node.names:
+                assert hasattr(module, alias.name), (
+                    f"{helper.name} 引用了 {node.module}.{alias.name}，该符号已不存在"
+                )
 
 
 def test_skill_uses_ai4scholar_as_primary_and_cnki_as_supplement(skill_root: Path) -> None:
