@@ -23,6 +23,8 @@ CNKI_MODULES = (
     "session.py",
 )
 TEST_RELATIVE = (
+    "tests/_mcp_handshake.py",
+    "tests/_mcpb_handshake.py",
     "tests/conftest.py",
     "tests/test_catalog_lookup.py",
     "tests/test_cnki_cache.py",
