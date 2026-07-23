@@ -401,6 +401,18 @@ class CatalogLookupCrossLayoutTests(unittest.TestCase):
         for module, _label, _path in self.layout_modules:
             self.assertEqual(module._clean_title(title), title)
 
+    def test_clean_title_removes_only_ascii_spaced_chinese_description_suffix(self):
+        expectations = {
+            "Journal - 中文说明": "Journal",
+            "Journal (AJPT) - 中文说明": "Journal",
+            "Journal-中文说明": "Journal-中文说明",
+            "Journal – 中文说明": "Journal – 中文说明",
+        }
+        for module, label, _path in self.layout_modules:
+            for title, expected in expectations.items():
+                with self.subTest(layout=label, title=title):
+                    self.assertEqual(module._clean_title(title), expected)
+
     def test_design_spec_distinguishes_variants_from_real_ambiguity(self):
         spec = (
             ROOT.parent
