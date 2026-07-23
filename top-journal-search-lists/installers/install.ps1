@@ -3,8 +3,6 @@ param(
     [switch]$ClaudeCode,
     [switch]$ClaudeDesktop,
     [string]$PythonExe = 'python',
-    [string]$InternalRuntimePython,
-    [string]$InternalTimeStamp,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RemainingArguments
 )
@@ -109,7 +107,7 @@ $Python = $PythonExe
 Assert-PythonVersion $Python
 
 $SkillSource = Split-Path -Parent $PSScriptRoot
-$TimeStamp = if ($InternalTimeStamp) { $InternalTimeStamp } else { Get-Date -Format 'yyyyMMdd-HHmmss' }
+$TimeStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
 $ClaudeHome = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
 $Succeeded = $false
@@ -123,7 +121,7 @@ try {
 
     $RuntimeRoot = if ($Codex) { Join-Path $CodexHome 'runtimes\cnki-search' } else { Join-Path $ClaudeHome 'runtimes\cnki-search' }
     New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
-    $RuntimePython = if ($InternalRuntimePython) { $InternalRuntimePython } else { Join-Path $RuntimeRoot '.venv\Scripts\python.exe' }
+    $RuntimePython = Join-Path $RuntimeRoot '.venv\Scripts\python.exe'
     if (-not (Test-Path -LiteralPath $RuntimePython -PathType Leaf)) {
         & $Python -m venv (Join-Path $RuntimeRoot '.venv')
         Assert-LastExit 'Creating the CNKI runtime'

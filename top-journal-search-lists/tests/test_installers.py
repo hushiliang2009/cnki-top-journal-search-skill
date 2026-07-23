@@ -1,6 +1,7 @@
 import importlib.util
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
+import shutil
 import subprocess
 import sys
 
@@ -38,6 +39,8 @@ def test_installers_validate_selected_python_before_any_install_write(skill_root
     shell = (skill_root / "installers/install.sh").read_text(encoding="utf-8")
 
     assert "[string]$PythonExe = 'python'" in powershell
+    assert "InternalRuntimePython" not in powershell
+    assert "InternalTimeStamp" not in powershell
     assert "function Assert-PythonVersion" in powershell
     assert "Python 3.11 or higher is required" in powershell
     assert powershell.index("Assert-PythonVersion") < powershell.index("Install-SkillCopy")
@@ -143,7 +146,21 @@ def test_powershell_rejects_python_310_before_creating_install_paths(
     assert not (appdata / "Claude").exists()
 
 
-def _write_recording_runtime(path: Path, *, fail_browser_check: bool) -> None:
+def _load_release_builder(skill_root: Path):
+    builder_path = skill_root / "scripts" / "build_release.py"
+    spec = importlib.util.spec_from_file_location("cnki_installer_test_copy", builder_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _copy_test_skill(skill_root: Path, destination: Path) -> Path:
+    _load_release_builder(skill_root).copy_skill_tree(skill_root, destination)
+    return destination
+
+
+def _write_recording_powershell_runtime(path: Path, *, fail_browser_check: bool) -> None:
     failure = "if ($joined -like '*chromium.launch*') { exit 71 }\n" if fail_browser_check else ""
     path.write_text(
         "param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)\n"
@@ -157,19 +174,126 @@ def _write_recording_runtime(path: Path, *, fail_browser_check: bool) -> None:
     )
 
 
+def _prepare_powershell_test_skill(
+    skill_root: Path, destination: Path, runtime_python: Path, timestamp: str,
+) -> Path:
+    copied_skill = _copy_test_skill(skill_root, destination)
+    installer = copied_skill / "installers" / "install.ps1"
+    lines = installer.read_text(encoding="utf-8").splitlines()
+    timestamp_lines = [
+        index for index, line in enumerate(lines)
+        if line.strip().startswith("$TimeStamp = Get-Date")
+    ]
+    runtime_lines = [
+        index for index, line in enumerate(lines)
+        if line.strip().startswith("$RuntimePython = Join-Path $RuntimeRoot")
+    ]
+    assert len(timestamp_lines) == 1
+    assert len(runtime_lines) == 1
+    escaped_runtime = str(runtime_python).replace("'", "''")
+    lines[timestamp_lines[0]] = f"$TimeStamp = '{timestamp}'"
+    lines[runtime_lines[0]] = f"    $RuntimePython = '{escaped_runtime}'"
+    rewritten = "\n".join(lines) + "\n"
+    assert f"$TimeStamp = '{timestamp}'" in rewritten
+    assert f"$RuntimePython = '{escaped_runtime}'" in rewritten
+    assert "$TimeStamp = Get-Date" not in rewritten
+    assert "$RuntimePython = Join-Path $RuntimeRoot" not in rewritten
+    installer.write_text(rewritten, encoding="utf-8-sig")
+    return copied_skill
+
+
 def _run_powershell_installer(
-    skill_root: Path, environment: dict[str, str], runtime_python: Path, timestamp: str,
+    copied_skill: Path, environment: dict[str, str],
 ) -> subprocess.CompletedProcess[str]:
-    command = (
-        f"& '{skill_root / 'installers' / 'install.ps1'}' -Codex "
-        f"-PythonExe '{sys.executable}' -InternalRuntimePython '{runtime_python}' "
-        f"-InternalTimeStamp '{timestamp}'"
-    )
+    command = f"& '{copied_skill / 'installers' / 'install.ps1'}' -Codex -PythonExe '{sys.executable}'"
     return subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-        cwd=skill_root,
+        cwd=copied_skill,
         env=environment,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+
+
+def _git_sh() -> str:
+    if os.name != "nt":
+        shell = shutil.which("sh")
+        assert shell is not None
+        return shell
+    shell = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "usr" / "bin" / "sh.exe"
+    assert shell.is_file()
+    return str(shell)
+
+
+def _shell_path(path: Path) -> str:
+    return path.as_posix() if os.name == "nt" else str(path)
+
+
+def _shell_test_environment(tmp_path: Path, codex_home: Path, **extra: str) -> dict[str, str]:
+    shell_tmp = tmp_path / "shell-tmp"
+    shell_tmp.mkdir(exist_ok=True)
+    environment = os.environ | {
+        "HOME": _shell_path(tmp_path / "home"),
+        "CODEX_HOME": _shell_path(codex_home),
+        "TMPDIR": _shell_path(shell_tmp),
+        **extra,
+    }
+    if os.name == "nt":
+        git_usr_bin = str(Path(_git_sh()).parent)
+        environment["PATH"] = f"{git_usr_bin};{environment.get('PATH', '')}"
+    return environment
+
+
+def _write_recording_shell_runtime(path: Path, *, fail_browser_check: bool) -> None:
+    failure = "case \"$*\" in *chromium.launch*) exit 71 ;; esac\n" if fail_browser_check else ""
+    path.write_text(
+        "#!/bin/sh\n"
+        "printf 'RUNTIME:%s\\n' \"$*\"\n"
+        f"{failure}"
+        "if [ \"$1\" = '-m' ] || [ \"$1\" = '-c' ]; then exit 0; fi\n"
+        "\"$CNKI_TEST_REAL_PYTHON\" \"$@\"\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _prepare_shell_test_skill(
+    skill_root: Path, destination: Path, runtime_python: Path, timestamp: str,
+) -> Path:
+    copied_skill = _copy_test_skill(skill_root, destination)
+    installer = copied_skill / "installers" / "install.sh"
+    lines = installer.read_text(encoding="utf-8").splitlines()
+    timestamp_lines = [index for index, line in enumerate(lines) if line.strip().startswith("timestamp=$(date")]
+    runtime_lines = [
+        index for index, line in enumerate(lines)
+        if line.strip().startswith('runtime_python="$runtime_root')
+    ]
+    assert len(timestamp_lines) == 1
+    assert len(runtime_lines) == 1
+    shell_runtime = _shell_path(runtime_python).replace("'", "'\"'\"'")
+    lines[timestamp_lines[0]] = f"timestamp={timestamp}"
+    lines[runtime_lines[0]] = f"runtime_python='{shell_runtime}'"
+    rewritten = "\n".join(lines) + "\n"
+    assert f"timestamp={timestamp}" in rewritten
+    assert f"runtime_python='{shell_runtime}'" in rewritten
+    assert "timestamp=$(date" not in rewritten
+    assert 'runtime_python="$runtime_root' not in rewritten
+    installer.write_text(rewritten, encoding="utf-8")
+    installer.chmod(0o755)
+    return copied_skill
+
+
+def _run_shell_installer(copied_skill: Path, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [_git_sh(), _shell_path(copied_skill / "installers" / "install.sh"), "--codex"],
+        cwd=copied_skill,
+        env=environment,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
     )
@@ -179,7 +303,7 @@ def test_powershell_success_runs_required_offline_runtime_sequence(
     skill_root: Path, tmp_path: Path,
 ) -> None:
     runtime_python = tmp_path / "recording-runtime.ps1"
-    _write_recording_runtime(runtime_python, fail_browser_check=False)
+    _write_recording_powershell_runtime(runtime_python, fail_browser_check=False)
     codex_home = tmp_path / "codex-home"
     environment = os.environ | {
         "USERPROFILE": str(tmp_path / "profile"),
@@ -188,7 +312,10 @@ def test_powershell_success_runs_required_offline_runtime_sequence(
         "CNKI_TEST_REAL_PYTHON": sys.executable,
     }
 
-    result = _run_powershell_installer(skill_root, environment, runtime_python, "20260723-120001")
+    copied_skill = _prepare_powershell_test_skill(
+        skill_root, tmp_path / "skill-copy", runtime_python, "20260723-120001"
+    )
+    result = _run_powershell_installer(copied_skill, environment)
 
     assert result.returncode == 0, result.stderr
     commands = result.stdout
@@ -202,7 +329,7 @@ def test_powershell_browser_self_check_failure_restores_existing_skill_and_confi
     skill_root: Path, tmp_path: Path,
 ) -> None:
     runtime_python = tmp_path / "failing-runtime.ps1"
-    _write_recording_runtime(runtime_python, fail_browser_check=True)
+    _write_recording_powershell_runtime(runtime_python, fail_browser_check=True)
     codex_home = tmp_path / "codex-home"
     original_skill = codex_home / "skills" / "top-journal-search-lists"
     original_skill.mkdir(parents=True)
@@ -217,7 +344,10 @@ def test_powershell_browser_self_check_failure_restores_existing_skill_and_confi
         "CNKI_TEST_REAL_PYTHON": sys.executable,
     }
 
-    result = _run_powershell_installer(skill_root, environment, runtime_python, "20260723-120002")
+    copied_skill = _prepare_powershell_test_skill(
+        skill_root, tmp_path / "skill-copy", runtime_python, "20260723-120002"
+    )
+    result = _run_powershell_installer(copied_skill, environment)
 
     assert result.returncode != 0
     assert "Launching the offline Chromium self-check" in result.stderr
@@ -230,7 +360,7 @@ def test_powershell_success_rotates_only_four_matching_backups_to_three(
     skill_root: Path, tmp_path: Path,
 ) -> None:
     runtime_python = tmp_path / "recording-runtime.ps1"
-    _write_recording_runtime(runtime_python, fail_browser_check=False)
+    _write_recording_powershell_runtime(runtime_python, fail_browser_check=False)
     codex_home = tmp_path / "codex-home"
     original_skill = codex_home / "skills" / "top-journal-search-lists"
     original_skill.mkdir(parents=True)
@@ -250,13 +380,125 @@ def test_powershell_success_rotates_only_four_matching_backups_to_three(
     }
 
     for timestamp in ("20260723-120101", "20260723-120102", "20260723-120103", "20260723-120104"):
-        result = _run_powershell_installer(skill_root, environment, runtime_python, timestamp)
+        copied_skill = _prepare_powershell_test_skill(
+            skill_root, tmp_path / f"skill-copy-{timestamp}", runtime_python, timestamp
+        )
+        result = _run_powershell_installer(copied_skill, environment)
         assert result.returncode == 0, result.stderr
 
     skill_backups = sorted(original_skill.parent.glob("top-journal-search-lists.backup-????????-??????"))
     config_backups = sorted(config.parent.glob("config.toml.backup-????????-??????"))
     assert len(skill_backups) == 3
     assert len(config_backups) == 3
+    assert unmatched_skill.is_dir()
+    assert unmatched_config.read_text(encoding="utf-8") == "keep"
+
+
+def test_shell_rejects_python_310_before_creating_install_paths(skill_root: Path, tmp_path: Path) -> None:
+    fake_python = tmp_path / "python310.sh"
+    fake_python.write_text("#!/bin/sh\nprintf 'Python 3.10.9\\n'\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+    copied_skill = _copy_test_skill(skill_root, tmp_path / "skill-copy")
+    codex_home = tmp_path / "codex-home"
+    environment = _shell_test_environment(
+        tmp_path, codex_home, **{"CNKI_PYTHON": _shell_path(fake_python)},
+    )
+
+    result = _run_shell_installer(copied_skill, environment)
+
+    assert result.returncode != 0
+    assert "Python 3.10.9" in result.stderr
+    assert not (codex_home / "skills").exists()
+    assert not (codex_home / "runtimes").exists()
+
+
+def test_shell_success_runs_required_offline_runtime_sequence(skill_root: Path, tmp_path: Path) -> None:
+    runtime_python = tmp_path / "recording-runtime.sh"
+    _write_recording_shell_runtime(runtime_python, fail_browser_check=False)
+    copied_skill = _prepare_shell_test_skill(
+        skill_root, tmp_path / "skill-copy", runtime_python, "20260723-130001"
+    )
+    codex_home = tmp_path / "codex-home"
+    environment = _shell_test_environment(
+        tmp_path,
+        codex_home,
+        **{
+            "CNKI_PYTHON": _shell_path(Path(sys.executable)),
+            "CNKI_TEST_REAL_PYTHON": _shell_path(Path(sys.executable)),
+        },
+    )
+
+    result = _run_shell_installer(copied_skill, environment)
+
+    assert result.returncode == 0, result.stderr
+    assert "-m playwright install chromium chromium-headless-shell" in result.stdout
+    assert "import cnki_search.mcp_server" in result.stdout
+    assert "chromium.launch" in result.stdout
+
+
+def test_shell_browser_self_check_failure_restores_existing_skill_and_config(
+    skill_root: Path, tmp_path: Path,
+) -> None:
+    runtime_python = tmp_path / "failing-runtime.sh"
+    _write_recording_shell_runtime(runtime_python, fail_browser_check=True)
+    copied_skill = _prepare_shell_test_skill(
+        skill_root, tmp_path / "skill-copy", runtime_python, "20260723-130002"
+    )
+    codex_home = tmp_path / "codex-home"
+    original_skill = codex_home / "skills" / "top-journal-search-lists"
+    original_skill.mkdir(parents=True)
+    (original_skill / "original.txt").write_text("original skill", encoding="utf-8")
+    config = codex_home / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("[mcp_servers.zotero]\ncommand = 'zotero-mcp'\n", encoding="utf-8")
+    environment = _shell_test_environment(
+        tmp_path,
+        codex_home,
+        **{
+            "CNKI_PYTHON": _shell_path(Path(sys.executable)),
+            "CNKI_TEST_REAL_PYTHON": _shell_path(Path(sys.executable)),
+        },
+    )
+
+    result = _run_shell_installer(copied_skill, environment)
+
+    assert result.returncode != 0
+    assert "chromium.launch" in result.stdout
+    assert (original_skill / "original.txt").read_text(encoding="utf-8") == "original skill"
+    assert config.read_text(encoding="utf-8") == "[mcp_servers.zotero]\ncommand = 'zotero-mcp'\n"
+
+
+def test_shell_success_rotates_four_matching_backups_to_three(skill_root: Path, tmp_path: Path) -> None:
+    runtime_python = tmp_path / "recording-runtime.sh"
+    _write_recording_shell_runtime(runtime_python, fail_browser_check=False)
+    codex_home = tmp_path / "codex-home"
+    original_skill = codex_home / "skills" / "top-journal-search-lists"
+    original_skill.mkdir(parents=True)
+    config = codex_home / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("[profiles.default]\nmodel = 'gpt-5'\n", encoding="utf-8")
+    unmatched_skill = original_skill.with_name(f"{original_skill.name}.backup-not-installer")
+    unmatched_skill.mkdir()
+    unmatched_config = config.with_name("config.toml.backup-not-installer")
+    unmatched_config.write_text("keep", encoding="utf-8")
+    environment = _shell_test_environment(
+        tmp_path,
+        codex_home,
+        **{
+            "CNKI_PYTHON": _shell_path(Path(sys.executable)),
+            "CNKI_TEST_REAL_PYTHON": _shell_path(Path(sys.executable)),
+        },
+    )
+
+    for timestamp in ("20260723-130101", "20260723-130102", "20260723-130103", "20260723-130104"):
+        copied_skill = _prepare_shell_test_skill(
+            skill_root, tmp_path / f"skill-copy-{timestamp}", runtime_python, timestamp
+        )
+        result = _run_shell_installer(copied_skill, environment)
+        assert result.returncode == 0, result.stderr
+
+    assert len(list(original_skill.parent.glob("top-journal-search-lists.backup-????????-??????"))) == 3
+    assert len(list(config.parent.glob("config.toml.backup-????????-??????"))) == 3
     assert unmatched_skill.is_dir()
     assert unmatched_config.read_text(encoding="utf-8") == "keep"
 
