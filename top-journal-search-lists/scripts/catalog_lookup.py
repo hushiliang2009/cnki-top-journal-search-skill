@@ -154,6 +154,7 @@ def _clean_title(raw: str) -> str:
     raw = re.sub(r"^\[.*?\]\s*", "", raw)
     raw = re.sub(r"\s*[\(\uFF08][^)\uFF09]*[\)\uFF09](?=\s+-\s+)", "", raw)
     raw = re.sub(r"\s*[\(\uFF08][^)\uFF09]*[\)\uFF09]\s*", "", raw)
+    raw = re.sub(r"\s*[\[\u3010][^\]\u3011]*[\]\u3011](?=\s+-\s+)", "", raw)
     raw = re.sub(r"\s*[\[\u3010][^\]\u3011]*[\]\u3011]\s*", "", raw)
     dash_match = re.match(r"^(.+?) - ([\u4e00-\u9fff].*)$", raw)
     if dash_match:

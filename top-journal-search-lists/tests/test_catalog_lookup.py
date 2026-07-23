@@ -405,6 +405,8 @@ class CatalogLookupCrossLayoutTests(unittest.TestCase):
         expectations = {
             "Journal - 中文说明": "Journal",
             "Journal (AJPT) - 中文说明": "Journal",
+            "Journal [AJPT] - 中文说明": "Journal",
+            "Journal 【AJPT】 - 中文说明": "Journal",
             "Journal-中文说明": "Journal-中文说明",
             "Journal – 中文说明": "Journal – 中文说明",
         }
