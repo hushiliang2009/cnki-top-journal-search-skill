@@ -17,6 +17,7 @@ class SearchStatus(StrEnum):
     FORBIDDEN = "forbidden"
     PAGE_CONTRACT_CHANGED = "page_contract_changed"
     NETWORK_ERROR = "network_error"
+    CONFIGURATION_ERROR = "configuration_error"
 
 
 @dataclass(frozen=True, slots=True)

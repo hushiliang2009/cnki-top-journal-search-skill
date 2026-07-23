@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from catalog_lookup import DEFAULT_CATALOG
+from catalog_lookup import DEFAULT_CATALOG, validate_catalog
 
 from .cache import SearchCache
 from .models import SearchOutcome, SearchRequest, SearchStatus
@@ -34,6 +34,14 @@ class CnkiPublicSearchService:
 
     def search(self, query: str, limit: int = 20) -> SearchOutcome:
         request = SearchRequest(query, limit)
+        try:
+            validate_catalog(self.catalog)
+        except (FileNotFoundError, ValueError, OSError):
+            return empty_outcome(
+                SearchStatus.CONFIGURATION_ERROR,
+                request.query,
+                "期刊目录不可用，请重新安装或指定有效目录。",
+            )
         cached = self.cache.get(request.query, request.limit)
         if cached is not None:
             return cached

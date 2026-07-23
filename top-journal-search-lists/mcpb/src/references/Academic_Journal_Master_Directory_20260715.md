@@ -221,7 +221,13 @@ output_fields:
 #### 5. 综合及开放获取 (Open Access 矩阵)
 * Nature Communications (综合性高质量OA巨头)
 * Scientific Reports (综合性巨型OA期刊)
-* Communications 系列 (含 Biology, Chemistry, Earth & Environment, Engineering, Materials, Medicine, Physics)
+* **Communications Biology**
+* **Communications Chemistry**
+* **Communications Earth & Environment**
+* **Communications Engineering**
+* **Communications Materials**
+* **Communications Medicine**
+* **Communications Physics**
 
 ---
 

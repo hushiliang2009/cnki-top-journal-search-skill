@@ -51,6 +51,7 @@ TEST_ALLOWLIST = (
     "tests/fixtures/synthetic_malformed_public_results.html",
 )
 MCPB_ALLOWLIST = (
+    ".mcpbignore",
     "manifest.json",
     "pyproject.toml",
     "src/catalog_lookup.py",

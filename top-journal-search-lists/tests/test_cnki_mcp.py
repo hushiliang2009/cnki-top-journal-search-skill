@@ -1,5 +1,6 @@
 import inspect
 
+from cnki_search import __version__
 from cnki_search.mcp_server import CnkiMcpServer, REQUIRED_TOOLS
 from cnki_search.models import SearchOutcome, SearchStatus
 
@@ -9,6 +10,18 @@ class FakeService:
         return SearchOutcome(
             SearchStatus.NO_RESULTS, query, [], [], 0, [], "2026-07-22T00:00:00+00:00",
         )
+
+
+class FakeFastMCP:
+    class ProtocolServer:
+        version: str | None = None
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self._mcp_server = self.ProtocolServer()
+
+    def tool(self, **_kwargs: object):
+        return lambda function: function
 
 
 def test_mcp_exposes_exact_public_tool() -> None:
@@ -42,3 +55,18 @@ def test_public_tool_returns_service_outcome() -> None:
         "warnings": [],
         "searched_at": "2026-07-22T00:00:00+00:00",
     }
+
+
+def test_fastmcp_announces_product_version() -> None:
+    server = CnkiMcpServer(service=FakeService())
+    mcp = server.build_fastmcp(FakeFastMCP)
+    assert __version__ == "0.3.0"
+    assert mcp.name == "CNKI Public Search"
+    assert mcp._mcp_server.version == __version__
+
+
+def test_installed_fastmcp_accepts_product_version_configuration() -> None:
+    from mcp.server.fastmcp import FastMCP
+
+    mcp = CnkiMcpServer(service=FakeService()).build_fastmcp(FastMCP)
+    assert mcp._mcp_server.version == __version__

@@ -41,16 +41,7 @@ TOP5 = [
 ]
 CATALOG_VERSION = "2026-07-15"
 CatalogIndex = dict[str, list[dict[str, Any]]]
-COMMUNICATIONS_SERIES = (
-    "Communications Biology",
-    "Communications Chemistry",
-    "Communications Earth & Environment",
-    "Communications Engineering",
-    "Communications Materials",
-    "Communications Medicine",
-    "Communications Physics",
-)
-_DISPLAY_SUFFIX = re.compile(r"\s*(?:\(网络首发\)|\[网络首发\]|「网络首发」)\s*$")
+_DISPLAY_SUFFIX = re.compile(r"(?:\(网络首发\)|\[网络首发\]|「网络首发」)\s*$")
 GENERIC_NCS_LABELS = (
     "五大",
     "部分",
@@ -71,7 +62,7 @@ def _resolve_catalog_path(path: Path | None = None) -> Path:
         fallback = root / CATALOG_FILENAME
         if fallback.is_file():
             return fallback
-    raise FileNotFoundError(f"未找到默认期刊目录文件：{CATALOG_FILENAME}")
+    return PARENT_DIR / "references" / CATALOG_FILENAME
 
 
 def normalize_title(value: str) -> str:
@@ -106,7 +97,7 @@ DEFAULT_CATALOG = _resolve_catalog_path()
 def _read_catalog(path: Path) -> str:
     path = _resolve_catalog_path(path)
     if not path.is_file():
-        raise FileNotFoundError(f"未找到期刊目录文件：{path}")
+        raise FileNotFoundError(f"未找到期刊目录文件：{CATALOG_FILENAME}")
     return path.read_text(encoding="utf-8-sig").replace("\r\n", "\n")
 
 
@@ -269,17 +260,6 @@ def _index_ncs(index: CatalogIndex, text: str) -> None:
         bold_titles = re.findall(r"\*\*([^*]+)\*\*", line)
         candidates = bold_titles or [re.sub(r"^\s*\*\s+", "", line)]
         for candidate in candidates:
-            if "Communications 系列" in candidate:
-                for series_title in COMMUNICATIONS_SERIES:
-                    _add(
-                        index,
-                        series_title,
-                        2,
-                        "ncs_pnas",
-                        "NCS_PNAS_Directory.md",
-                        ncs_internal_rank=internal_rank,
-                    )
-                continue
             if any(label in candidate for label in GENERIC_NCS_LABELS):
                 continue
             _add(

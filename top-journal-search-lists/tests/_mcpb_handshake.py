@@ -21,11 +21,12 @@ async def run() -> None:
     )
     async with stdio_client(parameters) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
+            initialized = await session.initialize()
+            assert initialized.serverInfo.version == "0.3.0"
             tools = await session.list_tools()
             names = [tool.name for tool in tools.tools]
             assert names == ["cnki_search"]
-            print({"tools": names})
+            print({"tools": names, "version": initialized.serverInfo.version})
 
 
 if __name__ == "__main__":

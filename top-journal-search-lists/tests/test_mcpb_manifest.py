@@ -53,6 +53,7 @@ EXPECTED_SKILL_RELATIVE = (
     "installers/install.ps1",
     "installers/install.sh",
     "mcpb/manifest.json",
+    "mcpb/.mcpbignore",
     "mcpb/pyproject.toml",
     "mcpb/src/catalog_lookup.py",
     *(f"mcpb/src/cnki_search/{name}" for name in CNKI_MODULES),
@@ -96,7 +97,7 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
     assert manifest["manifest_version"] == "0.4"
     assert manifest["name"] == "cnki-search"
     assert manifest["display_name"] == "CNKI Public Theme Search"
-    assert manifest["version"] == "0.2.0"
+    assert manifest["version"] == "0.3.0"
     assert manifest["description"] == (
         "Public CNKI theme search with master-journal classification; no login or downloads."
     )
@@ -120,7 +121,7 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
 
 def test_mcpb_pyproject_declares_public_runtime_dependencies(skill_root: Path) -> None:
     text = (skill_root / "mcpb/pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.2.0"' in text
+    assert 'version = "0.3.0"' in text
     assert 'requires-python = ">=3.11"' in text
     assert '"mcp>=1,<2"' in text
     assert '"playwright>=1.45,<2"' in text
@@ -134,6 +135,18 @@ def test_release_builder_is_present(skill_root: Path) -> None:
     assert "TemporaryDirectory" in text
     assert "ALLOWLIST" in text
     assert "checksums.sha256" in text
+
+
+def test_all_runtime_versions_are_consistent(skill_root: Path) -> None:
+    expected = "0.3.0"
+    for relative in (
+        "scripts/cnki_search/__init__.py",
+        "mcpb/src/cnki_search/__init__.py",
+    ):
+        text = (skill_root / relative).read_text(encoding="utf-8")
+        assert f'__version__ = "{expected}"' in text
+    lock_text = (skill_root / "mcpb/uv.lock").read_text(encoding="utf-8")
+    assert f'name = "cnki-search-mcp"\nversion = "{expected}"' in lock_text
 
 
 def test_release_builder_creates_clean_archives(skill_root: Path) -> None:
@@ -169,7 +182,7 @@ def test_release_archives_have_exact_allowlisted_members_and_source_bytes(skill_
                 skill_root / relative
             ).read_bytes()
     with zipfile.ZipFile(mcpb_zip) as archive:
-        assert archive.namelist() == list(EXPECTED_MCPB_RELATIVE)
+        assert archive.namelist() == sorted(EXPECTED_MCPB_RELATIVE)
         for relative in EXPECTED_MCPB_RELATIVE:
             assert archive.read(relative) == (skill_root / "mcpb" / relative).read_bytes()
 
@@ -225,4 +238,4 @@ def test_release_build_excludes_unlisted_and_state_baits(skill_root: Path, tmp_p
             f"top-journal-search-lists/{relative}" for relative in sorted(EXPECTED_SKILL_RELATIVE)
         ]
     with zipfile.ZipFile(mcpb_zip) as archive:
-        assert archive.namelist() == list(EXPECTED_MCPB_RELATIVE)
+        assert archive.namelist() == sorted(EXPECTED_MCPB_RELATIVE)

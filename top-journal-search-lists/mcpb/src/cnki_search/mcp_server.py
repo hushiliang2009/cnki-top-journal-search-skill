@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial, wraps
 from typing import Any, Callable
 
+from . import __version__
 from .service import CnkiPublicSearchService
 
 
@@ -46,6 +47,7 @@ class CnkiMcpServer:
 
             fastmcp_class = FastMCP
         mcp = fastmcp_class("CNKI Public Search")
+        mcp._mcp_server.version = __version__
         mcp.tool(
             name="cnki_search",
             description="从中国知网公开首页执行固定主题检索，并按主期刊目录标注第一页期刊论文。",

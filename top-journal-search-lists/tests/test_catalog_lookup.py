@@ -380,6 +380,7 @@ class CatalogLookupCrossLayoutTests(unittest.TestCase):
     def test_layouts_build_index_and_merge_communications_series_to_level_2(self):
         for module, _label, _path in self.layout_modules:
             index = module.build_index(module.DEFAULT_CATALOG)
+            self.assertFalse(hasattr(module, "COMMUNICATIONS_SERIES"))
             for title in ("Communications Biology", "Communications Chemistry"):
                 result = module.lookup_journals(
                     module.DEFAULT_CATALOG,
@@ -387,6 +388,27 @@ class CatalogLookupCrossLayoutTests(unittest.TestCase):
                 )[0]
                 self.assertEqual(result["status"], "matched")
                 self.assertEqual(result["priority_level"], 2)
+
+    def test_display_suffix_pattern_has_no_leading_whitespace_backtracking(self):
+        for module, _label, _path in self.layout_modules:
+            self.assertTrue(module._DISPLAY_SUFFIX.pattern.startswith("(?:"))
+
+    def test_bilingual_parallel_journal_title_is_not_truncated(self):
+        title = (
+            "Zeitschrift fur Ethnologie - "
+            "Journal of Social and Cultural Anthropology"
+        )
+        for module, _label, _path in self.layout_modules:
+            self.assertEqual(module._clean_title(title), title)
+
+    def test_design_spec_distinguishes_variants_from_real_ambiguity(self):
+        spec = (
+            ROOT.parent
+            / "docs/superpowers/specs/2026-07-22-cnki-public-theme-search-design.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("冠词、连接词、标点、大小写和全半角", spec)
+        self.assertIn("保守变体键", spec)
+        self.assertIn("采用数值最小的最高优先级", spec)
 
     def test_variant_grouping_and_min_level_for_expected_keys_in_both_layouts(self):
         for module, _label, _path in self.layout_modules:

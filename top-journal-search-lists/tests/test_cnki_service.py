@@ -48,6 +48,15 @@ class CountingGate:
         return 0.0
 
 
+class ForbiddenSessionFactory:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> None:
+        self.calls += 1
+        raise AssertionError("配置错误时不得访问 CNKI")
+
+
 class SequenceFactory:
     def __init__(self, snapshots: list[SearchSnapshot]) -> None:
         self.snapshots = snapshots
@@ -77,6 +86,26 @@ def test_network_error_retries_once_only() -> None:
     outcome = CnkiPublicSearchService(session_factory=factory, catalog=CATALOG, gate=gate).search("主题")
     assert outcome.status is SearchStatus.NETWORK_ERROR
     assert (factory.calls, gate.calls) == (2, 2)
+
+
+def test_missing_catalog_returns_configuration_error_without_network_access(
+    tmp_path: Path,
+) -> None:
+    factory = ForbiddenSessionFactory()
+    gate = CountingGate()
+    missing = tmp_path / "missing" / "Academic_Journal_Master_Directory_20260715.md"
+
+    outcome = CnkiPublicSearchService(
+        session_factory=factory,
+        catalog=missing,
+        gate=gate,
+    ).search("主题")
+
+    assert outcome.status is SearchStatus.CONFIGURATION_ERROR
+    assert factory.calls == 0
+    assert gate.calls == 0
+    assert outcome.warnings
+    assert str(tmp_path) not in "\n".join(outcome.warnings)
 
 
 PlaywrightTimeoutBase = type(
