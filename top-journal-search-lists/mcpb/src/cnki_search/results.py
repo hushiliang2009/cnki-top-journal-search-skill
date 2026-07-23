@@ -23,15 +23,24 @@ def extract_publication_year(value: str) -> int | None:
     仍要求整体是一个合法日期（不放宽为"抓到四位数字就算"），但接受两种此前
     被整条丢弃的真实写法：带秒的时间戳与 `/` 日期分隔符。
     """
-    match = re.fullmatch(
-        r"\s*((?:19|20)\d{2})(?:[-/](\d{2})(?:[-/](\d{2}))?)?"
-        r"(?:[\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?\s*",
+    match = re.search(
+        r"(?<![A-Za-z0-9])(?P<year>(?:19|20)\d{2})"
+        r"(?:(?P<separator>[-/])(?P<month>\d{1,2})"
+        r"(?:(?P=separator)(?P<day>\d{1,2}))?)?"
+        r"(?:\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?)?"
+        r"(?![\d年])",
         value,
     )
     if not match:
         return None
-    year, month, day = int(match[1]), match[2], match[3]
-    hour, minute, second = match[4], match[5], match[6]
+    remainder = value[match.end():]
+    if remainder and (remainder[0] in "-/:年" or re.match(r"[A-Za-z0-9]", remainder)):
+        return None
+    if re.match(r"\s+(?:\d{1,2}:|[-/:])", remainder):
+        return None
+    year = int(match["year"])
+    month, day = match["month"], match["day"]
+    hour, minute, second = match["hour"], match["minute"], match["second"]
     try:
         date(year, int(month or 1), int(day or 1))
     except ValueError:
@@ -102,8 +111,10 @@ class _PublicTableParser(HTMLParser):
         if not self.in_result_row:
             return
         if tag == "tr":
+            self._finish_row()
             self.current = _RawRow()
         elif self.current is not None and tag == "td":
+            self._finish_cell()
             self.cell = next((name for name in self._MAP if name in classes), None)
             self.buffer = []
         elif self.current is not None and tag == "a" and self.cell in {"name", "source"}:
@@ -132,20 +143,30 @@ class _PublicTableParser(HTMLParser):
             self.in_primary_link = False
             if self.current is not None and self.cell == "author":
                 self.buffer.append(self._AUTHOR_SEPARATOR)
-        elif tag == "td" and self.current is not None and self.cell:
+        elif tag == "td":
+            self._finish_cell()
+        elif tag == "tr":
+            self._finish_row()
+
+    def _finish_cell(self) -> None:
+        if self.current is not None and self.cell:
             joined = "".join(text for text in self.buffer if text.strip() != "网络首发")
             value = re.sub(r"\s+", " ", joined).strip()
             setattr(self.current, self._MAP[self.cell], value)
-            self.cell, self.buffer = None, []
-        elif tag == "tr" and self.current is not None:
-            if any((self.current.title, self.current.journal, self.current.document_type)):
-                self.rows.append(self.current)
-            self.current = None
+        self.cell, self.buffer, self.in_primary_link = None, [], False
+
+    def _finish_row(self) -> None:
+        self._finish_cell()
+        if self.current is not None and any(
+            (self.current.title, self.current.journal, self.current.document_type)
+        ):
+            self.rows.append(self.current)
+        self.current = None
 
 
 def _to_int(value: str) -> int | None:
     # CNKI 对四位以上的被引/下载量使用千分位分隔符（如 3,204）
-    stripped = re.sub(r"[,，]", "", value.strip())
+    stripped = re.sub(r"[,，\s]", "", value)
     return int(stripped) if re.fullmatch(r"\d+", stripped) else None
 
 

@@ -1,5 +1,8 @@
 from pathlib import Path
 from datetime import date
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -54,6 +57,121 @@ def test_nested_table_in_cell_does_not_swallow_following_records(fixtures: Path)
     assert [record.title for record in parsed.records] == [
         "带脚注表格的题录", "嵌套表格之后的合法题录",
     ]
+
+
+def test_stage3b_parser_behavior_runs_independently_in_both_layouts(fixtures: Path) -> None:
+    fixture = fixtures / "public_results_stage3b.html"
+    roots = (Path(__file__).resolve().parents[1] / "scripts", Path(__file__).resolve().parents[1] / "mcpb" / "src")
+    program = f"""
+from pathlib import Path
+from cnki_search.results import parse_public_result_page
+
+parsed = parse_public_result_page(Path({str(fixture)!r}).read_text(encoding='utf-8'), query='topic', limit=20)
+assert parsed.total_rows == 2
+assert [record.title for record in parsed.records] == ['Supply Chain Finance', 'After Nested Table']
+assert parsed.records[0].authors == ['Alice Adams', 'Bob Brown']
+assert parsed.records[0].publication_year == 2026
+assert (parsed.records[0].citations, parsed.records[0].downloads) == (1234, 5678)
+"""
+    for root in roots:
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=root,
+            env=os.environ | {"PYTHONPATH": str(root)},
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
+def test_date_candidate_rejects_malformed_suffixes_in_both_layouts() -> None:
+    roots = (Path(__file__).resolve().parents[1] / "scripts", Path(__file__).resolve().parents[1] / "mcpb" / "src")
+    program = """
+from cnki_search.results import extract_publication_year
+
+for value in (
+    'bad 2026--01',
+    'bad 2026/abc',
+    'bad 2026 1:2',
+    'first 2026--01 then 2024-05-01',
+    'abc2026def',
+    'version2026beta',
+):
+    assert extract_publication_year(value) is None, value
+assert extract_publication_year('published 2026/07/20 10:20:30') == 2026
+assert extract_publication_year('Published: 2026/07/20 10:20:30') == 2026
+"""
+    for root in roots:
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=root,
+            env=os.environ | {"PYTHONPATH": str(root)},
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
+def test_missing_cell_close_is_completed_in_both_layouts(fixtures: Path) -> None:
+    fixture = fixtures / "public_results_stage3b_missing_td.html"
+    roots = (Path(__file__).resolve().parents[1] / "scripts", Path(__file__).resolve().parents[1] / "mcpb" / "src")
+    program = f"""
+from pathlib import Path
+from cnki_search.results import parse_public_result_page
+
+parsed = parse_public_result_page(Path({str(fixture)!r}).read_text(encoding='utf-8'), query='topic', limit=20)
+assert [record.title for record in parsed.records] == ['Missing Cell Close']
+assert parsed.incomplete_records == []
+"""
+    for root in roots:
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=root,
+            env=os.environ | {"PYTHONPATH": str(root)},
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
+def test_missing_first_row_close_is_completed_in_both_layouts(fixtures: Path) -> None:
+    fixture = fixtures / "public_results_stage3b_missing_tr.html"
+    roots = (Path(__file__).resolve().parents[1] / "scripts", Path(__file__).resolve().parents[1] / "mcpb" / "src")
+    program = f"""
+from pathlib import Path
+from cnki_search.results import parse_public_result_page
+
+parsed = parse_public_result_page(Path({str(fixture)!r}).read_text(encoding='utf-8'), query='topic', limit=20)
+assert [record.title for record in parsed.records] == ['First Missing Row Close', 'Second Complete Row']
+assert parsed.incomplete_records == []
+"""
+    for root in roots:
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=root,
+            env=os.environ | {"PYTHONPATH": str(root)},
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
+def test_nested_table_mutation_keeps_all_outer_rows(fixtures: Path) -> None:
+    html = (fixtures / "public_results_stage3b.html").read_text(encoding="utf-8")
+    without_nested_table = html.replace(
+        '<table class="footnote"><tr><td>display only</td></tr></table>', ""
+    )
+    nested = results.parse_public_result_page(html, query="主题", limit=20)
+    baseline = results.parse_public_result_page(without_nested_table, query="主题", limit=20)
+    assert [record.title for record in nested.records] == [record.title for record in baseline.records]
+    assert nested.total_rows == baseline.total_rows == 2
+
+
+def test_unclosed_nested_table_mutation_stops_on_contract_change(fixtures: Path) -> None:
+    html = (fixtures / "public_results_stage3b.html").read_text(encoding="utf-8")
+    malformed = html.replace("</table>", "", 1)
+    with pytest.raises(PageContractChanged, match="题录"):
+        results.parse_public_result_page(malformed, query="主题", limit=20)
 
 
 def test_result_table_without_any_row_is_loud_not_silent() -> None:
