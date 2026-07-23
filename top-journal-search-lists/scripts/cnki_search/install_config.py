@@ -3,7 +3,9 @@ from __future__ import annotations
 import copy
 import argparse
 import json
+import os
 import re
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
@@ -75,8 +77,9 @@ def merge_claude_config(
 
 
 _TOML_TABLE_HEADER = re.compile(
-    r"(?m)^[\t ]*\[(?!\[)(?P<path>[^\]\r\n]+)\][\t ]*(?:#.*)?(?:\r?\n|$)"
+    r"(?m)^[\t ]*(?:\[\[(?P<array_path>[^\]\r\n]+)\]\]|\[(?P<table_path>[^\]\r\n]+)\])[\t ]*(?:#.*)?(?:\r?\n|$)"
 )
+_TOML_ASSIGNMENT = re.compile(r"(?m)^[\t ]*(?P<key>[^#=\r\n]+?)\s*=")
 
 
 def _toml_key_path(value: str) -> tuple[str, ...] | None:
@@ -138,6 +141,31 @@ def _is_cnki_table(path: tuple[str, ...] | None) -> bool:
     )
 
 
+def _toml_table_headers(existing_toml: str) -> list[tuple[int, tuple[str, ...] | None]]:
+    return [
+        (match.start(), _toml_key_path(match.group("array_path") or match.group("table_path")))
+        for match in _TOML_TABLE_HEADER.finditer(existing_toml)
+    ]
+
+
+def _reject_unsupported_cnki_definitions(
+    existing_toml: str, headers: list[tuple[int, tuple[str, ...] | None]],
+) -> None:
+    header_index = 0
+    active_table: tuple[str, ...] | None = None
+    for assignment in _TOML_ASSIGNMENT.finditer(existing_toml):
+        while header_index < len(headers) and headers[header_index][0] < assignment.start():
+            active_table = headers[header_index][1]
+            header_index += 1
+        key_path = _toml_key_path(assignment.group("key"))
+        full_path = (*active_table, *key_path) if active_table and key_path else key_path
+        if _is_cnki_table(full_path) and not _is_cnki_table(active_table):
+            raise ValueError(
+                "unsupported dotted or inline mcp_servers.cnki-search definition; "
+                "use [mcp_servers.cnki-search] table notation"
+            )
+
+
 def _toml_string(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("Codex MCP 配置值必须是字符串")
@@ -163,10 +191,10 @@ def _render_codex_server_config(server_config: Mapping[str, object]) -> str:
 
 
 def merge_codex_config(existing_toml: str, server_config: Mapping[str, object]) -> str:
-    headers = [
-        (match.start(), _toml_key_path(match.group("path")))
-        for match in _TOML_TABLE_HEADER.finditer(existing_toml)
-    ]
+    if existing_toml.strip():
+        tomllib.loads(existing_toml)
+    headers = _toml_table_headers(existing_toml)
+    _reject_unsupported_cnki_definitions(existing_toml, headers)
     retained: list[str] = []
     cursor = 0
     for index, (start, path) in enumerate(headers):
@@ -184,6 +212,21 @@ def merge_codex_config(existing_toml: str, server_config: Mapping[str, object]) 
     merged += _render_codex_server_config(server_config)
     tomllib.loads(merged)
     return merged
+
+
+def _atomic_write_text(config_path: Path, content: str) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{config_path.name}.", suffix=".tmp", dir=config_path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, config_path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -216,9 +259,7 @@ def main(argv: list[str] | None = None) -> int:
         current = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
         merged = merge_codex_config(current, server_config)
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = config_path.with_name(f"{config_path.name}.tmp")
-    temporary.write_text(merged, encoding="utf-8")
-    temporary.replace(config_path)
+    _atomic_write_text(config_path, merged)
     return 0
 
 
