@@ -279,7 +279,7 @@ def test_readme_documents_cross_computer_installation_and_verification():
     assert "默认分支后可省略 `--branch agent/cnki-new-entry-only --single-branch`" in preparation
     assert "sh ./top-journal-search-lists/installers/install.sh --codex --claude-code" in linux
     assert "官方 Linux 版 ChatGPT Desktop" in linux
-    assert "Claude Desktop 也不在本安装范围内" in linux
+    assert "Claude Desktop 也不支持 Linux" in linux
     wsl_text = linux
     assert "Windows 侧 ChatGPT Desktop 中的 Codex" in wsl_text
     assert "Windows" in verification
