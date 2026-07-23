@@ -67,8 +67,20 @@ class SequenceFactory:
         return self.snapshots[self.calls - 1]
 
 
-def _snapshot(*, url: str = "https://kns.cnki.net/kns8s/defaultresult/index", text: str = "题名 来源", status: int | None = 200) -> SearchSnapshot:
-    return SearchSnapshot("<table class='result-table-list'></table>", url, "中国知网", text, status)
+RESULT_PAGE_HTML = "<table class='result-table-list'></table>"
+# 受限页（验证码、登录、429、403）不会携带 CNKI 结果表——正文里的受限措辞
+# 只有在没有结果表时才是可信信号。
+RESTRICTED_PAGE_HTML = "<main><div class='tip'></div></main>"
+
+
+def _snapshot(
+    *,
+    url: str = "https://kns.cnki.net/kns8s/defaultresult/index",
+    text: str = "题名 来源",
+    status: int | None = 200,
+    html: str = RESULT_PAGE_HTML,
+) -> SearchSnapshot:
+    return SearchSnapshot(html, url, "中国知网", text, status)
 
 
 def test_network_error_retries_once_only() -> None:
@@ -131,10 +143,10 @@ def test_playwright_style_timeout_retries_once_then_returns_network_error_and_cl
 @pytest.mark.parametrize(
     "snapshot, expected",
     [
-        (_snapshot(text="429 Too Many Requests"), SearchStatus.RATE_LIMITED),
+        (_snapshot(text="429 Too Many Requests", html=RESTRICTED_PAGE_HTML), SearchStatus.RATE_LIMITED),
         (_snapshot(url="https://kns.cnki.net/captcha", text="请完成拼图验证"), SearchStatus.CHALLENGE_DETECTED),
         (_snapshot(url="https://login.cnki.net/", text="用户登录"), SearchStatus.LOGIN_REQUIRED),
-        (_snapshot(text="403 Forbidden"), SearchStatus.FORBIDDEN),
+        (_snapshot(text="403 Forbidden", html=RESTRICTED_PAGE_HTML), SearchStatus.FORBIDDEN),
         (_snapshot(url="https://example.invalid/", text="结构变化"), SearchStatus.PAGE_CONTRACT_CHANGED),
     ],
 )

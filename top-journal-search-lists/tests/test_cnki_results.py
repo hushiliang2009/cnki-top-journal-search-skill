@@ -13,14 +13,66 @@ def test_public_result_requires_title_journal_and_valid_year(fixtures: Path) -> 
         query="数字化转型",
         limit=20,
     )
-    assert len(parsed.records) == 1
+    assert len(parsed.records) == 2
     record = parsed.records[0]
     assert (record.title, record.journal_raw, record.publication_year) == (
         "数字化转型与企业创新", "经济研究", 2026,
     )
     assert record.document_type == "期刊"
     assert (record.citations, record.downloads, record.is_online_first) == (12, 108, True)
+    assert record.authors == ["张三", "李四"]
     assert parsed.excluded_non_journal_rows == 1
+    assert parsed.incomplete_records == []
+
+
+def test_result_parsing_preserves_real_cnki_markup_fidelity(fixtures: Path) -> None:
+    """<em> 高亮、多 <a> 作者、带秒时间戳、千分位——四种真实标记形态。"""
+    parsed = results.parse_public_result_page(
+        (fixtures / "public_results.html").read_text(encoding="utf-8"),
+        query="供应链金融",
+        limit=20,
+    )
+    record = parsed.records[1]
+    # <em> 关键词高亮不得吞掉词间空格
+    assert record.title == "Supply Chain Finance and Firm Innovation"
+    # 每个 <a> 是一位作者，不得粘连成单个字符串
+    assert record.authors == ["王五", "赵六", "孙七"]
+    # 带秒时间戳曾使这条《管理世界》题录被整条丢弃
+    assert (record.publication_date, record.publication_year) == ("2024-05-20 14:35:12", 2024)
+    # 千分位分隔符曾使计数被判为缺失
+    assert (record.citations, record.downloads) == (1024, 3204)
+
+
+def test_nested_table_in_cell_does_not_swallow_following_records(fixtures: Path) -> None:
+    """单元格内嵌套 <table> 的 </table> 曾提前结束结果表，丢光其后全部题录。"""
+    parsed = results.parse_public_result_page(
+        (fixtures / "public_results_nested_table.html").read_text(encoding="utf-8"),
+        query="主题",
+        limit=20,
+    )
+    assert parsed.total_rows == 2
+    assert [record.title for record in parsed.records] == [
+        "带脚注表格的题录", "嵌套表格之后的合法题录",
+    ]
+
+
+def test_result_table_without_any_row_is_loud_not_silent() -> None:
+    """有结果表容器却解析出 0 行时必须报错，不得静默返回"无结果"。"""
+    with pytest.raises(PageContractChanged, match="未解析出任何题录"):
+        results.parse_public_result_page(
+            "<table class='result-table-list'><tbody></tbody></table>", query="主题", limit=20
+        )
+
+
+def test_unclosed_cell_does_not_silently_drop_remaining_records() -> None:
+    row = (
+        "<tr><td class='name'><a>合法题录</a></td>"
+        "<td class='source'><a>经济研究</a></td>"
+        "<td class='date'>2024</td><td class='data'>期刊</td></tr>"
+    )
+    html = f"<table class='result-table-list'><tbody><tr><td class='name'><a>未闭合</a></tbody>{row}</table>"
+    parsed = results.parse_public_result_page(html, query="主题", limit=20)
+    assert [record.title for record in parsed.records] == ["合法题录"]
 
 
 def test_incomplete_rows_never_enter_formal_records(fixtures: Path) -> None:
