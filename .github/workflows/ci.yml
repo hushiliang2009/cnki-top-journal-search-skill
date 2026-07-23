@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # agent/** 一并纳入：本仓库的实际工作都在 agent 分支上进行，
+    # 只监听 main 会让 CI 在需要它的地方永远不运行。
+    branches: [main, "agent/**"]
   pull_request:
   workflow_dispatch:
 
