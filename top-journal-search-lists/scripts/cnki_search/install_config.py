@@ -148,9 +148,61 @@ def _toml_table_headers(existing_toml: str) -> list[tuple[int, tuple[str, ...] |
     ]
 
 
-def _reject_unsupported_cnki_definitions(
+def _inline_table_end(existing_toml: str, start: int) -> tuple[int, int] | None:
+    while start < len(existing_toml) and existing_toml[start] in " \t":
+        start += 1
+    if start >= len(existing_toml) or existing_toml[start] != "{":
+        return None
+    depth = 0
+    quote: str | None = None
+    index = start
+    while index < len(existing_toml):
+        character = existing_toml[index]
+        if quote:
+            if quote == '"' and character == "\\":
+                index += 2
+                continue
+            if character == quote:
+                quote = None
+        elif character in {'"', "'"}:
+            quote = character
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return start, index
+        index += 1
+    return None
+
+
+def _root_inline_mcp_servers_table(
     existing_toml: str, headers: list[tuple[int, tuple[str, ...] | None]],
+) -> tuple[int, int] | None:
+    header_index = 0
+    active_table: tuple[str, ...] | None = None
+    for assignment in _TOML_ASSIGNMENT.finditer(existing_toml):
+        while header_index < len(headers) and headers[header_index][0] < assignment.start():
+            active_table = headers[header_index][1]
+            header_index += 1
+        if active_table is None and _toml_key_path(assignment.group("key")) == ("mcp_servers",):
+            return _inline_table_end(existing_toml, assignment.end())
+    return None
+
+
+def _reject_unsupported_cnki_definitions(
+    existing_toml: str,
+    headers: list[tuple[int, tuple[str, ...] | None]],
+    parsed_config: Mapping[str, object],
+    root_inline_table: tuple[int, int] | None,
 ) -> None:
+    if root_inline_table:
+        servers = parsed_config.get("mcp_servers")
+        if isinstance(servers, Mapping) and "cnki-search" in servers:
+            raise ValueError(
+                "unsupported dotted or inline mcp_servers.cnki-search definition; "
+                "use [mcp_servers.cnki-search] table notation"
+            )
     header_index = 0
     active_table: tuple[str, ...] | None = None
     for assignment in _TOML_ASSIGNMENT.finditer(existing_toml):
@@ -190,11 +242,40 @@ def _render_codex_server_config(server_config: Mapping[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_codex_server_inline_entry(server_config: Mapping[str, object]) -> str:
+    command = _toml_string(server_config["command"])
+    args = server_config["args"]
+    env = server_config["env"]
+    if not isinstance(args, list) or not isinstance(env, Mapping):
+        raise ValueError("CNKI MCP 配置格式无效")
+    rendered_args = ", ".join(_toml_string(argument) for argument in args)
+    rendered_env = ", ".join(
+        f"{_toml_string(key)} = {_toml_string(value)}" for key, value in env.items()
+    )
+    return (
+        f'"cnki-search" = {{ command = {command}, args = [{rendered_args}], '
+        f"env = {{ {rendered_env} }} }}"
+    )
+
+
 def merge_codex_config(existing_toml: str, server_config: Mapping[str, object]) -> str:
-    if existing_toml.strip():
-        tomllib.loads(existing_toml)
+    parsed_config = tomllib.loads(existing_toml) if existing_toml.strip() else {}
     headers = _toml_table_headers(existing_toml)
-    _reject_unsupported_cnki_definitions(existing_toml, headers)
+    root_inline_table = _root_inline_mcp_servers_table(existing_toml, headers)
+    _reject_unsupported_cnki_definitions(
+        existing_toml, headers, parsed_config, root_inline_table
+    )
+    if root_inline_table:
+        _, end = root_inline_table
+        separator = ", " if existing_toml[root_inline_table[0] + 1 : end].strip() else ""
+        merged = (
+            existing_toml[:end]
+            + separator
+            + _render_codex_server_inline_entry(server_config)
+            + existing_toml[end:]
+        )
+        tomllib.loads(merged)
+        return merged
     retained: list[str] = []
     cursor = 0
     for index, (start, path) in enumerate(headers):

@@ -78,6 +78,7 @@ def test_merge_rejects_malformed_original_toml_before_removing_cnki_sections(lay
     (
         'mcp_servers.cnki-search.command = "old-python"\n',
         '[mcp_servers]\ncnki-search = { command = "old-python" }\n',
+        'mcp_servers = { "cnki-search" = { command = "old-python" } }\n',
     ),
 )
 def test_merge_rejects_dotted_or_inline_cnki_definitions_with_guidance(
@@ -87,6 +88,21 @@ def test_merge_rejects_dotted_or_inline_cnki_definitions_with_guidance(
 
     with pytest.raises(ValueError, match=r"unsupported.*cnki-search"):
         module.merge_codex_config(existing, _server_config(module))
+
+
+@pytest.mark.parametrize("layout", LAYOUTS.values(), ids=LAYOUTS)
+def test_merge_preserves_root_inline_mcp_servers_without_cnki(layout: Path) -> None:
+    module = _load_layout(layout)
+    existing = 'mcp_servers = { custom = { command = "custom-mcp", token = "${CUSTOM_TOKEN}" } }\n'
+
+    merged = module.merge_codex_config(existing, _server_config(module))
+
+    parsed = tomllib.loads(merged)
+    assert parsed["mcp_servers"]["custom"] == {
+        "command": "custom-mcp",
+        "token": "${CUSTOM_TOKEN}",
+    }
+    assert parsed["mcp_servers"]["cnki-search"] == _server_config(module)
 
 
 @pytest.mark.parametrize("layout", LAYOUTS.values(), ids=LAYOUTS)
