@@ -24,6 +24,15 @@ def test_ci_runs_full_non_live_release_matrix(skill_root: Path) -> None:
         "tests/_mcpb_handshake.py",
         "scripts/build_release.py --output release",
         "zipfile.ZipFile",
+        "installer:",
+        "version-gate:",
+        "installers/install.sh --codex",
+        "installers\\install.ps1 -Codex -PythonExe python",
+        'python-version: ["3.10"]',
+        "CNKI_PYTHON=python",
+        "CODEX_HOME",
+        "runtimes/cnki-search/.venv/bin/python",
+        "runtimes\\cnki-search\\.venv\\Scripts\\python.exe",
     ):
         assert required in workflow
     for forbidden in ("www.cnki.net", "kns.cnki.net", "webvpn", "proxy"):
