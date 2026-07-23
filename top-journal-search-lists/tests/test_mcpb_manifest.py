@@ -36,6 +36,7 @@ TEST_RELATIVE = (
     "tests/test_cnki_search.py",
     "tests/test_cnki_service.py",
     "tests/test_cnki_session.py",
+    "tests/test_task0_baseline.py",
     "tests/test_installers.py",
     "tests/test_mcpb_manifest.py",
     "tests/fixtures/public_challenge.html",
@@ -43,6 +44,8 @@ TEST_RELATIVE = (
     "tests/fixtures/public_incomplete_results.html",
     "tests/fixtures/public_no_results.html",
     "tests/fixtures/public_results.html",
+    "tests/fixtures/representative_public_results_sanitized.html",
+    "tests/fixtures/synthetic_malformed_public_results.html",
 )
 EXPECTED_SKILL_RELATIVE = (
     "README.md",

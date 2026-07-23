@@ -9,6 +9,8 @@ class SerialSearchGate:
         self, *, minimum_interval: float = 6.0, clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        if minimum_interval < 6.0:
+            raise ValueError("minimum_interval must be at least 6 seconds")
         self.minimum_interval = minimum_interval
         self.clock = clock
         self.sleep = sleep

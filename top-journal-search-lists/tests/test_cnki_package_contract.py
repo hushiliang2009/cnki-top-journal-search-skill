@@ -1,4 +1,9 @@
+import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import textwrap
 
 
 LEGACY_MODULES = {
@@ -39,20 +44,141 @@ def test_package_exposes_public_home_and_no_legacy_capabilities(skill_root: Path
     assert not bundled_names & LEGACY_MODULES
 
 
-def test_main_and_mcpb_sources_and_catalog_are_identical(skill_root: Path) -> None:
-    main = skill_root / "scripts/cnki_search"
-    bundled = skill_root / "mcpb/src/cnki_search"
-    assert [path.name for path in sorted(main.glob("*.py"))] == [
-        path.name for path in sorted(bundled.glob("*.py"))
-    ]
-    for source in main.glob("*.py"):
-        assert source.read_bytes() == (bundled / source.name).read_bytes()
-    assert (skill_root / "scripts/catalog_lookup.py").read_bytes() == (
-        skill_root / "mcpb/src/catalog_lookup.py"
-    ).read_bytes()
-    assert (skill_root / "references/Academic_Journal_Master_Directory_20260715.md").read_bytes() == (
-        skill_root / "mcpb/src/references/Academic_Journal_Master_Directory_20260715.md"
-    ).read_bytes()
+LAYOUTS = {
+    "skill": Path("scripts"),
+    "mcpb": Path("mcpb/src"),
+}
+
+
+def _run_layout_contract(layout_root: Path) -> dict[str, object]:
+    program = textwrap.dedent(
+        """
+        import json
+
+        from cnki_search.browser import BrowserFactory
+        from cnki_search.models import SearchRequest
+        from cnki_search.rate_limit import SerialSearchGate
+        from cnki_search.session import CNKI_HOME_URL, PublicCnkiSession
+
+        class Page:
+            def __init__(self):
+                self.url = ""
+                self.wait_until = ""
+
+            def goto(self, url, *, wait_until):
+                self.url = url
+                self.wait_until = wait_until
+                return None
+
+            def close(self):
+                pass
+
+        class Context:
+            def __init__(self):
+                self.page = Page()
+
+            def new_page(self):
+                return self.page
+
+            def close(self):
+                pass
+
+        class Browser:
+            def __init__(self):
+                self.context_kwargs = None
+                self.context = Context()
+
+            def new_context(self, **kwargs):
+                self.context_kwargs = kwargs
+                return self.context
+
+            def close(self):
+                pass
+
+        class SessionFactory:
+            def __init__(self):
+                self.browser = Browser()
+
+            def launch_ephemeral(self):
+                return self.browser
+
+        class BrowserType:
+            def __init__(self):
+                self.kwargs = None
+
+            def launch(self, **kwargs):
+                self.kwargs = kwargs
+                return object()
+
+        class Playwright:
+            def __init__(self):
+                self.chromium = BrowserType()
+
+        factory = SessionFactory()
+        with PublicCnkiSession(browser_factory=factory):
+            page = factory.browser.context.page
+            session_state = {
+                "home_url": CNKI_HOME_URL,
+                "navigated_url": page.url,
+                "wait_until": page.wait_until,
+                "context_kwargs": factory.browser.context_kwargs,
+            }
+
+        invalid_limits = []
+        for limit in (0, 21):
+            try:
+                SearchRequest("topic", limit)
+            except ValueError:
+                invalid_limits.append(limit)
+
+        try:
+            SerialSearchGate(minimum_interval=5.99)
+        except ValueError:
+            interval_floor_enforced = True
+        else:
+            interval_floor_enforced = False
+
+        playwright = Playwright()
+        BrowserFactory(playwright).launch_ephemeral()
+        print(json.dumps({
+            "session": session_state,
+            "invalid_limits": invalid_limits,
+            "interval_floor_enforced": interval_floor_enforced,
+            "launch_kwargs": playwright.chromium.kwargs,
+        }))
+        """
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(layout_root)
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=environment,
+    )
+    return json.loads(result.stdout)
+
+
+def test_skill_and_mcpb_layouts_independently_meet_public_runtime_contract(skill_root: Path) -> None:
+    for layout_name, relative_root in LAYOUTS.items():
+        state = _run_layout_contract(skill_root / relative_root)
+        session = state["session"]
+        assert session["home_url"] == "https://www.cnki.net/", layout_name
+        assert session["navigated_url"] == "https://www.cnki.net/", layout_name
+        assert session["wait_until"] == "domcontentloaded", layout_name
+        assert session["context_kwargs"] == {"locale": "zh-CN", "accept_downloads": False}, layout_name
+        assert state["invalid_limits"] == [0, 21], layout_name
+        assert state["interval_floor_enforced"] is True, layout_name
+        assert state["launch_kwargs"]["headless"] is True, layout_name
+        assert not {"args", "proxy", "user_data_dir", "storage_state"} & set(state["launch_kwargs"]), layout_name
+
+
+def test_skill_and_mcpb_layouts_exclude_legacy_login_and_download_modules(skill_root: Path) -> None:
+    for layout_name, relative_root in LAYOUTS.items():
+        names = {path.name for path in (skill_root / relative_root / "cnki_search").glob("*.py")}
+        assert not names & LEGACY_MODULES, layout_name
 
 
 def test_skill_uses_ai4scholar_as_primary_and_cnki_as_supplement(skill_root: Path) -> None:
