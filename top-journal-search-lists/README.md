@@ -43,17 +43,21 @@ top-journal-search-lists/
 
 ## 安装前准备
 
-- 安装 Python 3.11 或更高版本，以及 Git；
-- 安装 Chrome、Edge 或 Chromium。没有兼容浏览器时，可安装 Playwright Chromium；
-- 私有仓库需要先以具有访问权限的账号完成 GitHub 认证；
-- 在 Windows、macOS 或 Linux 的终端中克隆并进入已验证分支：
+- 安装 Python 3.11 或更高版本，以及 Git。低于 3.11 时安装器会拒绝安装并给出提示；
+- 安装 Chrome、Edge 或 Chromium。没有兼容浏览器时安装 Playwright Chromium，安装器会自动执行：
 
 ```sh
-git clone --branch agent/cnki-new-entry-only --single-branch https://github.com/hushiliang2009/cnki-top-journal-search-skill.git
-cd cnki-top-journal-search-skill
+python -m playwright install chromium chromium-headless-shell
 ```
 
-在该分支合并到默认分支后可省略 `--branch agent/cnki-new-entry-only --single-branch`。
+  两个包都要装：只装 `chromium` 不会一并落地 headless shell，无头模式仍会启动失败。
+- 私有仓库需要先以具有访问权限的账号完成 GitHub 认证；
+- 在 Windows、macOS 或 Linux 的终端中克隆并进入仓库：
+
+```sh
+git clone https://github.com/hushiliang2009/cnki-top-journal-search-skill.git
+cd cnki-top-journal-search-skill
+```
 
 ## Windows 安装指南
 

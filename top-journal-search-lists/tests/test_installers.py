@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import shutil
 
+import pytest
 import tomllib
 
 import cnki_search.install_config as install_config
@@ -174,6 +175,69 @@ command = "zotero-mcp"
     assert tomllib.loads(merged)["mcp_servers"]["cnki-search"] == server
 
 
+def test_merge_codex_config_preserves_user_array_tables_and_secrets() -> None:
+    """数组表必须构成删除边界，否则会连同用户的 API 密钥一起被静默删除。"""
+    existing = """[mcp_servers.zotero]
+command = "zotero-mcp"
+
+[mcp_servers.cnki-search]
+command = "OLD-PYTHON-SHOULD-BE-REPLACED"
+
+[[mcp_servers.custom.headers]]
+name = "X-Api-Key"
+value = "user-secret-token"
+
+[[mcp_servers.custom.headers]]
+name = "X-Tenant"
+value = "lab-01"
+
+[mcp_servers.ai4scholar]
+command = "ai4scholar"
+"""
+    server = cnki_server_config(Path("/opt/skill"), Path("/opt/python"))
+
+    merged = install_config.merge_codex_config(existing, server)
+
+    parsed = tomllib.loads(merged)
+    assert sorted(parsed["mcp_servers"]) == ["ai4scholar", "cnki-search", "custom", "zotero"]
+    assert parsed["mcp_servers"]["custom"]["headers"] == [
+        {"name": "X-Api-Key", "value": "user-secret-token"},
+        {"name": "X-Tenant", "value": "lab-01"},
+    ]
+    assert "OLD-PYTHON-SHOULD-BE-REPLACED" not in merged
+    assert parsed["mcp_servers"]["cnki-search"] == server
+
+
+def test_merge_codex_config_rejects_unreplaceable_inline_cnki_definition() -> None:
+    existing = 'mcp_servers.cnki-search = { command = "old" }\n'
+    server = cnki_server_config(Path("/opt/skill"), Path("/opt/python"))
+
+    with pytest.raises(ValueError, match="无法安全替换"):
+        install_config.merge_codex_config(existing, server)
+
+
+def test_merge_codex_cli_reports_readable_error_instead_of_traceback(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text('mcp_servers.cnki-search = { command = "old" }\n', encoding="utf-8")
+
+    exit_code = main(
+        ["merge-codex", "--config", str(config), "--skill-root", "/opt/skill", "--python", "/opt/py"]
+    )
+
+    assert exit_code == 1
+    # 失败发生在写盘之前，用户配置不受损
+    assert config.read_text(encoding="utf-8") == 'mcp_servers.cnki-search = { command = "old" }\n'
+
+
+def test_installers_gate_python_version_and_install_browser(skill_root: Path) -> None:
+    """3.10 上 pip 会装成功但 StrEnum 导入必死，安装器必须自行拦截。"""
+    powershell = (skill_root / "installers/install.ps1").read_text(encoding="utf-8")
+    shell = (skill_root / "installers/install.sh").read_text(encoding="utf-8")
+    for content in (powershell, shell):
+        assert "version_info >= (3, 11)" in content
+        assert "playwright install chromium chromium-headless-shell" in content
+
+
 def test_merge_codex_cli_writes_parseable_toml_with_windows_paths() -> None:
     config = Path(__file__).parent / "task8-codex-config.toml"
     if config.exists():
@@ -273,10 +337,12 @@ def test_readme_documents_cross_computer_installation_and_verification():
     verification = section("## 安装后验证")
     developer_checks = section("## 开发者完整测试")
 
-    assert "git clone --branch agent/cnki-new-entry-only --single-branch https://github.com/hushiliang2009/cnki-top-journal-search-skill.git" in preparation
+    # agent/cnki-new-entry-only 已与默认分支同点，不再需要 --branch 指引
+    assert "git clone https://github.com/hushiliang2009/cnki-top-journal-search-skill.git" in preparation
     assert "cd cnki-top-journal-search-skill" in preparation
     assert "GitHub 认证" in preparation
-    assert "默认分支后可省略 `--branch agent/cnki-new-entry-only --single-branch`" in preparation
+    assert "agent/cnki-new-entry-only" not in preparation
+    assert "python -m playwright install chromium chromium-headless-shell" in preparation
     assert "Claude Desktop（Linux beta）" in linux
     assert "目前没有官方 Linux 版 ChatGPT Desktop" in linux
     assert "Claude Desktop 也不支持 Linux" not in linux

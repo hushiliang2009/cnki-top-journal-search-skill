@@ -1,6 +1,10 @@
 import ast
 import importlib
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 
 LEGACY_MODULES = {
@@ -73,6 +77,38 @@ def test_helper_scripts_reference_only_existing_runtime_symbols(skill_root: Path
                 assert hasattr(module, alias.name), (
                     f"{helper.name} 引用了 {node.module}.{alias.name}，该符号已不存在"
                 )
+
+
+@pytest.mark.parametrize(
+    ("package_dir", "module_dir"),
+    [("", "scripts"), ("mcpb", "src")],
+    ids=["skill_layout", "mcpb_layout"],
+)
+def test_catalog_resolves_under_both_distribution_layouts(
+    skill_root: Path, package_dir: str, module_dir: str,
+) -> None:
+    """Skill 与 MCPB 两种布局的目录深度差一层，固定深度推导会有一种失败。
+
+    必须走子进程：conftest.py 把 sys.path 钉死在 scripts/，同进程测不到 MCPB 布局。
+    """
+    working_dir = skill_root / package_dir if package_dir else skill_root
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import sys; sys.path.insert(0, {module_dir!r});"
+            " import catalog_lookup as C;"
+            " print(C.DEFAULT_CATALOG.is_file()); print(C.DEFAULT_CATALOG)",
+        ],
+        cwd=working_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    found, resolved = completed.stdout.splitlines()[:2]
+    assert found == "True", f"{module_dir} 布局下未能定位综合期刊目录：{resolved}"
+    assert Path(resolved).is_file()
 
 
 def test_skill_uses_ai4scholar_as_primary_and_cnki_as_supplement(skill_root: Path) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import unicodedata
@@ -9,10 +10,29 @@ from pathlib import Path
 from typing import Any
 
 
+CATALOG_FILENAME = "Academic_Journal_Master_Directory_20260715.md"
+
+
+def _resolve_default_catalog() -> Path:
+    """按实际布局定位综合期刊目录，兼容 Skill 与 MCPB 两种目录深度。
+
+    Skill 布局：scripts/catalog_lookup.py → <root>/references/
+    MCPB 布局：mcpb/src/catalog_lookup.py → mcpb/src/references/
+    两者相差一层，固定深度推导必然有一种失败。
+    """
+    configured = os.environ.get("CNKI_CATALOG_PATH")
+    if configured and Path(configured).is_file():
+        return Path(configured)
+    here = Path(__file__).resolve().parent
+    for base in (here, here.parent):
+        candidate = base / "references" / CATALOG_FILENAME
+        if candidate.is_file():
+            return candidate
+    return here.parent / "references" / CATALOG_FILENAME
+
+
 SKILL_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CATALOG = (
-    SKILL_ROOT / "references" / "Academic_Journal_Master_Directory_20260715.md"
-)
+DEFAULT_CATALOG = _resolve_default_catalog()
 EXPECTED_GROUPS = [
     "economics_top5",
     "ncs_pnas",
@@ -57,6 +77,21 @@ def normalize_title(value: str) -> str:
     value = unicodedata.normalize("NFKC", value).casefold()
     value = value.replace("&", " and ")
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value)
+
+
+def variant_key(title: str) -> str:
+    """\u8fd4\u56de\u6bd4 normalize_title \u66f4\u4fdd\u5b88\u7684\u201c\u4e66\u5199\u53d8\u4f53\u952e\u201d\u3002
+
+    normalize_title \u4f1a\u5265\u6389\u5168\u90e8\u6807\u70b9\u4e0e\u7a7a\u767d\uff0c\u56e0\u6b64\u4e24\u672c**\u771f\u6b63\u4e0d\u540c**\u7684\u671f\u520a
+    \uff08\u5982 `A.B` \u4e0e `AB`\uff09\u4f1a\u843d\u8fdb\u540c\u4e00\u4e2a\u952e\uff0c\u5fc5\u987b\u4fdd\u7559\u4e3a ambiguous\u3002
+    variant_key \u53ea\u5f52\u5e76\u540c\u4e00\u672c\u520a\u7684\u4e66\u5199\u5dee\u5f02\u2014\u2014\u51a0\u8bcd The \u6709\u65e0\u3001& \u4e0e and\u3001
+    \u526f\u6807\u9898\u5206\u9694\u7b26 : / - / ,\u3001\u5168\u534a\u89d2\u62ec\u53f7\u4e0e\u5927\u5c0f\u5199\u2014\u2014\u4ece\u800c\u628a\u201c\u540c\u520a\u53d8\u4f53\u201d
+    \u4e0e\u201c\u771f\u6b67\u4e49\u201d\u533a\u5206\u5f00\u3002
+    """
+    value = unicodedata.normalize("NFKC", title).casefold().replace("&", " and ")
+    value = re.sub(r"[:\uff1a,\uff0c\-\u2013\u2014/()\uff08\uff09\[\]]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[4:] if value.startswith("the ") else value
 
 
 def _read_catalog(path: Path) -> str:
@@ -149,12 +184,17 @@ def _add(
     if not keys or max(map(len, keys)) < 2:
         return
 
+    # 用 variant_key 而非字符串精确相等判断“是否同一本刊”：同一本刊的不同
+    # 书写形式（The 有无、& / and、副标题分隔符、全半角括号）会落进同一个
+    # lookup key，若按精确相等去重则永远命中不到，会生成两个条目并被
+    # lookup_journal 判为 ambiguous。
+    title_variant = variant_key(title)
     existing = next(
         (
             candidate
             for key in keys
             for candidate in index.get(key, [])
-            if candidate["matched_title"] == title
+            if variant_key(candidate["matched_title"]) == title_variant
         ),
         None,
     )

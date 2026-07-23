@@ -169,3 +169,55 @@ def test_service_returns_partial_for_future_year_beyond_shared_range() -> None:
     assert outcome.status is SearchStatus.PARTIAL
     assert outcome.records == []
     assert len(outcome.incomplete_records) == 1
+
+
+def test_missing_catalog_reports_config_error_without_touching_cnki() -> None:
+    """目录缺失是部署配置错误：不得谎报 network_error，也不得白打两次 CNKI。"""
+    factory = SequenceFactory([_snapshot(), _snapshot()])
+    gate = CountingGate()
+    outcome = CnkiPublicSearchService(
+        session_factory=factory, catalog=ROOT / "references" / "不存在的目录.md", gate=gate
+    ).search("主题")
+
+    assert outcome.status is SearchStatus.PAGE_CONTRACT_CHANGED
+    assert (factory.calls, gate.calls) == (0, 0)
+    assert any("不存在的目录.md" in warning for warning in outcome.warnings)
+
+
+def test_warnings_never_leak_local_absolute_paths() -> None:
+    outcome = CnkiPublicSearchService(
+        session_factory=lambda: FakeSession(""),
+        catalog=ROOT / "references" / "不存在的目录.md",
+    ).search("主题")
+
+    for warning in outcome.warnings:
+        assert str(ROOT) not in warning
+        assert "/home/" not in warning and "C:\\" not in warning
+
+
+def test_browser_unavailable_is_structured_and_not_retried() -> None:
+    """浏览器启动失败不是 OSError 子类，不转换就会裸穿 MCP 边界。"""
+    from cnki_search.browser import BrowserUnavailableError
+
+    gate = CountingGate()
+
+    class FailingFactory:
+        calls = 0
+
+        def __call__(self) -> "FailingFactory":
+            return self
+
+        def __enter__(self) -> "FailingFactory":
+            type(self).calls += 1
+            raise BrowserUnavailableError("浏览器不可用：请在 MCP 运行环境中执行 xxx")
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    outcome = CnkiPublicSearchService(
+        session_factory=FailingFactory(), catalog=CATALOG, gate=gate
+    ).search("主题")
+
+    assert outcome.status is SearchStatus.NETWORK_ERROR
+    assert FailingFactory.calls == 1, "安装类故障重试无意义"
+    assert any("浏览器不可用" in warning for warning in outcome.warnings)

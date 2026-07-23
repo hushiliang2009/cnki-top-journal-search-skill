@@ -46,6 +46,17 @@ if ($ClaudeCode -or $ClaudeDesktop) { Install-SkillCopy $ClaudeSkill }
 
 $RuntimeRoot = if ($Codex) { Join-Path $CodexHome 'runtimes\cnki-search' } else { Join-Path $ClaudeHome 'runtimes\cnki-search' }
 New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
+
+# 版本闸：mcp 与 playwright 都支持 3.10，pip 会安装成功，但 cnki_search 依赖
+# 3.11+ 的 enum.StrEnum，服务器首次启动即崩溃且错误与安装过程毫无关联。
+# 安装器不安装项目本身，pyproject.toml 的 requires-python 从不被 pip 执行，
+# 因此必须在这里显式拦截。
+& $Python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'
+if ($LASTEXITCODE -ne 0) {
+    $Found = (& $Python -V 2>&1)
+    throw "cnki-search 需要 Python 3.11 或更高版本，当前为 $Found。请升级 Python 后重试。"
+}
+
 $RuntimePython = Join-Path $RuntimeRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $RuntimePython -PathType Leaf)) {
     & $Python -m venv (Join-Path $RuntimeRoot '.venv')
@@ -53,6 +64,9 @@ if (-not (Test-Path -LiteralPath $RuntimePython -PathType Leaf)) {
 }
 & $RuntimePython -m pip install 'mcp>=1,<2' 'playwright>=1.45,<2'
 if ($LASTEXITCODE -ne 0) { throw "安装 CNKI 运行时依赖失败，退出码：$LASTEXITCODE" }
+# 仅 install chromium 不会一并落地 headless shell，headless=True 启动会失败
+& $RuntimePython -m playwright install chromium chromium-headless-shell
+if ($LASTEXITCODE -ne 0) { throw "安装 Playwright Chromium 失败，退出码：$LASTEXITCODE" }
 
 if ($Codex) {
     $CodexConfig = Join-Path $CodexHome 'config.toml'

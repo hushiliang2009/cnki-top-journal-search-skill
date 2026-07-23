@@ -66,6 +66,51 @@ class CatalogLookupTests(unittest.TestCase):
         self.assertIsNone(result["priority_level"])
         self.assertEqual(result["candidates"], ["A.B", "AB"])
 
+    def test_writing_variants_of_one_journal_merge_to_best_level(self):
+        """同一本刊的书写变体必须归并取最小层级，不得判为 ambiguous。
+
+        这些期刊此前因 The 有无、& / and、副标题分隔符、全半角括号的差异
+        生成了两个条目，被判 ambiguous、层级置空，并被排序推到结果末位。
+        """
+        expected = {
+            "The Journal of Finance": 3,
+            "The Accounting Review": 3,
+            "Journal of Accounting and Economics": 3,
+            "Accounting, Organizations and Society": 4,
+            "经济学(季刊)": 6,
+        }
+        results = self.module.lookup_journals(CATALOG, list(expected))
+        for journal, result in zip(expected, results, strict=True):
+            with self.subTest(journal=journal):
+                self.assertEqual(result["status"], "matched")
+                self.assertEqual(result["priority_level"], expected[journal])
+                self.assertFalse(result["manual_review_required"])
+
+    def test_no_writing_variant_remains_ambiguous_in_whole_catalog(self):
+        index = self.module.build_index(CATALOG)
+        ambiguous = {
+            key: [item["matched_title"] for item in entries]
+            for key, entries in index.items()
+            if len(entries) > 1
+        }
+        self.assertEqual(ambiguous, {}, f"仍有书写变体未归并：{ambiguous}")
+
+    def test_variant_key_keeps_genuinely_different_titles_apart(self):
+        # 句点不参与归并，因此 A.B 与 AB 仍是两本不同的刊
+        self.assertNotEqual(self.module.variant_key("A.B"), self.module.variant_key("AB"))
+        # 冠词、& / and、分隔符、全半角括号只是同一本刊的书写差异
+        self.assertEqual(
+            self.module.variant_key("The Journal of Finance"),
+            self.module.variant_key("Journal of Finance"),
+        )
+        self.assertEqual(
+            self.module.variant_key("Accounting, Organizations & Society"),
+            self.module.variant_key("Accounting Organizations and Society"),
+        )
+        self.assertEqual(
+            self.module.variant_key("经济学(季刊)"), self.module.variant_key("经济学（季刊）")
+        )
+
     def test_default_catalog_is_bundled_reference(self):
         self.assertEqual(self.module.DEFAULT_CATALOG.resolve(), CATALOG.resolve())
 

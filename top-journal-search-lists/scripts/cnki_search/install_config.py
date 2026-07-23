@@ -4,6 +4,7 @@ import copy
 import argparse
 import json
 import re
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
@@ -74,8 +75,11 @@ def merge_claude_config(
     return result
 
 
+# 必须同时识别普通表 [a.b] 与数组表 [[a.b]]：数组表虽然永远不是 cnki 表，
+# 但它**必须**构成删除区间的边界，否则删除范围会越过它一路吃到下一个普通
+# 表头，把用户的 [[mcp_servers.custom.headers]]（含 API 密钥）一并删掉。
 _TOML_TABLE_HEADER = re.compile(
-    r"(?m)^[\t ]*\[(?!\[)(?P<path>[^\]\r\n]+)\][\t ]*(?:#.*)?(?:\r?\n|$)"
+    r"(?m)^[\t ]*(?P<array>\[?)\[(?P<path>[^\]\r\n]+)\]\]?[\t ]*(?:#.*)?(?:\r?\n|$)"
 )
 
 
@@ -162,15 +166,36 @@ def _render_codex_server_config(server_config: Mapping[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _existing_cnki_definition_is_replaceable(existing_toml: str) -> None:
+    """cnki 配置若以点分键或内联表定义，逐表头替换无法覆盖，必须明确报错。"""
+    try:
+        parsed = tomllib.loads(existing_toml)
+    except tomllib.TOMLDecodeError:
+        return  # 原文本身不合法，交由后续 tomllib.loads(merged) 统一报错
+    servers = parsed.get("mcp_servers")
+    if not isinstance(servers, Mapping) or "cnki-search" not in servers:
+        return
+    if not _TOML_TABLE_HEADER.search(existing_toml) or not any(
+        _is_cnki_table(_toml_key_path(match.group("path")))
+        for match in _TOML_TABLE_HEADER.finditer(existing_toml)
+    ):
+        raise ValueError(
+            "现有配置以点分键或内联表定义了 mcp_servers.cnki-search，"
+            "安装器无法安全替换。请手工删除该条目后重试。"
+        )
+
+
 def merge_codex_config(existing_toml: str, server_config: Mapping[str, object]) -> str:
+    _existing_cnki_definition_is_replaceable(existing_toml)
     headers = [
-        (match.start(), _toml_key_path(match.group("path")))
+        (match.start(), _toml_key_path(match.group("path")), bool(match.group("array")))
         for match in _TOML_TABLE_HEADER.finditer(existing_toml)
     ]
     retained: list[str] = []
     cursor = 0
-    for index, (start, path) in enumerate(headers):
-        if not _is_cnki_table(path):
+    for index, (start, path, is_array) in enumerate(headers):
+        # 数组表永远不是 cnki 表，但上面已让它参与 headers，从而正确充当边界
+        if is_array or not _is_cnki_table(path):
             continue
         end = headers[index + 1][0] if index + 1 < len(headers) else len(existing_toml)
         if start < cursor:
@@ -201,7 +226,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    try:
+        return _run(build_parser().parse_args(argv))
+    except (tomllib.TOMLDecodeError, ValueError) as exc:
+        # 不抛裸 traceback：安装器用 set -e / $ErrorActionPreference='Stop'，
+        # 需要一个可读的中文原因和非零退出码。
+        print(f"配置合并失败：{exc}", file=sys.stderr)
+        return 1
+
+
+def _run(args: argparse.Namespace) -> int:
     config_path: Path = args.config
     if args.command == "merge-claude" and config_path.is_file():
         existing = json.loads(config_path.read_text(encoding="utf-8-sig"))

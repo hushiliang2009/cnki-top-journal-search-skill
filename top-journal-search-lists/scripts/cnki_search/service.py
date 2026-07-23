@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from catalog_lookup import DEFAULT_CATALOG
 
+from .browser import BrowserUnavailableError
 from .cache import SearchCache
 from .models import SearchOutcome, SearchRequest, SearchStatus
 from .ranking import annotate_and_sort_records
@@ -22,6 +24,14 @@ def empty_outcome(status: SearchStatus, query: str, warning: str = "") -> Search
     return SearchOutcome(status, query, [], [], 0, [warning] if warning else [], utc_now())
 
 
+def _redact_paths(message: str) -> str:
+    """去掉异常消息里的本机绝对路径，只保留文件名。
+
+    异常消息会经 warnings 原样回传给 MCP 客户端，不得泄漏本机目录结构。
+    """
+    return re.sub(r"(?:[A-Za-z]:)?[\\/][^\s:：，,]*[\\/]([^\s\\/:：，,]+)", r"\1", message)
+
+
 class CnkiPublicSearchService:
     def __init__(
         self, *, session_factory=PublicCnkiSession, catalog: Path = DEFAULT_CATALOG,
@@ -34,6 +44,14 @@ class CnkiPublicSearchService:
 
     def search(self, query: str, limit: int = 20) -> SearchOutcome:
         request = SearchRequest(query, limit)
+        # 目录缺失是部署配置错误，重试毫无意义，只会白打一次 CNKI。
+        # 必须在限速门与浏览器启动之前拦下，且不得报成 network_error。
+        if not self.catalog.is_file():
+            return empty_outcome(
+                SearchStatus.PAGE_CONTRACT_CHANGED,
+                request.query,
+                f"综合期刊目录不可用：{self.catalog.name}，请重新安装 Skill 或设置 CNKI_CATALOG_PATH",
+            )
         cached = self.cache.get(request.query, request.limit)
         if cached is not None:
             return cached
@@ -62,8 +80,22 @@ class CnkiPublicSearchService:
                 self.cache.put(request.query, request.limit, outcome)
                 return outcome
             except PageContractChanged as exc:
-                return empty_outcome(SearchStatus.PAGE_CONTRACT_CHANGED, request.query, str(exc))
+                return empty_outcome(
+                    SearchStatus.PAGE_CONTRACT_CHANGED, request.query, _redact_paths(str(exc))
+                )
+            except BrowserUnavailableError as exc:
+                # 本机没有可用浏览器属安装问题，重试无意义；转结构化状态并
+                # 携带可操作提示，避免原始 traceback 穿透 MCP 工具边界。
+                return empty_outcome(SearchStatus.NETWORK_ERROR, request.query, str(exc))
+            except FileNotFoundError as exc:
+                # FileNotFoundError ⊂ OSError：若不单列，配置错误会被下面的分支
+                # 吞成 network_error，并白白重试一次。
+                return empty_outcome(
+                    SearchStatus.PAGE_CONTRACT_CHANGED, request.query, _redact_paths(str(exc))
+                )
             except (TransientBrowserError, TimeoutError, OSError) as exc:
                 if attempt == 1:
-                    return empty_outcome(SearchStatus.NETWORK_ERROR, request.query, str(exc))
+                    return empty_outcome(
+                        SearchStatus.NETWORK_ERROR, request.query, _redact_paths(str(exc))
+                    )
         raise AssertionError("unreachable")
