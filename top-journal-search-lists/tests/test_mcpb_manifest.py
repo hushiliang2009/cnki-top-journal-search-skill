@@ -3,6 +3,7 @@ import json
 import importlib.util
 import os
 from pathlib import Path
+import subprocess
 import zipfile
 
 
@@ -35,6 +36,7 @@ TEST_RELATIVE = (
     "tests/test_cnki_search.py",
     "tests/test_cnki_service.py",
     "tests/test_cnki_session.py",
+    "tests/test_install_config_security.py",
     "tests/test_task0_baseline.py",
     "tests/test_installers.py",
     "tests/test_mcpb_manifest.py",
@@ -149,10 +151,10 @@ def test_all_runtime_versions_are_consistent(skill_root: Path) -> None:
     assert f'name = "cnki-search-mcp"\nversion = "{expected}"' in lock_text
 
 
-def test_release_builder_creates_clean_archives(skill_root: Path) -> None:
+def test_release_builder_creates_clean_archives(skill_root: Path, tmp_path: Path) -> None:
     module = _load_builder(skill_root)
 
-    artifacts = module.build(skill_root, skill_root.parent / "outputs")
+    artifacts = module.build(skill_root, tmp_path / "outputs")
 
     assert [artifact.name for artifact in artifacts] == [
         "top-journal-search-lists_Skill.zip",
@@ -169,9 +171,9 @@ def test_release_builder_creates_clean_archives(skill_root: Path) -> None:
     )
 
 
-def test_release_archives_have_exact_allowlisted_members_and_source_bytes(skill_root: Path) -> None:
+def test_release_archives_have_exact_allowlisted_members_and_source_bytes(skill_root: Path, tmp_path: Path) -> None:
     module = _load_builder(skill_root)
-    skill_zip, mcpb_zip, _checksums = module.build(skill_root, skill_root.parent / "outputs")
+    skill_zip, mcpb_zip, _checksums = module.build(skill_root, tmp_path / "outputs")
 
     with zipfile.ZipFile(skill_zip) as archive:
         assert archive.namelist() == [
@@ -199,6 +201,13 @@ def test_release_build_is_reproducible_across_source_mtimes(skill_root: Path, tm
     second = module.build(second_root, tmp_path / "second-output")
 
     assert [_sha256(path) for path in first[:2]] == [_sha256(path) for path in second[:2]]
+
+
+def test_repository_does_not_track_generated_outputs_or_legacy_installers(skill_root: Path) -> None:
+    tracked = subprocess.check_output(
+        ["git", "ls-files", "outputs"], cwd=skill_root.parent, text=True
+    )
+    assert tracked == ""
 
 
 def test_checksums_match_built_artifacts(skill_root: Path, tmp_path: Path) -> None:

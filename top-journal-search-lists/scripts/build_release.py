@@ -39,6 +39,7 @@ TEST_ALLOWLIST = (
     "tests/test_cnki_search.py",
     "tests/test_cnki_service.py",
     "tests/test_cnki_session.py",
+    "tests/test_install_config_security.py",
     "tests/test_task0_baseline.py",
     "tests/test_installers.py",
     "tests/test_mcpb_manifest.py",

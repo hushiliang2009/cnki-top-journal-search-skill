@@ -322,7 +322,12 @@ def test_powershell_success_runs_required_offline_runtime_sequence(
     assert "-m pip install mcp>=1,<2 playwright>=1.45,<2" in commands
     assert "-m playwright install chromium chromium-headless-shell" in commands
     assert "import mcp, playwright" in commands
+    assert "import cnki_search.mcp_server" in commands
     assert "chromium.launch" in commands
+    assert commands.index("-m pip install") < commands.index("-m playwright install")
+    assert commands.index("-m playwright install") < commands.index("import mcp, playwright")
+    assert commands.index("import mcp, playwright") < commands.index("import cnki_search.mcp_server")
+    assert commands.index("import cnki_search.mcp_server") < commands.index("chromium.launch")
 
 
 def test_powershell_browser_self_check_failure_restores_existing_skill_and_config(
@@ -434,6 +439,10 @@ def test_shell_success_runs_required_offline_runtime_sequence(skill_root: Path, 
     assert "-m playwright install chromium chromium-headless-shell" in result.stdout
     assert "import cnki_search.mcp_server" in result.stdout
     assert "chromium.launch" in result.stdout
+    assert result.stdout.index("-m pip install") < result.stdout.index("-m playwright install")
+    assert result.stdout.index("-m playwright install") < result.stdout.index("import mcp, playwright")
+    assert result.stdout.index("import mcp, playwright") < result.stdout.index("import cnki_search.mcp_server")
+    assert result.stdout.index("import cnki_search.mcp_server") < result.stdout.index("chromium.launch")
 
 
 def test_shell_browser_self_check_failure_restores_existing_skill_and_config(
