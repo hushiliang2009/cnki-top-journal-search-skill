@@ -113,7 +113,7 @@ sh ./top-journal-search-lists/installers/install.sh --codex --claude-code --clau
 
 ## Linux 安装指南
 
-Linux 支持 Codex CLI 和 Claude Code。官方 Linux 桌面客户端中尚未提供官方 Linux 版 ChatGPT Desktop，Claude Desktop 也不在本安装范围内，因此不要使用 `--claude-desktop` 配置桌面客户端。
+Linux 支持 Codex CLI 和 Claude Code。目前未提供官方 Linux 版 ChatGPT Desktop，Claude Desktop 也不在本安装范围内，因此不要使用 `--claude-desktop` 配置桌面客户端。
 
 安装 Codex CLI：
 
