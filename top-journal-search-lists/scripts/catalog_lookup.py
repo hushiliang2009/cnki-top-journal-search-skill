@@ -166,30 +166,26 @@ def _clean_title(raw: str) -> str:
     raw = re.sub(r"^\d+\.\s+", "", raw)
     raw = re.sub(r"^\s*\*+\s*", "", raw)
     raw = raw.replace("**", "").strip()
-    # 仅将 ASCII 空格连字符后的中文内容视作目录说明。英文并列刊名及其他
-    # 连字符形式均保留，避免把实际刊名截断。
-    if re.match(r"^[A-Za-z]", raw):
-        raw = re.sub(r"\s*[（(][^（）()]+[）)](?=\s+-\s+)", "", raw)
-        raw = re.sub(r"\s*[（(][^（）()]+[）)]\s*", "", raw)
-        raw = re.sub(r"\s*[【[][^】\]]+[】\]](?=\s+-\s+)", "", raw)
-        raw = re.sub(r"\s*[【[][^】\]]+[】\]]\s*", "", raw)
-    dash = re.match(r"^(.+?) - ([一-鿿].*)$", raw)
+    # 仅将精确 ASCII 分隔符 " - " 后的中文视为目录说明。没有中文说明时，
+    # 括号、方括号、双语并列刊名及其他破折号形式均属于刊名本身。
+    dash = re.match(r"^(?P<title>.+?) - (?P<description>[一-鿿].*)$", raw)
     if dash:
-        raw = dash.group(1).strip()
+        raw = dash.group("title").strip()
+        raw = re.sub(r"\s*(?:[（(][^（）()]+[）)]|\[[^\]]+\]|【[^】]+】)$", "", raw)
     return raw.strip(" .；;，,")
+
+
+def _catalog_source_title(raw: str) -> str:
+    """移除目录行末的英文缩写或中文注释，不改变普通标题清洗语义。"""
+    title = _clean_title(raw)
+    if re.match(r"^[A-Za-z]", title):
+        title = re.sub(r"\s*(?:[（(][^（）()]+[）)]|\[[^\]]+\]|【[^】]+】)$", "", title)
+    return title.strip()
 
 
 def _keys_for_title(title: str) -> set[str]:
     normalized, conservative = _title_signatures(title)
     keys = {normalized, conservative}
-    # 某些目录记录将 Economic History 写作 Economics of History。此处按末词
-    # 与词形构造保守的变体键，不依赖任何具体刊名。
-    words = re.findall(r"[0-9a-z\u4e00-\u9fff]+", title.casefold())
-    if len(words) >= 2 and words[-1] == "history":
-        head = words[-2]
-        keys.add(f"{head}ofhistory")
-        if head.endswith("ic"):
-            keys.add(f"{head[:-2]}icsofhistory")
     return {key for key in keys if key and len(key) >= 2}
 
 
@@ -279,7 +275,7 @@ def _index_ncs(index: CatalogIndex, text: str) -> None:
                 continue
             _add(
                 index,
-                candidate,
+                _catalog_source_title(candidate),
                 2,
                 "ncs_pnas",
                 "NCS_PNAS_Directory.md",
@@ -304,7 +300,7 @@ def _index_top(index: CatalogIndex, text: str) -> None:
         elif line.startswith("* "):
             _add(
                 index,
-                line,
+                _catalog_source_title(line),
                 current_level,
                 current_group,
                 "Top_Academic_Journals_all.md",
