@@ -50,6 +50,8 @@ def test_public_record_serialization_contains_no_url_fields(fixtures: Path) -> N
         ("2026", 2026),
         ("2026-07", 2026),
         ("2026-07-20 10:20", 2026),
+        ("发布时间：2026-07-20 10:20:30，已核验", 2026),
+        ("出版时间 2026/07/20，附注", 2026),
         ("2026-13-40", None),
         ("2026-07-20 24:00", None),
         ("2026年07月", None),
@@ -88,3 +90,26 @@ def test_future_year_beyond_shared_range_is_incomplete() -> None:
     parsed = results.parse_public_result_page(html, query="主题", limit=20)
     assert parsed.records == []
     assert [item.publication_year for item in parsed.incomplete_records] == [year]
+
+
+def test_public_result_parser_preserves_outer_rows_and_bibliographic_fields(fixtures: Path) -> None:
+    parsed = results.parse_public_result_page(
+        (fixtures / "public_results_parser_edge_cases.html").read_text(encoding="utf-8"),
+        query="主题",
+        limit=20,
+    )
+    assert parsed.total_rows == 3
+    assert [record.title for record in parsed.records] == [
+        "Digital Transformation Study", "Incomplete Tags Keep This Title", "Slash Date Record",
+    ]
+    assert parsed.records[0].authors == ["Alice Adams", "Bob Brown"]
+    assert parsed.records[1].authors == ["Carol Chen", "David Du"]
+    assert [record.publication_year for record in parsed.records] == [2026, 2025, 2024]
+    assert (parsed.records[0].citations, parsed.records[0].downloads) == (1234, 5678)
+    assert (parsed.records[1].citations, parsed.records[1].downloads) == (9876, 4321)
+
+
+def test_found_result_table_without_bibliographic_rows_stops_on_contract_change() -> None:
+    html = "<table class='result-table-list'><thead><tr><th>题名</th></tr></thead></table>"
+    with pytest.raises(PageContractChanged, match="题录"):
+        results.parse_public_result_page(html, query="主题", limit=20)

@@ -18,17 +18,24 @@ class ParsedResultPage:
 
 
 def extract_publication_year(value: str) -> int | None:
-    match = re.fullmatch(
-        r"\s*((?:19|20)\d{2})(?:-(\d{2})(?:-(\d{2}))?)?"
-        r"(?:\s+(\d{1,2}):(\d{2}))?\s*",
+    match = re.search(
+        r"(?<!\d)(?P<year>(?:19|20)\d{2})"
+        r"(?:(?P<separator>[-/])(?P<month>\d{1,2})"
+        r"(?:(?P=separator)(?P<day>\d{1,2}))?)?"
+        r"(?:\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?)?"
+        r"(?![\d年])",
         value,
     )
     if not match:
         return None
-    year, month, day, hour, minute = int(match[1]), match[2], match[3], match[4], match[5]
+    year = int(match["year"])
+    month, day = match["month"], match["day"]
+    hour, minute, second = match["hour"], match["minute"], match["second"]
     try:
         date(year, int(month or 1), int(day or 1))
-        if hour is not None and not (0 <= int(hour) <= 23 and 0 <= int(minute) <= 59):
+        if hour is not None and not (
+            0 <= int(hour) <= 23 and 0 <= int(minute) <= 59 and 0 <= int(second or 0) <= 59
+        ):
             return None
     except ValueError:
         return None
@@ -63,6 +70,7 @@ class _PublicTableParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.in_table = False
+        self.table_depth = 0
         self.current: _RawRow | None = None
         self.cell: str | None = None
         self.buffer: list[str] = []
@@ -72,53 +80,94 @@ class _PublicTableParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         classes = set((dict(attrs).get("class") or "").split())
-        if tag == "table" and "result-table-list" in classes:
+        if tag == "table" and not self.in_table and "result-table-list" in classes:
             self.in_table = True
+            self.table_depth = 1
             self.found_public_table = True
-        elif self.in_table and tag == "tr":
+            return
+        if tag == "table" and self.in_table:
+            self.table_depth += 1
+            return
+        if not self.in_table or self.table_depth != 1:
+            return
+        if tag == "tr":
+            self._finish_row()
             self.current = _RawRow()
-        elif self.current is not None and tag == "td":
+        elif tag == "td" and self.current is not None:
+            self._finish_cell()
             self.cell = next((name for name in self._MAP if name in classes), None)
             self.buffer = []
         elif self.current is not None and tag == "a" and self.cell in {"name", "source"}:
             self.in_primary_link = True
 
     def handle_data(self, data: str) -> None:
+        if not self.in_table or self.table_depth != 1:
+            return
         text = data.strip()
         capture = self.cell not in {"name", "source"} or self.in_primary_link
-        if self.current is not None and self.cell and text and capture:
-            self.buffer.append(text)
+        if self.current is not None and self.cell and data and capture:
+            self.buffer.append(data)
         if self.current is not None and self.cell == "name" and text == "网络首发":
             self.current.is_online_first = True
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "table" and self.in_table:
+            self.table_depth -= 1
+            if self.table_depth == 0:
+                self._finish_row()
+                self.in_table = False
+            return
+        if not self.in_table or self.table_depth != 1:
+            return
         if tag == "a":
+            if self.cell == "author":
+                self.buffer.append(";")
             self.in_primary_link = False
-        elif tag == "td" and self.current is not None and self.cell:
-            value = "".join(text for text in self.buffer if text != "网络首发").strip()
+        elif tag == "td":
+            self._finish_cell()
+        elif tag == "tr":
+            self._finish_row()
+
+    def finish(self) -> None:
+        self._finish_row()
+
+    def _finish_cell(self) -> None:
+        if self.current is not None and self.cell:
+            value = _collapse_whitespace("".join(self.buffer))
             setattr(self.current, self._MAP[self.cell], value)
-            self.cell, self.buffer = None, []
-        elif tag == "tr" and self.current is not None:
-            if any((self.current.title, self.current.journal, self.current.document_type)):
-                self.rows.append(self.current)
-            self.current = None
-        elif tag == "table" and self.in_table:
-            self.in_table = False
+        self.cell, self.buffer, self.in_primary_link = None, [], False
+
+    def _finish_row(self) -> None:
+        self._finish_cell()
+        if self.current is not None and any(
+            (self.current.title, self.current.journal, self.current.document_type)
+        ):
+            self.rows.append(self.current)
+        self.current = None
+
+
+def _collapse_whitespace(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def _to_int(value: str) -> int | None:
-    return int(value) if re.fullmatch(r"\d+", value.strip()) else None
+    normalized = re.sub(r"[,，\s]", "", value)
+    return int(normalized) if re.fullmatch(r"[0-9]+", normalized) else None
 
 
 def _to_record(raw: _RawRow, *, query: str) -> PaperRecord:
-    authors = [item.strip() for item in re.split(r"[;；,，]", raw.authors) if item.strip()]
+    authors = [
+        _collapse_whitespace(item)
+        for item in re.split(r"[;；,，\n]", raw.authors)
+        if _collapse_whitespace(item)
+    ]
     return PaperRecord(
-        title=raw.title.strip(),
+        title=_collapse_whitespace(raw.title),
         authors=authors,
-        journal_raw=raw.journal.strip(),
-        publication_date=raw.publication_date.strip(),
+        journal_raw=_collapse_whitespace(raw.journal),
+        publication_date=_collapse_whitespace(raw.publication_date),
         publication_year=extract_publication_year(raw.publication_date),
-        document_type=raw.document_type.strip(),
+        document_type=_collapse_whitespace(raw.document_type),
         citations=_to_int(raw.citations),
         downloads=_to_int(raw.downloads),
         is_online_first=raw.is_online_first,
@@ -133,8 +182,12 @@ def parse_public_result_page(html: str, *, query: str, limit: int) -> ParsedResu
         raise ValueError("返回数量必须为 1 到 20")
     parser = _PublicTableParser()
     parser.feed(html)
+    parser.close()
+    parser.finish()
     if not parser.found_public_table and "题名" in html and "来源" in html:
         raise PageContractChanged("知网公开结果表结构已变化")
+    if parser.found_public_table and not parser.rows:
+        raise PageContractChanged("知网公开结果表未解析到题录行")
     records: list[PaperRecord] = []
     incomplete: list[PaperRecord] = []
     excluded = 0
