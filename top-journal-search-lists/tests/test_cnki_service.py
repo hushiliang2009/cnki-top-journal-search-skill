@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import date
+import os
 import subprocess
 import sys
 
@@ -169,6 +170,15 @@ def test_cache_hit_skips_session_and_gate() -> None:
     assert (factory.calls, gate.calls) == (1, 1)
 
 
+def test_cache_hit_rewrites_outcome_query_to_current_normalized_request() -> None:
+    factory = SequenceFactory([_snapshot(text="未检索到相关文献", html=RESTRICTED_PAGE_HTML)])
+    service = CnkiPublicSearchService(session_factory=factory, catalog=CATALOG, gate=CountingGate())
+    first = service.search("  ＡＢＣ　主题  ")
+    second = service.search("abc\t主题")
+    assert (first.query, second.query) == ("ABC 主题", "abc 主题")
+    assert factory.calls == 1
+
+
 def test_service_returns_partial_for_future_year_beyond_shared_range() -> None:
     year = date.today().year + 2
     html = (
@@ -195,7 +205,7 @@ def test_missing_catalog_reports_config_error_without_touching_cnki() -> None:
 
     assert outcome.status is SearchStatus.CONFIGURATION_ERROR
     assert (factory.calls, gate.calls) == (0, 0)
-    assert any("不存在的目录.md" in warning for warning in outcome.warnings)
+    assert outcome.warnings == ["配置错误"]
 
 
 def test_invalid_catalog_reports_configuration_error_without_touching_cnki(tmp_path: Path) -> None:
@@ -285,9 +295,9 @@ def test_browser_unavailable_is_structured_and_not_retried() -> None:
         session_factory=FailingFactory(), catalog=CATALOG, gate=gate
     ).search("主题")
 
-    assert outcome.status is SearchStatus.NETWORK_ERROR
+    assert outcome.status is SearchStatus.CONFIGURATION_ERROR
     assert FailingFactory.calls == 1, "安装类故障重试无意义"
-    assert any("浏览器不可用" in warning for warning in outcome.warnings)
+    assert outcome.warnings == ["浏览器不可用"]
 
 
 def test_restricted_states_carry_actionable_fallback_hint() -> None:
@@ -300,7 +310,67 @@ def test_restricted_states_carry_actionable_fallback_hint() -> None:
     ).search("供应链金融")
 
     assert outcome.status is SearchStatus.CHALLENGE_DETECTED
-    assert outcome.warnings, "challenge_detected 必须携带替代路径提示"
-    hint = outcome.warnings[0]
-    assert "ai4scholar" in hint
-    assert "不能据此判断该主题无中文文献" in hint
+    warning = outcome.warnings[0]
+    for phrase in (
+        "知网安全验证已阻止本次检索",
+        "已停止请求",
+        "不要刷新、重试或切换代理",
+        "ai4scholar",
+        "浏览器手动检索下载",
+    ):
+        assert phrase in warning
+    assert not any(token in warning for token in ("C:\\", "/home/", "http", "cookie"))
+
+
+def test_challenge_warning_is_actionable_in_both_runtime_layouts() -> None:
+    roots = (ROOT / "scripts", ROOT / "mcpb" / "src")
+    program = """
+from pathlib import Path
+from cnki_search.models import SearchStatus
+from cnki_search.service import CnkiPublicSearchService
+
+class Snapshot:
+    html = '<main></main>'
+    url = 'https://kns.cnki.net/verify/home'
+    title = '安全验证'
+    visible_text = ''
+    http_status = 200
+    def state_arguments(self):
+        return {
+            'url': self.url,
+            'title': self.title,
+            'visible_text': self.visible_text,
+            'http_status': self.http_status,
+            'has_result_table': False,
+        }
+
+class Session:
+    def __enter__(self):
+        return self
+    def __exit__(self, *_exc):
+        return None
+    def search(self, _query):
+        return Snapshot()
+
+catalog = Path('references/Academic_Journal_Master_Directory_20260715.md')
+if not catalog.exists():
+    catalog = Path('../references/Academic_Journal_Master_Directory_20260715.md')
+outcome = CnkiPublicSearchService(
+    session_factory=Session,
+    catalog=catalog,
+).search('topic')
+assert outcome.status is SearchStatus.CHALLENGE_DETECTED
+warning = outcome.warnings[0]
+for phrase in ('知网安全验证已阻止本次检索', '已停止请求', '不要刷新、重试或切换代理', 'ai4scholar', '浏览器手动检索下载'):
+    assert phrase in warning
+assert not any(token in warning for token in ('C:\\\\', '/home/', 'http', 'cookie'))
+"""
+    for root in roots:
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=root,
+            env=os.environ | {"PYTHONPATH": str(root)},
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr

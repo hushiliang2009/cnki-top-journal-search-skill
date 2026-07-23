@@ -7,6 +7,12 @@ from enum import StrEnum
 from typing import Any
 
 
+MAX_TITLE_LENGTH = 500
+MAX_JOURNAL_LENGTH = 300
+MAX_AUTHOR_LENGTH = 120
+MAX_AUTHORS = 50
+
+
 class SearchStatus(StrEnum):
     SUCCESS = "success"
     NO_RESULTS = "no_results"
@@ -62,6 +68,15 @@ class PaperRecord:
     catalog_version: str = field(default="2026-07-15", init=False)
     manual_review_required: bool = True
 
+    def __post_init__(self) -> None:
+        self.title = _clean_bibliographic_text(self.title, MAX_TITLE_LENGTH)
+        self.journal_raw = _clean_bibliographic_text(self.journal_raw, MAX_JOURNAL_LENGTH)
+        self.authors = [
+            cleaned
+            for author in self.authors[:MAX_AUTHORS]
+            if (cleaned := _clean_bibliographic_text(author, MAX_AUTHOR_LENGTH))
+        ]
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -104,6 +119,14 @@ def _has_complete_bibliography(record: PaperRecord) -> bool:
         and not isinstance(record.publication_year, bool)
         and is_verifiable_publication_year(record.publication_year)
     )
+
+
+def _clean_bibliographic_text(value: str, maximum: int) -> str:
+    return "".join(
+        character
+        for character in value
+        if unicodedata.category(character) not in {"Cc", "Cf"}
+    ).strip()[:maximum]
 
 
 def is_verifiable_publication_year(value: int | None) -> bool:

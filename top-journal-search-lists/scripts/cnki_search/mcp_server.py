@@ -69,7 +69,7 @@ class CnkiMcpServer:
         # limit 的 1–20 范围此前只写在文档里，机器无法执行。用带约束的注解
         # 让 tools/list 的 inputSchema 输出 minimum / maximum。
         async def cnki_search(
-            query: str,
+            query: Annotated[str, Field(min_length=1, pattern=r".*\S.*")],
             limit: Annotated[int, Field(ge=MIN_LIMIT, le=MAX_LIMIT)] = MAX_LIMIT,
         ) -> dict[str, Any]:
             return await self._async_tool(self.cnki_search)(query, limit)
