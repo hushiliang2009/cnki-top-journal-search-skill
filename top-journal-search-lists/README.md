@@ -128,7 +128,7 @@ WSL 中的安装属于 Linux 侧安装，只配置 WSL 内的 Codex CLI 或 Clau
 
 ## 安装位置与配置文件
 
-Codex 安装到 `.codex/skills/top-journal-search-lists`，运行环境位于 `.codex/runtimes/cnki-search`，配置文件为 `.codex/config.toml`。Claude 安装到 `.claude/skills/top-journal-search-lists`，运行环境位于 `.claude/runtimes/cnki-search`。Claude Code 配置文件为 `~/.claude.json`，Claude Desktop 使用其平台对应的 `claude_desktop_config.json`。
+Codex 安装到 Codex Home 下的 `skills/top-journal-search-lists`，配置文件为 `config.toml`。Claude 安装到 Claude Home 下的 `skills/top-journal-search-lists`。只要选择 Codex，运行环境位于 Codex Home 下的 `runtimes/cnki-search`；仅选择 Claude 目标时，运行环境位于 Claude Home 下的 `runtimes/cnki-search`。Claude Code 配置文件为 `~/.claude.json`，Claude Desktop 使用其平台对应的 `claude_desktop_config.json`。
 
 ## 手工安装
 

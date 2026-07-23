@@ -223,3 +223,25 @@ def test_readme_documents_supported_platforms_clients_and_installed_names():
     )
     for text in required_text:
         assert text in readme
+
+
+def test_readme_documents_installer_runtime_and_platform_boundaries():
+    skill_root = Path(__file__).resolve().parents[1]
+    readme = (skill_root / "README.md").read_text(encoding="utf-8")
+
+    required_text = (
+        "`limit` 最大为 20",
+        "Linux 支持 Codex CLI 和 Claude Code",
+        "不提供 Claude Desktop 或 Codex Desktop",
+        "WSL 中的安装属于 Linux 侧安装",
+        "不会自动配置 Windows 桌面客户端",
+        "复制完整 Skill",
+        "创建独立 Python 运行环境",
+        "安装 `mcp` 与 `playwright`",
+        "不删除 Zotero、ai4scholar 等其他 MCP 服务",
+        "带时间戳的备份",
+        "只要选择 Codex，运行环境位于 Codex Home",
+        "仅选择 Claude 目标时，运行环境位于 Claude Home",
+    )
+    for text in required_text:
+        assert text in readme

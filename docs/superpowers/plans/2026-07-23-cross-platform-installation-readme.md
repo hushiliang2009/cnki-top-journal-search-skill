@@ -123,7 +123,7 @@ Expected: all tests PASS, catalog validation succeeds, and `git diff --check` re
 
 Confirm that README commands exactly match both installers, no client is assigned to an unsupported platform, manual copying is not described as MCP installation, and no advanced/professional CNKI search, WebVPN, login, or download behavior is reintroduced.
 
-- [ ] **Step 7: Commit (push omitted under the delegated task scope; blocked by index.lock permission)**
+- [x] **Step 7: Commit (completed by the primary agent as 9b6dd84; push omitted under the delegated task scope)**
 
 ```text
 git add top-journal-search-lists/README.md top-journal-search-lists/tests/test_installers.py docs/superpowers/plans/2026-07-23-cross-platform-installation-readme.md
