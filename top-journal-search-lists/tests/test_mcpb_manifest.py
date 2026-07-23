@@ -171,6 +171,24 @@ def test_release_builder_creates_clean_archives(skill_root: Path, tmp_path: Path
     )
 
 
+def test_release_build_uses_only_the_explicit_output_directory(
+    skill_root: Path, tmp_path: Path, monkeypatch,
+) -> None:
+    module = _load_builder(skill_root)
+    forbidden_workspace = tmp_path / "implicit-workspace"
+    output_dir = tmp_path / "explicit-output"
+    monkeypatch.setenv("CNKI_BUILD_TMPDIR", str(forbidden_workspace))
+
+    module.build(skill_root, output_dir)
+
+    assert not forbidden_workspace.exists()
+    assert sorted(path.name for path in output_dir.iterdir()) == [
+        "checksums.sha256",
+        "cnki-search.mcpb",
+        "top-journal-search-lists_Skill.zip",
+    ]
+
+
 def test_release_archives_have_exact_allowlisted_members_and_source_bytes(skill_root: Path, tmp_path: Path) -> None:
     module = _load_builder(skill_root)
     skill_zip, mcpb_zip, _checksums = module.build(skill_root, tmp_path / "outputs")
@@ -200,7 +218,7 @@ def test_release_build_is_reproducible_across_source_mtimes(skill_root: Path, tm
     first = module.build(first_root, tmp_path / "first-output")
     second = module.build(second_root, tmp_path / "second-output")
 
-    assert [_sha256(path) for path in first[:2]] == [_sha256(path) for path in second[:2]]
+    assert [_sha256(path) for path in first] == [_sha256(path) for path in second]
 
 
 def test_repository_does_not_track_generated_outputs_or_legacy_installers(skill_root: Path) -> None:
