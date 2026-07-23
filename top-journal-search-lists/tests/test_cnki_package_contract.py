@@ -125,11 +125,16 @@ def _run_layout_contract(layout_root: Path) -> dict[str, object]:
             }
 
         invalid_limits = []
+        interval_nan_rejected = False
         for limit in (0, 21):
             try:
                 SearchRequest("topic", limit)
             except ValueError:
                 invalid_limits.append(limit)
+        try:
+            SearchRequest("topic", float("nan"))
+        except ValueError:
+            interval_nan_rejected = True
 
         try:
             SerialSearchGate(minimum_interval=5.99)
@@ -143,6 +148,7 @@ def _run_layout_contract(layout_root: Path) -> dict[str, object]:
         print(json.dumps({
             "session": session_state,
             "invalid_limits": invalid_limits,
+            "interval_nan_rejected": interval_nan_rejected,
             "interval_floor_enforced": interval_floor_enforced,
             "launch_kwargs": playwright.chromium.kwargs,
         }))
@@ -170,9 +176,11 @@ def test_skill_and_mcpb_layouts_independently_meet_public_runtime_contract(skill
         assert session["wait_until"] == "domcontentloaded", layout_name
         assert session["context_kwargs"] == {"locale": "zh-CN", "accept_downloads": False}, layout_name
         assert state["invalid_limits"] == [0, 21], layout_name
+        assert state["interval_nan_rejected"] is True, layout_name
         assert state["interval_floor_enforced"] is True, layout_name
         assert state["launch_kwargs"]["headless"] is True, layout_name
-        assert not {"args", "proxy", "user_data_dir", "storage_state"} & set(state["launch_kwargs"]), layout_name
+        assert state["launch_kwargs"]["args"] == ["--no-proxy-server"], layout_name
+        assert "proxy" not in state["launch_kwargs"], layout_name
 
 
 def test_skill_and_mcpb_layouts_exclude_legacy_login_and_download_modules(skill_root: Path) -> None:
