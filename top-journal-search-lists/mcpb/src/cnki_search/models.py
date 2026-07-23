@@ -16,6 +16,7 @@ class SearchStatus(StrEnum):
     LOGIN_REQUIRED = "login_required"
     FORBIDDEN = "forbidden"
     PAGE_CONTRACT_CHANGED = "page_contract_changed"
+    CONFIGURATION_ERROR = "configuration_error"
     NETWORK_ERROR = "network_error"
 
 

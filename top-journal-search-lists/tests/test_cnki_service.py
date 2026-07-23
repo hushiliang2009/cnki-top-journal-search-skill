@@ -1,5 +1,7 @@
 from pathlib import Path
 from datetime import date
+import subprocess
+import sys
 
 import pytest
 
@@ -191,9 +193,62 @@ def test_missing_catalog_reports_config_error_without_touching_cnki() -> None:
         session_factory=factory, catalog=ROOT / "references" / "不存在的目录.md", gate=gate
     ).search("主题")
 
-    assert outcome.status is SearchStatus.PAGE_CONTRACT_CHANGED
+    assert outcome.status is SearchStatus.CONFIGURATION_ERROR
     assert (factory.calls, gate.calls) == (0, 0)
     assert any("不存在的目录.md" in warning for warning in outcome.warnings)
+
+
+def test_invalid_catalog_reports_configuration_error_without_touching_cnki(tmp_path: Path) -> None:
+    invalid = tmp_path / "Academic_Journal_Master_Directory_20260715.md"
+    invalid.write_text("# invalid\n", encoding="utf-8")
+    factory = SequenceFactory([_snapshot()])
+    gate = CountingGate()
+
+    outcome = CnkiPublicSearchService(session_factory=factory, catalog=invalid, gate=gate).search("主题")
+
+    assert outcome.status is SearchStatus.CONFIGURATION_ERROR
+    assert (factory.calls, gate.calls) == (0, 0)
+    assert str(tmp_path) not in "\n".join(outcome.warnings)
+
+
+def test_missing_catalog_short_circuits_cnki_in_both_runtime_layouts() -> None:
+    source_roots = (ROOT / "scripts", ROOT / "mcpb" / "src")
+    program = """
+from pathlib import Path
+from cnki_search.models import SearchStatus
+from cnki_search.service import CnkiPublicSearchService
+
+class Gate:
+    calls = 0
+    def wait(self):
+        type(self).calls += 1
+
+class Session:
+    calls = 0
+    def __enter__(self):
+        type(self).calls += 1
+        return self
+    def __exit__(self, *_exc):
+        return None
+
+gate = Gate()
+outcome = CnkiPublicSearchService(
+    session_factory=Session,
+    catalog=Path('missing-catalog.md'),
+    gate=gate,
+).search('主题')
+assert outcome.status is SearchStatus.CONFIGURATION_ERROR
+assert (Session.calls, Gate.calls) == (0, 0)
+assert all('C:\\\\' not in warning and '/home/' not in warning for warning in outcome.warnings)
+"""
+    for source_root in source_roots:
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=source_root,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
 
 
 def test_warnings_never_leak_local_absolute_paths() -> None:

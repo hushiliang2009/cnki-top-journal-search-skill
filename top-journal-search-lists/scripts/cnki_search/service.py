@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from catalog_lookup import DEFAULT_CATALOG
+from catalog_lookup import DEFAULT_CATALOG, validate_catalog
 
 from .browser import BrowserUnavailableError
 from .cache import SearchCache
@@ -71,13 +71,15 @@ class CnkiPublicSearchService:
             # 参数非法是可预期的调用错误，应走结构化状态而不是 MCP 的 isError，
             # 否则调用方拿不到 status 也拿不到 warnings。
             return empty_outcome(SearchStatus.PAGE_CONTRACT_CHANGED, str(query), str(exc))
-        # 目录缺失是部署配置错误，重试毫无意义，只会白打一次 CNKI。
-        # 必须在限速门与浏览器启动之前拦下，且不得报成 network_error。
-        if not self.catalog.is_file():
+        # 目录问题是部署配置错误，必须在缓存、限速与浏览器启动之前拦下。
+        # 此处同时校验目录结构，避免格式损坏时访问 CNKI 或触发无意义重试。
+        try:
+            validate_catalog(self.catalog)
+        except (FileNotFoundError, OSError, ValueError):
             return empty_outcome(
-                SearchStatus.PAGE_CONTRACT_CHANGED,
+                SearchStatus.CONFIGURATION_ERROR,
                 request.query,
-                f"综合期刊目录不可用：{self.catalog.name}，请重新安装 Skill 或设置 CNKI_CATALOG_PATH",
+                f"期刊目录不可用：{self.catalog.name}，请重新安装或指定有效目录。",
             )
         cached = self.cache.get(request.query, request.limit)
         if cached is not None:
@@ -114,12 +116,6 @@ class CnkiPublicSearchService:
                 # 本机没有可用浏览器属安装问题，重试无意义；转结构化状态并
                 # 携带可操作提示，避免原始 traceback 穿透 MCP 工具边界。
                 return empty_outcome(SearchStatus.NETWORK_ERROR, request.query, str(exc))
-            except FileNotFoundError as exc:
-                # FileNotFoundError ⊂ OSError：若不单列，配置错误会被下面的分支
-                # 吞成 network_error，并白白重试一次。
-                return empty_outcome(
-                    SearchStatus.PAGE_CONTRACT_CHANGED, request.query, _redact_paths(str(exc))
-                )
             except (TransientBrowserError, TimeoutError, OSError) as exc:
                 if attempt == 1:
                     return empty_outcome(

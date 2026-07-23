@@ -27,7 +27,7 @@ def test_search_statuses_match_public_contract() -> None:
     assert {item.value for item in SearchStatus} == {
         "success", "no_results", "partial", "rate_limited",
         "challenge_detected", "login_required", "forbidden",
-        "page_contract_changed", "network_error",
+        "page_contract_changed", "network_error", "configuration_error",
     }
 
 

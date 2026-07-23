@@ -86,14 +86,20 @@ class CatalogLookupTests(unittest.TestCase):
                 self.assertEqual(result["priority_level"], expected[journal])
                 self.assertFalse(result["manual_review_required"])
 
-    def test_no_writing_variant_remains_ambiguous_in_whole_catalog(self):
+    def test_index_collisions_retain_distinct_conservative_signatures(self):
         index = self.module.build_index(CATALOG)
         ambiguous = {
             key: [item["matched_title"] for item in entries]
             for key, entries in index.items()
             if len(entries) > 1
         }
-        self.assertEqual(ambiguous, {}, f"仍有书写变体未归并：{ambiguous}")
+        self.assertTrue(ambiguous)
+        for entries in (index[key] for key in ambiguous):
+            signatures = {
+                (entry["normalized_signature"], entry["merge_signature"])
+                for entry in entries
+            }
+            self.assertGreater(len(signatures), 1)
 
     def test_variant_key_keeps_genuinely_different_titles_apart(self):
         # 句点不参与归并，因此 A.B 与 AB 仍是两本不同的刊
@@ -311,3 +317,127 @@ class CatalogLookupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+CATALOG_LAYOUTS = (
+    ("scripts", ROOT / "scripts" / "catalog_lookup.py"),
+    ("mcpb", ROOT / "mcpb" / "src" / "catalog_lookup.py"),
+)
+
+_VARIANT_KEY_EXPECTATIONS = {
+    "accountingreview": 3, "journalofaccountingandeconomics": 3, "journaloffinance": 3,
+    "reviewoffinancialstudies": 3, "accountingorganizationsandsociety": 4,
+    "americaneconomicjournalappliedeconomics": 5, "americaneconomicjournalmacroeconomics": 5,
+    "americaneconomicjournalmicroeconomics": 5, "americaneconomicjournaleconomicpolicy": 5,
+    "americaneconomicreviewinsights": 5, "auditingajournalofpracticeandtheory": 5,
+    "corporategovernanceaninternationalreview": 5, "environmentalandresourceeconomics": 5,
+    "genevapapersonriskandinsuranceissuesandpractice": 5, "insurancemathematicsandeconomics": 5,
+    "journalofeconomicdynamicsandcontrol": 5, "journaloflawandeconomics": 5,
+    "journaloflaweconomicsandorganization": 5, "journalofmoneycreditandbanking": 5,
+    "randdmanagement": 5, "supplychainmanagementaninternationaljournal": 5,
+    "transportationresearchpartbmethodological": 5, "transportationresearchpartapolicyandpractice": 5,
+    "transportationresearchpartelogisticsandtransportationreview": 5, "economicsofhistory": 5,
+    "humanitiesandsocialsciencescommunications": 2, "npjscienceoflearning": 2,
+    "npjurbansustainability": 2, "cellstemcell": 2, "trendsinendocrinologyandmetabolism": 2,
+    "transportationresearchpartdtransportandenvironment": 8,
+    "journalsofgerontologyseriesabiologicalsciencesandmedicalsciences": 8,
+    "journaloftheroyalstatisticalsocietyseriesastatisticsinsociety": 8,
+    "structuralequationmodelingamultidisciplinaryjournal": 8,
+    "transportmetricaatransportscience": 8,
+}
+
+
+def _load_layout_module(path: Path):
+    spec = importlib.util.spec_from_file_location(f"catalog_lookup_{path.parent.name}", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法加载布局模块：{path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class CatalogLookupCrossLayoutTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.layout_modules = [(_load_layout_module(path), label, path) for label, path in CATALOG_LAYOUTS]
+
+    def test_both_layouts_find_own_catalog_and_rank_key_journals(self):
+        for module, label, _path in self.layout_modules:
+            with self.subTest(layout=label):
+                self.assertTrue(module.DEFAULT_CATALOG.is_file())
+                results = module.lookup_journals(
+                    module.DEFAULT_CATALOG,
+                    ["The Journal of Finance", "Communications Biology", "Communications Chemistry"],
+                )
+                self.assertEqual([item["priority_level"] for item in results], [3, 2, 2])
+
+    def test_catalog_cli_uses_short_errors_without_traceback(self):
+        for _module, label, path in self.layout_modules:
+            with self.subTest(layout=label):
+                completed = subprocess.run(
+                    [sys.executable, str(path), "--catalog", "missing-catalog.md", "lookup", "Journal"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("Academic_Journal_Master_Directory_20260715.md", completed.stderr)
+                self.assertNotIn("Traceback", completed.stderr)
+
+    def test_catalog_entries_not_code_special_cases_and_title_cleaning_is_conservative(self):
+        bilingual = "Zeitschrift fur Ethnologie - Journal of Social and Cultural Anthropology"
+        expectations = {
+            "Journal - 中文说明": "Journal",
+            "Journal (AJPT) - 中文说明": "Journal",
+            "Journal 【AJPT】 - 中文说明": "Journal",
+            "Journal-中文说明": "Journal-中文说明",
+            "Journal – 中文说明": "Journal – 中文说明",
+        }
+        for module, label, _path in self.layout_modules:
+            with self.subTest(layout=label):
+                self.assertFalse(hasattr(module, "COMMUNICATIONS_SERIES"))
+                self.assertFalse(hasattr(module, "_NCS_SERIES"))
+                self.assertTrue(module._DISPLAY_SUFFIX.pattern.startswith("(?:"))
+                self.assertEqual(module._clean_title(bilingual), bilingual)
+                for title, expected in expectations.items():
+                    self.assertEqual(module._clean_title(title), expected)
+
+    def test_35_variant_groups_preserve_minimum_level_and_real_ambiguity(self):
+        self.assertEqual(len(_VARIANT_KEY_EXPECTATIONS), 35)
+        for module, label, _path in self.layout_modules:
+            index = module.build_index(module.DEFAULT_CATALOG)
+            for key, expected in _VARIANT_KEY_EXPECTATIONS.items():
+                candidates = []
+                seen = set()
+                for bucket in index.values():
+                    for entry in bucket:
+                        if key not in module._keys_for_title(entry["matched_title"]):
+                            continue
+                        if entry["matched_title"] not in seen:
+                            candidates.append(entry["matched_title"])
+                            seen.add(entry["matched_title"])
+                        if len(candidates) == 2:
+                            break
+                    if len(candidates) == 2:
+                        break
+                if len(candidates) == 1:
+                    primary = candidates[0]
+                    if primary.casefold().startswith("the "):
+                        candidates.append(primary[4:])
+                    elif " and " in primary:
+                        candidates.append(primary.replace(" and ", " & "))
+                    elif " & " in primary:
+                        candidates.append(primary.replace(" & ", " and "))
+                    else:
+                        candidates.append(f"The {primary}")
+                with self.subTest(layout=label, key=key):
+                    self.assertGreaterEqual(len(candidates), 1)
+                    for title in candidates:
+                        result = module.lookup_journal(index, title)
+                        self.assertEqual(result["status"], "matched")
+                        self.assertEqual(result["priority_level"], expected)
+            ambiguous = {}
+            module._add(ambiguous, "A.B", 8, "ssci", "one.md")
+            module._add(ambiguous, "AB", 9, "cssci", "two.md")
+            self.assertEqual(module.lookup_journal(ambiguous, "AB")["status"], "ambiguous")

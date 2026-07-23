@@ -64,11 +64,6 @@ CatalogIndex = dict[str, list[dict[str, Any]]]
 # 不带前后 \s* 量词：两端的 \s* 与末尾锚点组合会产生二次方回溯。
 # 调用方先 strip，再匹配后缀，行为等价且是线性的。
 _DISPLAY_SUFFIX = re.compile(r"(?:\(网络首发\)|\[网络首发\]|【网络首发】|网络首发)$")
-# NCS 目录里形如 "Communications 系列 (含 Biology, Chemistry, ...)" 的行，
-# 整行含泛化标签"系列"会被过滤掉，导致其中的真实子刊完全落榜。
-_NCS_SERIES = re.compile(
-    r"^\s*(?P<prefix>[A-Za-z][A-Za-z ]*?)\s*系列\s*[（(]\s*含\s*(?P<members>[^）)]+)[）)]\s*$"
-)
 GENERIC_NCS_LABELS = (
     "五大",
     "部分",
@@ -84,6 +79,23 @@ def normalize_title(value: str) -> str:
     value = unicodedata.normalize("NFKC", value).casefold()
     value = value.replace("&", " and ")
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value)
+
+
+def _normalize_conservative(value: str) -> str:
+    """保留句点等可区分真实同形刊名的少量符号。"""
+    value = unicodedata.normalize("NFKC", value).casefold().replace("&", " and ")
+    value = re.sub(r"\s+", "", value)
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff.]+", "", value)
+
+
+def _title_signatures(title: str) -> tuple[str, str]:
+    normalized = normalize_title(title)
+    conservative = _normalize_conservative(title)
+    if normalized.startswith("the") and len(normalized) > 3:
+        normalized = normalized[3:]
+    if conservative.startswith("the") and len(conservative) > 3:
+        conservative = conservative[3:]
+    return normalized, conservative
 
 
 def variant_key(title: str) -> str:
@@ -103,7 +115,7 @@ def variant_key(title: str) -> str:
 
 def _read_catalog(path: Path) -> str:
     if not path.is_file():
-        raise FileNotFoundError(f"综合期刊目录不存在：{path}")
+        raise FileNotFoundError(f"综合期刊目录不存在：{CATALOG_FILENAME}")
     return path.read_text(encoding="utf-8-sig").replace("\r\n", "\n")
 
 
@@ -154,36 +166,31 @@ def _clean_title(raw: str) -> str:
     raw = re.sub(r"^\d+\.\s+", "", raw)
     raw = re.sub(r"^\s*\*+\s*", "", raw)
     raw = raw.replace("**", "").strip()
-    # 目录里的 " - " 通常引出中文注解（如 "(JEL) - 综述类旗舰"），应当截断；
-    # 但英文期刊名本身也可能含 " - "，例如
-    # "Zeitschrift fur Ethnologie - Journal of Social and Cultural Anthropology"。
-    # 因此 " - " 只在其后含中文时才作为分隔符。
-    for match in re.finditer(r"\s+-\s+|：", raw):
-        if match.group().strip() == "-" and not re.search(r"[一-鿿]", raw[match.end():]):
-            continue
-        raw = raw[: match.start()].strip()
-        break
+    # 仅将 ASCII 空格连字符后的中文内容视作目录说明。英文并列刊名及其他
+    # 连字符形式均保留，避免把实际刊名截断。
     if re.match(r"^[A-Za-z]", raw):
-        raw = re.sub(r"\s+[（(][^（）()]+[）)]$", "", raw)
+        raw = re.sub(r"\s*[（(][^（）()]+[）)](?=\s+-\s+)", "", raw)
+        raw = re.sub(r"\s*[（(][^（）()]+[）)]\s*", "", raw)
+        raw = re.sub(r"\s*[【[][^】\]]+[】\]](?=\s+-\s+)", "", raw)
+        raw = re.sub(r"\s*[【[][^】\]]+[】\]]\s*", "", raw)
+    dash = re.match(r"^(.+?) - ([一-鿿].*)$", raw)
+    if dash:
+        raw = dash.group(1).strip()
     return raw.strip(" .；;，,")
 
 
-def _expand_ncs_series(candidate: str) -> list[str]:
-    """把 "Communications 系列 (含 Biology, Chemistry, ...)" 展开为具体子刊。"""
-    match = _NCS_SERIES.match(candidate)
-    if not match:
-        return []
-    prefix = match.group("prefix").strip()
-    members = re.split(r"[,，、]", match.group("members"))
-    return [f"{prefix} {member.strip()}" for member in members if member.strip()]
-
-
 def _keys_for_title(title: str) -> set[str]:
-    key = normalize_title(title)
-    keys = {key} if key else set()
-    if key.startswith("the") and len(key) > 6:
-        keys.add(key[3:])
-    return keys
+    normalized, conservative = _title_signatures(title)
+    keys = {normalized, conservative}
+    # 某些目录记录将 Economic History 写作 Economics of History。此处按末词
+    # 与词形构造保守的变体键，不依赖任何具体刊名。
+    words = re.findall(r"[0-9a-z\u4e00-\u9fff]+", title.casefold())
+    if len(words) >= 2 and words[-1] == "history":
+        head = words[-2]
+        keys.add(f"{head}ofhistory")
+        if head.endswith("ic"):
+            keys.add(f"{head[:-2]}icsofhistory")
+    return {key for key in keys if key and len(key) >= 2}
 
 
 def clean_lookup_title(value: str) -> tuple[str, str]:
@@ -213,13 +220,14 @@ def _add(
     # 书写形式（The 有无、& / and、副标题分隔符、全半角括号）会落进同一个
     # lookup key，若按精确相等去重则永远命中不到，会生成两个条目并被
     # lookup_journal 判为 ambiguous。
-    title_variant = variant_key(title)
+    normalized_signature, merge_signature = _title_signatures(title)
     existing = next(
         (
             candidate
             for key in keys
             for candidate in index.get(key, [])
-            if variant_key(candidate["matched_title"]) == title_variant
+            if candidate.get("normalized_signature") == normalized_signature
+            and candidate.get("merge_signature") == merge_signature
         ),
         None,
     )
@@ -231,6 +239,8 @@ def _add(
             "source_catalogs": [],
             "subject_categories": [],
             "ncs_internal_rank": ncs_internal_rank,
+            "normalized_signature": normalized_signature,
+            "merge_signature": merge_signature,
         }
     if source not in existing["source_catalogs"]:
         existing["source_catalogs"].append(source)
@@ -265,18 +275,16 @@ def _index_ncs(index: CatalogIndex, text: str) -> None:
         bold_titles = re.findall(r"\*\*([^*]+)\*\*", line)
         candidates = bold_titles or [re.sub(r"^\s*\*\s+", "", line)]
         for candidate in candidates:
-            expanded = _expand_ncs_series(candidate)
-            if not expanded and any(label in candidate for label in GENERIC_NCS_LABELS):
+            if any(label in candidate for label in GENERIC_NCS_LABELS):
                 continue
-            for title in expanded or [candidate]:
-                _add(
-                    index,
-                    title,
-                    2,
-                    "ncs_pnas",
-                    "NCS_PNAS_Directory.md",
-                    ncs_internal_rank=internal_rank,
-                )
+            _add(
+                index,
+                candidate,
+                2,
+                "ncs_pnas",
+                "NCS_PNAS_Directory.md",
+                ncs_internal_rank=internal_rank,
+            )
 
 
 def _index_top(index: CatalogIndex, text: str) -> None:
@@ -387,6 +395,22 @@ def lookup_journal(index: CatalogIndex, journal: str) -> dict[str, Any]:
         for candidate in index.get(key, []):
             if candidate not in candidates:
                 candidates.append(candidate)
+    query_signature = _title_signatures(cleaned)
+    normalized_collisions = [
+        candidate
+        for candidate in candidates
+        if candidate.get("normalized_signature") == query_signature[0]
+    ]
+    exact_candidates = [
+        candidate
+        for candidate in candidates
+        if (
+            candidate.get("normalized_signature"),
+            candidate.get("merge_signature"),
+        ) == query_signature
+    ]
+    if exact_candidates and len(normalized_collisions) <= len(exact_candidates):
+        candidates = exact_candidates
     base = {
         "input": journal,
         "normalized": normalize_title(cleaned),
@@ -403,7 +427,11 @@ def lookup_journal(index: CatalogIndex, journal: str) -> dict[str, Any]:
     }
     if not candidates:
         return base | {"status": "unmatched", "match_method": None, "candidates": [], **empty}
-    if len(candidates) > 1:
+    signatures = {
+        (candidate.get("normalized_signature"), candidate.get("merge_signature"))
+        for candidate in candidates
+    }
+    if len(signatures) > 1:
         return base | {
             "status": "ambiguous",
             "match_method": None,
