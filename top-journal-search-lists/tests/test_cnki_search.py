@@ -122,3 +122,36 @@ def test_runner_turns_missing_result_or_no_result_contract_into_page_change() ->
 
     with pytest.raises(search.PageContractChanged):
         search.PublicThemeSearchRunner().run(MissingResultPage(), "数字化转型")
+
+
+PlaywrightWaitTimeout = type(
+    "TimeoutError", (RuntimeError,), {"__module__": "playwright._impl._errors"}
+)
+PlaywrightWaitError = type(
+    "Error", (RuntimeError,), {"__module__": "playwright._impl._errors"}
+)
+
+
+@pytest.mark.parametrize(
+    ("error_type", "wrap_as_contract_change"),
+    [
+        (TimeoutError, True),
+        (PlaywrightWaitTimeout, True),
+        (RuntimeError, False),
+        (PlaywrightWaitError, False),
+    ],
+)
+def test_runner_only_converts_timeout_while_waiting_for_result_contract(
+    error_type: type[Exception], wrap_as_contract_change: bool,
+) -> None:
+    class FailingWaitPage(RecordingPage):
+        def wait_for_function(self, _script: str, *, timeout: int) -> None:
+            raise error_type("等待失败")
+
+    if wrap_as_contract_change:
+        with pytest.raises(search.PageContractChanged) as raised:
+            search.PublicThemeSearchRunner().run(FailingWaitPage(), "数字化转型")
+        assert isinstance(raised.value.__cause__, error_type)
+    else:
+        with pytest.raises(error_type, match="等待失败"):
+            search.PublicThemeSearchRunner().run(FailingWaitPage(), "数字化转型")

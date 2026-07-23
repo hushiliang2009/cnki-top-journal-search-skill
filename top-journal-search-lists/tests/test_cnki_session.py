@@ -21,6 +21,7 @@ def test_public_session_uses_only_cnki_home() -> None:
     [
         ("https://kns.cnki.net/captcha", "请完成拼图验证", SearchStatus.CHALLENGE_DETECTED),
         ("https://login.cnki.net/", "用户登录", SearchStatus.LOGIN_REQUIRED),
+        ("https://kns.cnki.net/kns8s/authserver/login", "普通认证页", SearchStatus.LOGIN_REQUIRED),
         ("https://kns.cnki.net/", "403 Forbidden", SearchStatus.FORBIDDEN),
         ("https://kns.cnki.net/", "访问过于频繁", SearchStatus.RATE_LIMITED),
         ("https://kns.cnki.net/", "未检索到相关文献", SearchStatus.NO_RESULTS),

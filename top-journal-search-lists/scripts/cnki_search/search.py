@@ -41,6 +41,13 @@ def validate_public_theme_search_contract(page: Any) -> tuple[Any, Any]:
     return box, public_theme_search_button(page)
 
 
+def _is_result_wait_timeout(error: BaseException) -> bool:
+    return isinstance(error, TimeoutError) or any(
+        item.__name__ == "TimeoutError" and item.__module__.startswith("playwright.")
+        for item in type(error).__mro__
+    )
+
+
 def wait_for_public_search_result_contract(page: Any) -> None:
     try:
         page.wait_for_function(
@@ -53,7 +60,9 @@ def wait_for_public_search_result_contract(page: Any) -> None:
             timeout=10_000,
         )
     except Exception as exc:
-        raise PageContractChanged("知网公开检索结果结构未出现") from exc
+        if _is_result_wait_timeout(exc):
+            raise PageContractChanged("知网公开检索结果结构未出现") from exc
+        raise
 
 
 class PublicThemeSearchRunner:
