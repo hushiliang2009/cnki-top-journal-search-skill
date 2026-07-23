@@ -113,6 +113,47 @@ def test_challenge_classifier_accepts_captcha_url_without_generic_text() -> None
     ) is SearchStatus.CHALLENGE_DETECTED
 
 
+@pytest.mark.parametrize(
+    ("url", "title", "text", "http_status", "expected"),
+    [
+        (
+            "https://kns.cnki.net/kns8s/defaultresult/index",
+            "拒绝访问 用户登录 统一身份认证",
+            "题名 来源 访问过于频繁 无权访问",
+            200,
+            SearchStatus.SUCCESS,
+        ),
+        (
+            "https://kns.cnki.net/kns8s/defaultresult/index",
+            "中国知网",
+            "题名 来源",
+            403,
+            SearchStatus.FORBIDDEN,
+        ),
+        (
+            "https://www.cnki.net/",
+            "中国知网",
+            "中国知网公开首页",
+            200,
+            SearchStatus.PAGE_CONTRACT_CHANGED,
+        ),
+        (
+            "https://kns.cnki.net/kns8s/defaultresult/index",
+            "中国知网",
+            "普通页面说明：请完成安全验证后可继续使用服务",
+            200,
+            SearchStatus.PAGE_CONTRACT_CHANGED,
+        ),
+    ],
+)
+def test_public_state_truth_table_prioritizes_status_and_result_structure(
+    url: str, title: str, text: str, http_status: int, expected: SearchStatus,
+) -> None:
+    assert session_module.classify_public_search_state(
+        url=url, title=title, visible_text=text, http_status=http_status
+    ) is expected
+
+
 class RestrictedPage:
     def __init__(self, text: str, response_status: int | None = None) -> None:
         self.url = "https://www.cnki.net/"

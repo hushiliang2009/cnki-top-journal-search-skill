@@ -8,8 +8,11 @@ class PageContractChanged(RuntimeError):
 
 
 PUBLIC_SEARCH_BOX_NAME = "中文文献、外文文献"
+PUBLIC_SEARCH_BUTTON_NAME = "检索"
 CURRENT_THEME_SELECTOR = ".sort .sort-default"
 CURRENT_THEME_TEXT = "主题▼"
+RESULT_TABLE_SELECTOR = "table.result-table-list"
+NO_RESULTS_TEXT = "未检索到相关文献"
 
 
 def _normalize_control_text(value: str) -> str:
@@ -23,19 +26,42 @@ def current_public_theme_control(page: Any) -> Any:
     return control
 
 
-def validate_public_theme_search_contract(page: Any) -> Any:
+def public_theme_search_button(page: Any) -> Any:
+    button = page.get_by_role("button", name=PUBLIC_SEARCH_BUTTON_NAME)
+    if button.count() != 1:
+        raise PageContractChanged("知网公开首页主题检索按钮结构已变化")
+    return button
+
+
+def validate_public_theme_search_contract(page: Any) -> tuple[Any, Any]:
     current_public_theme_control(page)
     box = page.get_by_role("textbox", name=PUBLIC_SEARCH_BOX_NAME)
     if box.count() != 1:
         raise PageContractChanged("知网公开首页主题检索框结构已变化")
-    return box
+    return box, public_theme_search_button(page)
+
+
+def wait_for_public_search_result_contract(page: Any) -> None:
+    try:
+        page.wait_for_function(
+            f"""
+            () => Boolean(
+                document.querySelector("{RESULT_TABLE_SELECTOR}")
+                || document.body?.innerText?.includes("{NO_RESULTS_TEXT}")
+            )
+            """,
+            timeout=10_000,
+        )
+    except Exception as exc:
+        raise PageContractChanged("知网公开检索结果结构未出现") from exc
 
 
 class PublicThemeSearchRunner:
     def run(self, page: Any, query: str) -> int | None:
-        box = validate_public_theme_search_contract(page)
+        box, button = validate_public_theme_search_contract(page)
         box.fill(query)
         with page.expect_navigation(wait_until="domcontentloaded") as navigation:
-            box.press("Enter")
+            button.click()
+        wait_for_public_search_result_contract(page)
         response = navigation.value
         return response.status if response is not None else None

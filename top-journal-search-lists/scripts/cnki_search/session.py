@@ -45,39 +45,37 @@ class SearchSnapshot:
 def classify_public_search_state(
     *, url: str, title: str, visible_text: str, http_status: int | None = None,
 ) -> SearchStatus:
-    identity = f"{url}\n{title}\n{visible_text}".casefold()
     parsed = urlparse(url)
-    url_identity = f"{parsed.hostname or ''}{parsed.path}{parsed.query}".casefold()
+    hostname = (parsed.hostname or "").casefold()
+    path = parsed.path.casefold()
     title_identity = title.casefold()
     visible_identity = visible_text.casefold()
-    if http_status in {401, 403} or any(
-        token in identity for token in ("401 unauthorized", "403 forbidden", "无权访问", "拒绝访问")
-    ):
+    if http_status in {401, 403}:
         return SearchStatus.FORBIDDEN
-    if http_status == 429 or any(
-        token in identity for token in ("429 too many requests", "访问过于频繁", "操作频繁")
-    ):
+    if http_status == 429:
         return SearchStatus.RATE_LIMITED
     if http_status is not None and 500 <= http_status <= 599:
         return SearchStatus.NETWORK_ERROR
+
     if (
-        "captcha" in url_identity
+        "/verify/" in path
+        or "captcha" in path
         or any(token in title_identity for token in ("验证码", "安全验证", "拼图验证"))
-        or any(
-            token in visible_identity
-            for token in ("请完成拼图验证", "请输入验证码", "请完成安全验证", "拖动滑块完成验证")
-        )
     ):
         return SearchStatus.CHALLENGE_DETECTED
-    if any(token in identity for token in ("login.cnki.net", "authserver", "用户登录", "统一身份认证")):
+    if hostname == "login.cnki.net" or "authserver" in path:
         return SearchStatus.LOGIN_REQUIRED
-    if "未检索到相关文献" in visible_text:
-        return SearchStatus.NO_RESULTS
-    if parsed.hostname == "www.cnki.net" and "中国知网" in identity:
-        return SearchStatus.SUCCESS
-    if parsed.hostname == CNKI_RESULT_HOST and parsed.path.casefold().startswith(CNKI_RESULT_PATH_PREFIX):
+
+    if hostname == CNKI_RESULT_HOST and path.startswith(CNKI_RESULT_PATH_PREFIX):
         if "题名" in visible_text and "来源" in visible_text:
             return SearchStatus.SUCCESS
+
+    if "未检索到相关文献" in visible_text:
+        return SearchStatus.NO_RESULTS
+    if any(token in visible_identity for token in ("401 unauthorized", "403 forbidden", "无权访问", "拒绝访问")):
+        return SearchStatus.FORBIDDEN
+    if any(token in visible_identity for token in ("429 too many requests", "访问过于频繁", "操作频繁")):
+        return SearchStatus.RATE_LIMITED
     return SearchStatus.PAGE_CONTRACT_CHANGED
 
 
