@@ -12,7 +12,7 @@ from cnki_search.models import SearchOutcome, SearchStatus
 
 
 class FakeService:
-    def search(self, query: str, limit: int = 20) -> SearchOutcome:
+    async def search(self, query: str, limit: int = 20) -> SearchOutcome:
         return SearchOutcome(
             SearchStatus.NO_RESULTS, query, [], [], 0, [], "2026-07-22T00:00:00+00:00",
         )
@@ -39,7 +39,7 @@ def test_removed_tools_are_not_attributes() -> None:
 
 
 def test_public_tool_returns_service_outcome() -> None:
-    assert CnkiMcpServer(service=FakeService()).cnki_search("主题") == {
+    assert asyncio.run(CnkiMcpServer(service=FakeService()).cnki_search("主题")) == {
         "ok": True,
         "status": "no_results",
         "query": "主题",
@@ -89,7 +89,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
 class Service:
-    def search(self, query, limit=20):
+    async def search(self, query, limit=20):
         return SearchOutcome(SearchStatus.NO_RESULTS, query, [], [], 0, [], 'now')
 
 assert SearchRequest('  ＡＢＣ　topic  ').query == 'ABC topic'

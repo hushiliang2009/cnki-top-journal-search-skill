@@ -1,5 +1,6 @@
 from dataclasses import fields
 from pathlib import Path
+import asyncio
 
 import pytest
 
@@ -85,7 +86,7 @@ def test_service_rejects_invalid_arguments_instead_of_faking_page_contract_chang
     service = CnkiPublicSearchService(catalog=catalog)
     for query, limit in (("   ", 20), ("topic", 0), ("topic", 21)):
         with pytest.raises(ValueError):
-            service.search(query, limit)
+            asyncio.run(service.search(query, limit))
 
 
 def test_record_bibliographic_fields_remove_controls_and_truncate_untrusted_text() -> None:

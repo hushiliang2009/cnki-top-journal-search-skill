@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 import sys
@@ -53,7 +54,7 @@ class FakePlaywright:
 
 def test_browser_launch_is_headless_and_has_no_persistent_state() -> None:
     fake = FakePlaywright()
-    BrowserFactory(fake).launch_ephemeral()
+    asyncio.run(BrowserFactory(fake).launch_ephemeral())
     assert fake.chromium.launch_kwargs["headless"] is True
     assert fake.chromium.launch_kwargs["args"] == ["--no-proxy-server", "--proxy-bypass-list=*"]
     assert "user_data_dir" not in fake.chromium.launch_kwargs
@@ -102,7 +103,7 @@ def test_session_converts_playwright_style_timeout_and_closes_initialization_res
     session = PublicCnkiSession(browser_factory=Factory())
     session._playwright = playwright
     with pytest.raises(RuntimeError) as raised:
-        session.__enter__()
+        asyncio.run(session.__aenter__())
     assert type(raised.value).__name__ == "TransientBrowserError"
     assert page.closed and context.closed and browser.closed and playwright.closed
     assert session.page is None and session.context is None and session.browser is None
@@ -274,6 +275,10 @@ class RestrictedPage:
         raise AssertionError("受限首页不得访问主题框")
 
 
+async def _search_with_session(session: PublicCnkiSession, query: str):
+    async with session:
+        return await session.search(query)
+
 def test_session_returns_initial_restriction_before_theme_contract_and_closes_resources() -> None:
     page = RestrictedPage("403 Forbidden")
     context = _Closable()
@@ -286,9 +291,8 @@ def test_session_returns_initial_restriction_before_theme_contract_and_closes_re
             return browser
 
     session = PublicCnkiSession(browser_factory=Factory())
-    with session:
-        snapshot = session.search("主题")
-        assert session_module.classify_public_search_state(**snapshot.state_arguments()) is SearchStatus.FORBIDDEN
+    snapshot = asyncio.run(_search_with_session(session, "主题"))
+    assert session_module.classify_public_search_state(**snapshot.state_arguments()) is SearchStatus.FORBIDDEN
     assert page.box_accessed is False
     assert context.closed and browser.closed
 @pytest.mark.parametrize(
@@ -309,9 +313,8 @@ def test_session_uses_initial_response_status_before_theme_contract(
             return browser
 
     session = PublicCnkiSession(browser_factory=Factory())
-    with session:
-        snapshot = session.search("主题")
-        assert snapshot.http_status == response_status
-        assert session_module.classify_public_search_state(**snapshot.state_arguments()) is expected
+    snapshot = asyncio.run(_search_with_session(session, "主题"))
+    assert snapshot.http_status == response_status
+    assert session_module.classify_public_search_state(**snapshot.state_arguments()) is expected
     assert page.box_accessed is False
     assert context.closed and browser.closed

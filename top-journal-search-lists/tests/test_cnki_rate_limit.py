@@ -1,12 +1,16 @@
+import asyncio
+
 from cnki_search.rate_limit import SerialSearchGate
 
 
 def test_gate_waits_between_searches() -> None:
     values = iter([0.0, 0.0, 0.0, 6.0])
     delays: list[float] = []
-    gate = SerialSearchGate(minimum_interval=6.0, clock=lambda: next(values), sleep=delays.append)
-    assert gate.wait() == 0.0
-    assert gate.wait() == 6.0
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+    gate = SerialSearchGate(minimum_interval=6.0, clock=lambda: next(values), sleep=sleep)
+    assert asyncio.run(gate.wait()) == 0.0
+    assert asyncio.run(gate.wait()) == 6.0
     assert delays == [6.0]
 
 
@@ -22,7 +26,9 @@ def test_default_minimum_interval_is_six_seconds() -> None:
 def test_default_gate_actually_sleeps_between_consecutive_searches() -> None:
     values = iter([0.0, 0.0, 0.0, 0.0])
     delays: list[float] = []
-    gate = SerialSearchGate(clock=lambda: next(values), sleep=delays.append)
-    gate.wait()
-    gate.wait()
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+    gate = SerialSearchGate(clock=lambda: next(values), sleep=sleep)
+    asyncio.run(gate.wait())
+    asyncio.run(gate.wait())
     assert delays == [6.0]

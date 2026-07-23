@@ -1,4 +1,7 @@
+import asyncio
+import importlib
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,12 +13,10 @@ MCPB_SEARCH = Path(__file__).resolve().parents[1] / "mcpb" / "src" / "cnki_searc
 
 
 def _load_mcpb_search():
-    spec = importlib.util.spec_from_file_location("mcpb_search_runner", MCPB_SEARCH)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
+    sys.modules.pop("cnki_search.search", None)
+    sys.modules.pop("cnki_search", None)
+    sys.path.insert(0, str(MCPB_SEARCH.parents[1]))
+    return importlib.import_module("cnki_search.search")
 
 class RecordingLocator:
     def __init__(self, page: "RecordingPage") -> None:
@@ -38,10 +39,10 @@ class RecordingLocator:
 
 
 class Navigation:
-    def __enter__(self) -> "Navigation":
+    async def __aenter__(self) -> "Navigation":
         return self
 
-    def __exit__(self, *_exc: object) -> None:
+    async def __aexit__(self, *_exc: object) -> None:
         return None
 
     @property
@@ -77,7 +78,7 @@ class RecordingPage:
 
 def test_runner_fills_only_default_theme_box() -> None:
     page = RecordingPage()
-    search.PublicThemeSearchRunner().run(page, "数字化转型")
+    asyncio.run(search.PublicThemeSearchRunner().run(page, "数字化转型"))
     assert page.actions == [
         ("textbox", "中文文献、外文文献"),
         ("button", "检索"),
@@ -97,7 +98,7 @@ def test_runner_stops_when_public_home_contract_changes() -> None:
             return locator
 
     with pytest.raises(search.PageContractChanged):
-        search.PublicThemeSearchRunner().run(MissingFieldPage(), "主题")
+        asyncio.run(search.PublicThemeSearchRunner().run(MissingFieldPage(), "主题"))
 
 
 def test_runner_accepts_unique_current_theme_control_with_duplicate_theme_texts() -> None:
@@ -114,7 +115,7 @@ def test_runner_accepts_unique_current_theme_control_with_duplicate_theme_texts(
             return control
 
     page = DuplicateThemeTextPage()
-    assert search.PublicThemeSearchRunner().run(page, "数字化转型") == 200
+    assert asyncio.run(search.PublicThemeSearchRunner().run(page, "数字化转型")) == 200
 
 
 def test_runner_rejects_missing_or_ambiguous_search_button() -> None:
@@ -126,7 +127,7 @@ def test_runner_rejects_missing_or_ambiguous_search_button() -> None:
             return locator
 
     with pytest.raises(search.PageContractChanged):
-        search.PublicThemeSearchRunner().run(MissingButtonPage(), "数字化转型")
+        asyncio.run(search.PublicThemeSearchRunner().run(MissingButtonPage(), "数字化转型"))
 
 
 def test_runner_turns_missing_result_or_no_result_contract_into_page_change() -> None:
@@ -135,7 +136,7 @@ def test_runner_turns_missing_result_or_no_result_contract_into_page_change() ->
             raise TimeoutError(f"no result contract within {timeout}")
 
     with pytest.raises(search.PageContractChanged):
-        search.PublicThemeSearchRunner().run(MissingResultPage(), "数字化转型")
+        asyncio.run(search.PublicThemeSearchRunner().run(MissingResultPage(), "数字化转型"))
 
 
 PlaywrightWaitTimeout = type(
@@ -164,17 +165,17 @@ def test_runner_only_converts_timeout_while_waiting_for_result_contract(
 
     if wrap_as_contract_change:
         with pytest.raises(search.PageContractChanged) as raised:
-            search.PublicThemeSearchRunner().run(FailingWaitPage(), "数字化转型")
+            asyncio.run(search.PublicThemeSearchRunner().run(FailingWaitPage(), "数字化转型"))
         assert isinstance(raised.value.__cause__, error_type)
     else:
         with pytest.raises(error_type, match="等待失败"):
-            search.PublicThemeSearchRunner().run(FailingWaitPage(), "数字化转型")
+            asyncio.run(search.PublicThemeSearchRunner().run(FailingWaitPage(), "数字化转型"))
 
 
 def test_mcpb_runner_independently_checks_button_and_result_contract() -> None:
     module = _load_mcpb_search()
     page = RecordingPage()
-    assert module.PublicThemeSearchRunner().run(page, "数字化转型") == 200
+    assert asyncio.run(module.PublicThemeSearchRunner().run(page, "数字化转型")) == 200
     assert ("button", "检索") in page.actions and ("click", "") in page.actions
 
     class MissingButtonPage(RecordingPage):
@@ -193,8 +194,8 @@ def test_mcpb_runner_independently_checks_button_and_result_contract() -> None:
             raise RuntimeError("unexpected browser failure")
 
     with pytest.raises(module.PageContractChanged):
-        module.PublicThemeSearchRunner().run(MissingButtonPage(), "数字化转型")
+        asyncio.run(module.PublicThemeSearchRunner().run(MissingButtonPage(), "数字化转型"))
     with pytest.raises(module.PageContractChanged):
-        module.PublicThemeSearchRunner().run(TimeoutPage(), "数字化转型")
+        asyncio.run(module.PublicThemeSearchRunner().run(TimeoutPage(), "数字化转型"))
     with pytest.raises(RuntimeError, match="unexpected browser failure"):
-        module.PublicThemeSearchRunner().run(ErrorPage(), "数字化转型")
+        asyncio.run(module.PublicThemeSearchRunner().run(ErrorPage(), "数字化转型"))

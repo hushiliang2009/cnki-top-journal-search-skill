@@ -1,4 +1,6 @@
 from pathlib import Path
+import asyncio
+import asyncio
 from datetime import date
 import os
 import subprocess
@@ -20,13 +22,13 @@ class FakeSession:
     def __init__(self, html: str) -> None:
         self.html = html
 
-    def __enter__(self) -> "FakeSession":
+    async def __aenter__(self) -> "FakeSession":
         return self
 
-    def __exit__(self, *_exc: object) -> None:
+    async def __aexit__(self, *_exc: object) -> None:
         return None
 
-    def search(self, query: str) -> SearchSnapshot:
+    async def search(self, query: str) -> SearchSnapshot:
         return SearchSnapshot(
             self.html, "https://kns.cnki.net/kns8s/defaultresult/index",
             "检索-中国知网", "题名 作者 来源 日期 数据库", 200,
@@ -36,7 +38,7 @@ class FakeSession:
 def test_service_returns_partial_when_incomplete_rows_exist() -> None:
     html = (FIXTURES / "public_incomplete_results.html").read_text(encoding="utf-8")
     service = CnkiPublicSearchService(session_factory=lambda: FakeSession(html), catalog=CATALOG)
-    outcome = service.search("数字化转型", limit=20)
+    outcome = asyncio.run(service.search("数字化转型", limit=20))
     assert outcome.status.value == "partial"
     assert all(item.title and item.journal_raw and item.publication_year for item in outcome.records)
     assert outcome.incomplete_records
@@ -46,7 +48,7 @@ class CountingGate:
     def __init__(self) -> None:
         self.calls = 0
 
-    def wait(self) -> float:
+    async def wait(self) -> float:
         self.calls += 1
         return 0.0
 
@@ -59,14 +61,14 @@ class SequenceFactory:
     def __call__(self) -> "SequenceFactory":
         return self
 
-    def __enter__(self) -> "SequenceFactory":
+    async def __aenter__(self) -> "SequenceFactory":
         self.calls += 1
         return self
 
-    def __exit__(self, *_exc: object) -> None:
+    async def __aexit__(self, *_exc: object) -> None:
         return None
 
-    def search(self, _query: str) -> SearchSnapshot:
+    async def search(self, _query: str) -> SearchSnapshot:
         return self.snapshots[self.calls - 1]
 
 
@@ -89,7 +91,7 @@ def _snapshot(
 def test_network_error_retries_once_only() -> None:
     factory = SequenceFactory([_snapshot(status=500), _snapshot(status=500)])
     gate = CountingGate()
-    outcome = CnkiPublicSearchService(session_factory=factory, catalog=CATALOG, gate=gate).search("主题")
+    outcome = asyncio.run(CnkiPublicSearchService(session_factory=factory, catalog=CATALOG, gate=gate).search("主题"))
     assert outcome.status is SearchStatus.NETWORK_ERROR
     assert (factory.calls, gate.calls) == (2, 2)
 
@@ -137,7 +139,7 @@ class GotoTimeoutFactory:
 def test_playwright_style_timeout_retries_once_then_returns_network_error_and_closes_sessions() -> None:
     factory = GotoTimeoutFactory()
     gate = CountingGate()
-    outcome = CnkiPublicSearchService(session_factory=factory, catalog=CATALOG, gate=gate).search("主题")
+    outcome = asyncio.run(CnkiPublicSearchService(session_factory=factory, catalog=CATALOG, gate=gate).search("主题"))
     assert outcome.status is SearchStatus.NETWORK_ERROR
     assert (factory.calls, gate.calls) == (2, 2)
     assert all(page.closed and context.closed and browser.closed for page, context, browser in factory.resources)
@@ -156,7 +158,7 @@ def test_playwright_style_timeout_retries_once_then_returns_network_error_and_cl
 def test_restricted_or_changed_state_never_retries(snapshot: SearchSnapshot, expected: SearchStatus) -> None:
     factory = SequenceFactory([snapshot])
     gate = CountingGate()
-    outcome = CnkiPublicSearchService(session_factory=factory, catalog=CATALOG, gate=gate).search("主题")
+    outcome = asyncio.run(CnkiPublicSearchService(session_factory=factory, catalog=CATALOG, gate=gate).search("主题"))
     assert outcome.status is expected
     assert (factory.calls, gate.calls) == (1, 1)
 
@@ -165,16 +167,16 @@ def test_cache_hit_skips_session_and_gate() -> None:
     factory = SequenceFactory([_snapshot(text="未检索到相关文献", html=RESTRICTED_PAGE_HTML)])
     gate = CountingGate()
     service = CnkiPublicSearchService(session_factory=factory, catalog=CATALOG, gate=gate)
-    assert service.search("主题").status is SearchStatus.NO_RESULTS
-    assert service.search("主题").status is SearchStatus.NO_RESULTS
+    assert asyncio.run(service.search("主题")).status is SearchStatus.NO_RESULTS
+    assert asyncio.run(service.search("主题")).status is SearchStatus.NO_RESULTS
     assert (factory.calls, gate.calls) == (1, 1)
 
 
 def test_cache_hit_rewrites_outcome_query_to_current_normalized_request() -> None:
     factory = SequenceFactory([_snapshot(text="未检索到相关文献", html=RESTRICTED_PAGE_HTML)])
     service = CnkiPublicSearchService(session_factory=factory, catalog=CATALOG, gate=CountingGate())
-    first = service.search("  ＡＢＣ　主题  ")
-    second = service.search("abc\t主题")
+    first = asyncio.run(service.search("  ＡＢＣ　主题  "))
+    second = asyncio.run(service.search("abc\t主题"))
     assert (first.query, second.query) == ("ABC 主题", "abc 主题")
     assert factory.calls == 1
 
@@ -187,9 +189,9 @@ def test_service_returns_partial_for_future_year_beyond_shared_range() -> None:
         "<td class='source'><a>期刊</a></td><td class='date'>"
         f"{year}</td><td class='data'>期刊</td></tr></table>"
     )
-    outcome = CnkiPublicSearchService(
+    outcome = asyncio.run(CnkiPublicSearchService(
         session_factory=lambda: FakeSession(html), catalog=CATALOG
-    ).search("主题")
+    ).search("主题"))
     assert outcome.status is SearchStatus.PARTIAL
     assert outcome.records == []
     assert len(outcome.incomplete_records) == 1
@@ -199,9 +201,9 @@ def test_missing_catalog_reports_config_error_without_touching_cnki() -> None:
     """目录缺失是部署配置错误：不得谎报 network_error，也不得白打两次 CNKI。"""
     factory = SequenceFactory([_snapshot(), _snapshot()])
     gate = CountingGate()
-    outcome = CnkiPublicSearchService(
+    outcome = asyncio.run(CnkiPublicSearchService(
         session_factory=factory, catalog=ROOT / "references" / "不存在的目录.md", gate=gate
-    ).search("主题")
+    ).search("主题"))
 
     assert outcome.status is SearchStatus.CONFIGURATION_ERROR
     assert (factory.calls, gate.calls) == (0, 0)
@@ -214,7 +216,7 @@ def test_invalid_catalog_reports_configuration_error_without_touching_cnki(tmp_p
     factory = SequenceFactory([_snapshot()])
     gate = CountingGate()
 
-    outcome = CnkiPublicSearchService(session_factory=factory, catalog=invalid, gate=gate).search("主题")
+    outcome = asyncio.run(CnkiPublicSearchService(session_factory=factory, catalog=invalid, gate=gate).search("主题"))
 
     assert outcome.status is SearchStatus.CONFIGURATION_ERROR
     assert (factory.calls, gate.calls) == (0, 0)
@@ -224,29 +226,30 @@ def test_invalid_catalog_reports_configuration_error_without_touching_cnki(tmp_p
 def test_missing_catalog_short_circuits_cnki_in_both_runtime_layouts() -> None:
     source_roots = (ROOT / "scripts", ROOT / "mcpb" / "src")
     program = """
+import asyncio
 from pathlib import Path
 from cnki_search.models import SearchStatus
 from cnki_search.service import CnkiPublicSearchService
 
 class Gate:
     calls = 0
-    def wait(self):
+    async def wait(self):
         type(self).calls += 1
 
 class Session:
     calls = 0
-    def __enter__(self):
+    async def __aenter__(self):
         type(self).calls += 1
         return self
-    def __exit__(self, *_exc):
+    async def __aexit__(self, *_exc):
         return None
 
 gate = Gate()
-outcome = CnkiPublicSearchService(
+outcome = asyncio.run(CnkiPublicSearchService(
     session_factory=Session,
     catalog=Path('missing-catalog.md'),
     gate=gate,
-).search('主题')
+).search('主题'))
 assert outcome.status is SearchStatus.CONFIGURATION_ERROR
 assert (Session.calls, Gate.calls) == (0, 0)
 assert all('C:\\\\' not in warning and '/home/' not in warning for warning in outcome.warnings)
@@ -262,10 +265,10 @@ assert all('C:\\\\' not in warning and '/home/' not in warning for warning in ou
 
 
 def test_warnings_never_leak_local_absolute_paths() -> None:
-    outcome = CnkiPublicSearchService(
+    outcome = asyncio.run(CnkiPublicSearchService(
         session_factory=lambda: FakeSession(""),
         catalog=ROOT / "references" / "不存在的目录.md",
-    ).search("主题")
+    ).search("主题"))
 
     for warning in outcome.warnings:
         assert str(ROOT) not in warning
@@ -284,16 +287,16 @@ def test_browser_unavailable_is_structured_and_not_retried() -> None:
         def __call__(self) -> "FailingFactory":
             return self
 
-        def __enter__(self) -> "FailingFactory":
+        async def __aenter__(self) -> "FailingFactory":
             type(self).calls += 1
             raise BrowserUnavailableError("浏览器不可用：请在 MCP 运行环境中执行 xxx")
 
-        def __exit__(self, *_exc: object) -> None:
+        async def __aexit__(self, *_exc: object) -> None:
             return None
 
-    outcome = CnkiPublicSearchService(
+    outcome = asyncio.run(CnkiPublicSearchService(
         session_factory=FailingFactory(), catalog=CATALOG, gate=gate
-    ).search("主题")
+    ).search("主题"))
 
     assert outcome.status is SearchStatus.CONFIGURATION_ERROR
     assert FailingFactory.calls == 1, "安装类故障重试无意义"
@@ -305,9 +308,9 @@ def test_restricted_states_carry_actionable_fallback_hint() -> None:
     factory = SequenceFactory(
         [_snapshot(url="https://kns.cnki.net/verify/home", text="", html="<main></main>")]
     )
-    outcome = CnkiPublicSearchService(
+    outcome = asyncio.run(CnkiPublicSearchService(
         session_factory=factory, catalog=CATALOG, gate=CountingGate()
-    ).search("供应链金融")
+    ).search("供应链金融"))
 
     assert outcome.status is SearchStatus.CHALLENGE_DETECTED
     warning = outcome.warnings[0]
@@ -325,6 +328,7 @@ def test_restricted_states_carry_actionable_fallback_hint() -> None:
 def test_challenge_warning_is_actionable_in_both_runtime_layouts() -> None:
     roots = (ROOT / "scripts", ROOT / "mcpb" / "src")
     program = """
+import asyncio
 from pathlib import Path
 from cnki_search.models import SearchStatus
 from cnki_search.service import CnkiPublicSearchService
@@ -345,20 +349,20 @@ class Snapshot:
         }
 
 class Session:
-    def __enter__(self):
+    async def __aenter__(self):
         return self
-    def __exit__(self, *_exc):
+    async def __aexit__(self, *_exc):
         return None
-    def search(self, _query):
+    async def search(self, _query):
         return Snapshot()
 
 catalog = Path('references/Academic_Journal_Master_Directory_20260715.md')
 if not catalog.exists():
     catalog = Path('../references/Academic_Journal_Master_Directory_20260715.md')
-outcome = CnkiPublicSearchService(
+outcome = asyncio.run(CnkiPublicSearchService(
     session_factory=Session,
     catalog=catalog,
-).search('topic')
+).search('topic'))
 assert outcome.status is SearchStatus.CHALLENGE_DETECTED
 warning = outcome.warnings[0]
 for phrase in ('知网安全验证已阻止本次检索', '已停止请求', '不要刷新、重试或切换代理', 'ai4scholar', '浏览器手动检索下载'):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +52,7 @@ class BrowserFactory:
         self.playwright = playwright
         self.executable_path = executable_path
 
-    def launch_ephemeral(self) -> Any:
+    async def launch_ephemeral(self) -> Any:
         kwargs: dict[str, Any] = {
             "headless": True,
             "args": ["--no-proxy-server", "--proxy-bypass-list=*"],
@@ -60,7 +61,7 @@ class BrowserFactory:
         if executable:
             kwargs["executable_path"] = executable
         try:
-            return self.playwright.chromium.launch(**kwargs)
+            return await await_maybe(self.playwright.chromium.launch(**kwargs))
         except Exception as exc:
             # playwright 的启动失败异常不是 OSError 子类，不转换就会以原始
             # traceback 穿透 MCP 工具边界。超时另有可重试路径，此处放行。
@@ -69,10 +70,15 @@ class BrowserFactory:
             raise BrowserUnavailableError(BROWSER_INSTALL_HINT) from exc
 
 
-def start_playwright() -> Any:
+async def await_maybe(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def start_playwright() -> Any:
     try:
-        from playwright.sync_api import sync_playwright
+        from playwright.async_api import async_playwright
     except ImportError as exc:
         raise BrowserUnavailableError("缺少 Playwright，请先运行安装器") from exc
-    return sync_playwright().start()
-
+    return await async_playwright().start()
