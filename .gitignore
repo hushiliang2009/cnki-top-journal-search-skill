@@ -13,6 +13,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 pytest-cache-files-*/
+.pytest-runtime/
 .coverage
 htmlcov/
 
@@ -50,9 +51,8 @@ user-data-dir/
 *.tar
 *.gz
 
-# Generated output. 安装器只有 top-journal-search-lists/installers/ 一份权威副本；
-# outputs/ 下曾有一份漂移的旧版，用 cp -R 复制并绕过发布白名单，已删除。
-outputs/
+# Generated output
+outputs/*
 
 # Working and audit material stays local
 work/

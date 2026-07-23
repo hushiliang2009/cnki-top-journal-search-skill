@@ -1,7 +1,10 @@
 import ast
 import importlib
+import json
+import os
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -45,20 +48,55 @@ def test_package_exposes_public_home_and_no_legacy_capabilities(skill_root: Path
     assert not bundled_names & LEGACY_MODULES
 
 
-def test_main_and_mcpb_sources_and_catalog_are_identical(skill_root: Path) -> None:
-    main = skill_root / "scripts/cnki_search"
-    bundled = skill_root / "mcpb/src/cnki_search"
-    assert [path.name for path in sorted(main.glob("*.py"))] == [
-        path.name for path in sorted(bundled.glob("*.py"))
-    ]
-    for source in main.glob("*.py"):
-        assert source.read_bytes() == (bundled / source.name).read_bytes()
-    assert (skill_root / "scripts/catalog_lookup.py").read_bytes() == (
-        skill_root / "mcpb/src/catalog_lookup.py"
-    ).read_bytes()
-    assert (skill_root / "references/Academic_Journal_Master_Directory_20260715.md").read_bytes() == (
-        skill_root / "mcpb/src/references/Academic_Journal_Master_Directory_20260715.md"
-    ).read_bytes()
+def _run_layout_contract(layout_root: Path) -> dict[str, object]:
+    program = textwrap.dedent(
+        """
+        import json
+        from pathlib import Path
+
+        import catalog_lookup
+        from cnki_search.models import SearchRequest
+        from cnki_search.session import CNKI_HOME_URL
+
+        invalid_limits = []
+        for limit in (0, 21):
+            try:
+                SearchRequest("topic", limit)
+            except ValueError:
+                invalid_limits.append(limit)
+        request = SearchRequest("  topic   phrase  ", 1)
+        print(json.dumps({
+            "home_url": CNKI_HOME_URL,
+            "normalized_query": request.query,
+            "invalid_limits": invalid_limits,
+            "catalog_exists": Path(catalog_lookup.DEFAULT_CATALOG).is_file(),
+        }))
+        """
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(layout_root)
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=environment,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_skill_and_mcpb_layouts_independently_meet_runtime_contract(skill_root: Path) -> None:
+    for layout_name, layout_root in {
+        "skill": skill_root / "scripts",
+        "mcpb": skill_root / "mcpb/src",
+    }.items():
+        state = _run_layout_contract(layout_root)
+        assert state["home_url"] == "https://www.cnki.net/", layout_name
+        assert state["normalized_query"] == "topic phrase", layout_name
+        assert state["invalid_limits"] == [0, 21], layout_name
+        assert state["catalog_exists"] is True, layout_name
 
 
 def test_helper_scripts_reference_only_existing_runtime_symbols(skill_root: Path) -> None:

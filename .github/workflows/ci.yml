@@ -2,9 +2,7 @@ name: CI
 
 on:
   push:
-    # agent/** 一并纳入：本仓库的实际工作都在 agent 分支上进行，
-    # 只监听 main 会让 CI 在需要它的地方永远不运行。
-    branches: [main, "agent/**"]
+    branches: [main, "agent/**", "codex/**"]
   pull_request:
   workflow_dispatch:
 
@@ -13,45 +11,75 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: pytest (Python ${{ matrix.python-version }})
+  ubuntu:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # 下限 3.11 由 mcpb/pyproject.toml 的 requires-python 声明，必须持续可用
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
         with:
-          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install "mcp>=1,<2" "playwright>=1.45,<2" uv
+      - working-directory: top-journal-search-lists
+        run: python -m pytest -q -p no:cacheprovider
+      - working-directory: top-journal-search-lists
+        run: python scripts/catalog_lookup.py validate
+      - working-directory: top-journal-search-lists
+        run: python tests/_mcp_handshake.py
+      - working-directory: top-journal-search-lists
+        run: python tests/_mcpb_handshake.py
+      - working-directory: top-journal-search-lists
+        run: python scripts/build_release.py --output release
+      - working-directory: top-journal-search-lists
+        run: python -c "from pathlib import Path; import zipfile; files = [Path('release/top-journal-search-lists_Skill.zip'), Path('release/cnki-search.mcpb'), Path('release/checksums.sha256')]; assert all(path.is_file() and path.stat().st_size > 0 for path in files); assert all(zipfile.ZipFile(path).namelist() for path in files[:2])"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-ubuntu-py${{ matrix.python-version }}
+          path: top-journal-search-lists/release
 
-      - name: 运行全量测试
-        run: >
-          uv run --python ${{ matrix.python-version }}
-          --with pytest --with mcp --with playwright
-          python -m pytest -p no:cacheprovider top-journal-search-lists/tests -q
-
-      # 双布局（Skill / MCPB）的目录定位由 tests/test_cnki_package_contract.py 以子进程断言
-      - name: 校验综合期刊目录
-        working-directory: top-journal-search-lists
-        run: uv run --python ${{ matrix.python-version }} python scripts/catalog_lookup.py validate
+  desktop:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        python-version: ["3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install "mcp>=1,<2" "playwright>=1.45,<2" uv
+      - working-directory: top-journal-search-lists
+        run: python -m pytest -q -p no:cacheprovider
+      - working-directory: top-journal-search-lists
+        run: python scripts/catalog_lookup.py validate
+      - working-directory: top-journal-search-lists
+        run: python tests/_mcp_handshake.py
+      - working-directory: top-journal-search-lists
+        run: python tests/_mcpb_handshake.py
+      - working-directory: top-journal-search-lists
+        run: python scripts/build_release.py --output release
+      - working-directory: top-journal-search-lists
+        run: python -c "from pathlib import Path; import zipfile; files = [Path('release/top-journal-search-lists_Skill.zip'), Path('release/cnki-search.mcpb'), Path('release/checksums.sha256')]; assert all(path.is_file() and path.stat().st_size > 0 for path in files); assert all(zipfile.ZipFile(path).namelist() for path in files[:2])"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: top-journal-search-lists/release
 
   lint:
-    name: ruff + mypy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
         with:
-          enable-cache: true
-
-      - name: ruff
-        run: uv run --with ruff ruff check .
-
-      - name: mypy
-        working-directory: top-journal-search-lists
-        run: uv run --with mypy --with mcp --with playwright mypy scripts/
+          python-version: "3.11"
+      - run: python -m pip install ruff mypy "mcp>=1,<2" "playwright>=1.45,<2"
+      - run: ruff check .
+      - working-directory: top-journal-search-lists
+        run: mypy scripts/

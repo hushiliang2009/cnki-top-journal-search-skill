@@ -134,7 +134,7 @@ def _prepare_powershell_test_skill(
     escaped_runtime = str(runtime_python).replace("'", "''")
     lines[timestamp_lines[0]] = f"$TimeStamp = '{timestamp}'"
     lines[runtime_lines[0]] = f"    $RuntimePython = '{escaped_runtime}'"
-    installer.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    installer.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
     return copied_skill
 
 

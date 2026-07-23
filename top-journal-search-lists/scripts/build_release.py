@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import shutil
-import tempfile
 import zipfile
 from pathlib import Path
 
@@ -75,6 +75,18 @@ REGULAR_MODE = 0o100644
 EXECUTABLE_MODE = 0o100755
 
 
+@contextlib.contextmanager
+def _build_workspace(output_dir: Path):
+    workspace = output_dir / ".stage"
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    workspace.mkdir(parents=True)
+    try:
+        yield workspace
+    finally:
+        shutil.rmtree(workspace)
+
+
 def copy_skill_tree(source: Path, target: Path) -> None:
     target.mkdir(parents=True, exist_ok=False)
     for relative in SKILL_ALLOWLIST:
@@ -116,8 +128,7 @@ def build(skill_root: Path, output_dir: Path) -> list[Path]:
     for target in (skill_zip, mcpb_zip, checksums):
         target.unlink(missing_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="cnki-public-build-") as temporary:
-        staging = Path(temporary)
+    with _build_workspace(output_dir) as staging:
         skill_stage = staging / "top-journal-search-lists"
         copy_skill_tree(skill_root, skill_stage)
         _zip_tree(skill_stage, skill_zip, prefix="top-journal-search-lists")
