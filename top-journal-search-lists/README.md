@@ -39,7 +39,7 @@ top-journal-search-lists/
 | --- | --- |
 | Windows | Codex CLI、ChatGPT Desktop 中的 Codex、Claude Code、Claude Desktop |
 | macOS | Codex CLI、ChatGPT Desktop 中的 Codex、Claude Code、Claude Desktop |
-| Linux | Codex CLI、Claude Code |
+| Linux | Codex CLI、Claude Code、Claude Desktop（Linux beta） |
 
 ## 安装前准备
 
@@ -113,7 +113,7 @@ sh ./top-journal-search-lists/installers/install.sh --codex --claude-code --clau
 
 ## Linux 安装指南
 
-Linux 支持 Codex CLI 和 Claude Code。目前未提供官方 Linux 版 ChatGPT Desktop，Claude Desktop 也不支持 Linux，因此不要使用 `--claude-desktop` 配置桌面客户端。
+目前没有官方 Linux 版 ChatGPT Desktop。Claude Desktop 提供官方 Linux beta，支持 Ubuntu 22.04 LTS 或更高版本、Debian 12 或更高版本，以及 x64 或 arm64 架构。请先按 [Anthropic 官方安装说明](https://support.claude.com/en/articles/10065433-install-claude-desktop) 安装客户端；本节仅说明客户端已安装后的 Skill 和 MCP 配置。
 
 安装 Codex CLI：
 
@@ -127,13 +127,21 @@ sh ./top-journal-search-lists/installers/install.sh --codex
 sh ./top-journal-search-lists/installers/install.sh --claude-code
 ```
 
-同时安装 Codex CLI 和 Claude Code：
+安装 Claude Desktop（Linux beta）：
 
 ```sh
-sh ./top-journal-search-lists/installers/install.sh --codex --claude-code
+sh ./top-journal-search-lists/installers/install.sh --claude-desktop
 ```
 
-WSL 中的安装属于 Linux 侧安装，只配置 WSL 内的 Codex CLI 或 Claude Code，不会自动配置 Windows 桌面客户端，即 Windows 侧 ChatGPT Desktop 中的 Codex。
+同时安装 Codex CLI、Claude Code 和 Claude Desktop（Linux beta）：
+
+```sh
+sh ./top-journal-search-lists/installers/install.sh --codex --claude-code --claude-desktop
+```
+
+Linux 版 Claude Desktop 的 MCP 配置文件为 `~/.config/Claude/claude_desktop_config.json`。
+
+WSL 中的安装属于 Linux 侧安装，绝不会配置 Windows ChatGPT Desktop，即 Windows 侧 ChatGPT Desktop 中的 Codex。仅当兼容的 Linux 桌面环境中实际运行 Claude Desktop（Linux beta）时，才可在 WSL 中使用 `--claude-desktop` 配置该客户端。
 
 ## 安装器实际执行的操作
 

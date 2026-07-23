@@ -222,7 +222,7 @@ def test_readme_documents_supported_platforms_clients_and_installed_names():
         "## Linux 安装指南",
         "手工复制",
         "不会自动配置",
-            "目前未提供官方 Linux 版 ChatGPT Desktop",
+        "目前没有官方 Linux 版 ChatGPT Desktop",
     )
     for text in required_text:
         assert text in readme
@@ -243,10 +243,10 @@ def test_readme_documents_installer_runtime_and_platform_boundaries():
 
     required_text = (
         "`limit` 最大为 20",
-        "Linux 支持 Codex CLI 和 Claude Code",
+        "Claude Desktop（Linux beta）",
         "官方 Linux 版 ChatGPT Desktop",
         "WSL 中的安装属于 Linux 侧安装",
-        "不会自动配置 Windows 桌面客户端",
+        "绝不会配置 Windows ChatGPT Desktop",
         "复制完整 Skill",
         "创建独立 Python 运行环境",
         "安装 `mcp` 与 `playwright`",
@@ -277,9 +277,15 @@ def test_readme_documents_cross_computer_installation_and_verification():
     assert "cd cnki-top-journal-search-skill" in preparation
     assert "GitHub 认证" in preparation
     assert "默认分支后可省略 `--branch agent/cnki-new-entry-only --single-branch`" in preparation
-    assert "sh ./top-journal-search-lists/installers/install.sh --codex --claude-code" in linux
-    assert "官方 Linux 版 ChatGPT Desktop" in linux
-    assert "Claude Desktop 也不支持 Linux" in linux
+    assert "Claude Desktop（Linux beta）" in linux
+    assert "目前没有官方 Linux 版 ChatGPT Desktop" in linux
+    assert "Claude Desktop 也不支持 Linux" not in linux
+    assert "sh ./top-journal-search-lists/installers/install.sh --claude-desktop" in linux
+    assert (
+        "sh ./top-journal-search-lists/installers/install.sh "
+        "--codex --claude-code --claude-desktop"
+    ) in linux
+    assert "~/.config/Claude/claude_desktop_config.json" in linux
     wsl_text = linux
     assert "Windows 侧 ChatGPT Desktop 中的 Codex" in wsl_text
     assert "Windows" in verification
