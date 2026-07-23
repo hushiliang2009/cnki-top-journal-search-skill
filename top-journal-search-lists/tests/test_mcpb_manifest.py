@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import zipfile
 
+import pytest
+
 
 CNKI_MODULES = (
     "__init__.py",
@@ -217,8 +219,22 @@ def test_release_build_is_reproducible_across_source_mtimes(skill_root: Path, tm
 
 
 def test_repository_does_not_track_generated_root_outputs(skill_root: Path) -> None:
+    repository = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=skill_root.parent,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if repository.returncode != 0:
+        pytest.skip("requires a Git checkout rather than an extracted release")
     tracked = subprocess.check_output(
-        ["git", "ls-files", "outputs"], cwd=skill_root.parent, text=True,
+        ["git", "ls-files", "outputs"],
+        cwd=skill_root.parent,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     assert tracked == ""
 
