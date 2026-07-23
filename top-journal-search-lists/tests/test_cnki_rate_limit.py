@@ -8,3 +8,21 @@ def test_gate_waits_between_searches() -> None:
     assert gate.wait() == 0.0
     assert gate.wait() == 6.0
     assert delays == [6.0]
+
+
+def test_default_minimum_interval_is_six_seconds() -> None:
+    """合规约束：默认限速门必须是 6 秒。
+
+    既有用例显式传入 minimum_interval=6.0，把默认值改成 0 也测不出来——
+    审计的"限速门 6.0→0.0"变异体正因此存活。此处锁定默认值本身。
+    """
+    assert SerialSearchGate().minimum_interval == 6.0
+
+
+def test_default_gate_actually_sleeps_between_consecutive_searches() -> None:
+    values = iter([0.0, 0.0, 0.0, 0.0])
+    delays: list[float] = []
+    gate = SerialSearchGate(clock=lambda: next(values), sleep=delays.append)
+    gate.wait()
+    gate.wait()
+    assert delays == [6.0]

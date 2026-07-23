@@ -61,7 +61,14 @@ TOP5 = [
 ]
 CATALOG_VERSION = "2026-07-15"
 CatalogIndex = dict[str, list[dict[str, Any]]]
-_DISPLAY_SUFFIX = re.compile(r"\s*(?:\(网络首发\)|\[网络首发\]|【网络首发】|网络首发)\s*$")
+# 不带前后 \s* 量词：两端的 \s* 与末尾锚点组合会产生二次方回溯。
+# 调用方先 strip，再匹配后缀，行为等价且是线性的。
+_DISPLAY_SUFFIX = re.compile(r"(?:\(网络首发\)|\[网络首发\]|【网络首发】|网络首发)$")
+# NCS 目录里形如 "Communications 系列 (含 Biology, Chemistry, ...)" 的行，
+# 整行含泛化标签"系列"会被过滤掉，导致其中的真实子刊完全落榜。
+_NCS_SERIES = re.compile(
+    r"^\s*(?P<prefix>[A-Za-z][A-Za-z ]*?)\s*系列\s*[（(]\s*含\s*(?P<members>[^）)]+)[）)]\s*$"
+)
 GENERIC_NCS_LABELS = (
     "五大",
     "部分",
@@ -147,10 +154,28 @@ def _clean_title(raw: str) -> str:
     raw = re.sub(r"^\d+\.\s+", "", raw)
     raw = re.sub(r"^\s*\*+\s*", "", raw)
     raw = raw.replace("**", "").strip()
-    raw = re.split(r"\s+-\s+|：", raw, maxsplit=1)[0].strip()
+    # 目录里的 " - " 通常引出中文注解（如 "(JEL) - 综述类旗舰"），应当截断；
+    # 但英文期刊名本身也可能含 " - "，例如
+    # "Zeitschrift fur Ethnologie - Journal of Social and Cultural Anthropology"。
+    # 因此 " - " 只在其后含中文时才作为分隔符。
+    for match in re.finditer(r"\s+-\s+|：", raw):
+        if match.group().strip() == "-" and not re.search(r"[一-鿿]", raw[match.end():]):
+            continue
+        raw = raw[: match.start()].strip()
+        break
     if re.match(r"^[A-Za-z]", raw):
         raw = re.sub(r"\s+[（(][^（）()]+[）)]$", "", raw)
     return raw.strip(" .；;，,")
+
+
+def _expand_ncs_series(candidate: str) -> list[str]:
+    """把 "Communications 系列 (含 Biology, Chemistry, ...)" 展开为具体子刊。"""
+    match = _NCS_SERIES.match(candidate)
+    if not match:
+        return []
+    prefix = match.group("prefix").strip()
+    members = re.split(r"[,，、]", match.group("members"))
+    return [f"{prefix} {member.strip()}" for member in members if member.strip()]
 
 
 def _keys_for_title(title: str) -> set[str]:
@@ -164,7 +189,7 @@ def _keys_for_title(title: str) -> set[str]:
 def clean_lookup_title(value: str) -> tuple[str, str]:
     """Remove only the supported online-first display suffix."""
     normalized = unicodedata.normalize("NFKC", value).strip()
-    cleaned = _DISPLAY_SUFFIX.sub("", normalized).strip()
+    cleaned = _DISPLAY_SUFFIX.sub("", normalized.rstrip()).strip()
     method = "controlled_display_suffix" if cleaned != normalized else "normalized_exact"
     return cleaned, method
 
@@ -240,16 +265,18 @@ def _index_ncs(index: CatalogIndex, text: str) -> None:
         bold_titles = re.findall(r"\*\*([^*]+)\*\*", line)
         candidates = bold_titles or [re.sub(r"^\s*\*\s+", "", line)]
         for candidate in candidates:
-            if any(label in candidate for label in GENERIC_NCS_LABELS):
+            expanded = _expand_ncs_series(candidate)
+            if not expanded and any(label in candidate for label in GENERIC_NCS_LABELS):
                 continue
-            _add(
-                index,
-                candidate,
-                2,
-                "ncs_pnas",
-                "NCS_PNAS_Directory.md",
-                ncs_internal_rank=internal_rank,
-            )
+            for title in expanded or [candidate]:
+                _add(
+                    index,
+                    title,
+                    2,
+                    "ncs_pnas",
+                    "NCS_PNAS_Directory.md",
+                    ncs_internal_rank=internal_rank,
+                )
 
 
 def _index_top(index: CatalogIndex, text: str) -> None:
@@ -412,12 +439,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
-    if args.command == "validate":
-        result: Any = validate_catalog(args.catalog)
-    else:
-        result = lookup_journals(args.catalog, args.journals)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    try:
+        if args.command == "validate":
+            result: Any = validate_catalog(args.catalog)
+        else:
+            result = lookup_journals(args.catalog, args.journals)
+    except (FileNotFoundError, ValueError) as exc:
+        # 面向普通用户的 CLI 不应抛裸 traceback
+        print(f"错误：{exc}", file=sys.stderr)
+        return 1
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

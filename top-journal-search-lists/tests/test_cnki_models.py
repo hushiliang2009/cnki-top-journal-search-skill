@@ -94,3 +94,18 @@ def test_outcome_rejects_formal_records_with_unverifiable_year(year: int) -> Non
             [],
             "2026-07-22T00:00:00+00:00",
         )
+
+
+def test_invalid_arguments_return_structured_status_not_raw_error() -> None:
+    """参数校验应走结构化状态，否则调用方拿不到 status 也拿不到 warnings。"""
+    from pathlib import Path
+
+    from cnki_search.models import SearchStatus
+    from cnki_search.service import CnkiPublicSearchService
+
+    catalog = Path(__file__).resolve().parents[1] / "references" / "Academic_Journal_Master_Directory_20260715.md"
+    service = CnkiPublicSearchService(catalog=catalog)
+    for query, limit in (("   ", 20), ("主题", 0), ("主题", 21)):
+        outcome = service.search(query, limit)
+        assert outcome.status is SearchStatus.PAGE_CONTRACT_CHANGED
+        assert outcome.warnings and outcome.records == []

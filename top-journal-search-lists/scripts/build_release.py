@@ -14,7 +14,6 @@ CNKI_MODULES = (
     "cache.py",
     "install_config.py",
     "mcp_server.py",
-    "merge.py",
     "models.py",
     "ranking.py",
     "rate_limit.py",
@@ -28,7 +27,6 @@ TEST_ALLOWLIST = (
     "tests/test_catalog_lookup.py",
     "tests/test_cnki_cache.py",
     "tests/test_cnki_mcp.py",
-    "tests/test_cnki_merge.py",
     "tests/test_cnki_models.py",
     "tests/test_cnki_package_contract.py",
     "tests/test_cnki_ranking.py",
@@ -48,6 +46,7 @@ TEST_ALLOWLIST = (
     "tests/fixtures/public_results_with_paper_titles.html",
 )
 MCPB_ALLOWLIST = (
+    ".mcpbignore",
     "manifest.json",
     "pyproject.toml",
     "src/catalog_lookup.py",

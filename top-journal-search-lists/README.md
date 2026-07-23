@@ -25,7 +25,8 @@ top-journal-search-lists/
 
 | 项目 | 安装后的名称 |
 | --- | --- |
-| Skill 显示名称 | Top Journal and Public CNKI Search |
+| Skill 显示名称（Claude Code、Codex CLI） | `top-journal-search-lists`，取自 `SKILL.md` 的 `name` 字段 |
+| Skill 显示名称（ChatGPT Desktop 中的 Codex） | Top Journal and Public CNKI Search，取自 `agents/openai.yaml` |
 | Skill 目录 | `top-journal-search-lists` |
 | 调用方式 | `$top-journal-search-lists` |
 | MCP 服务 | `cnki-search` |
@@ -212,3 +213,20 @@ python3 -m pytest -p no:cacheprovider top-journal-search-lists/tests -q
 ## 异常处理
 
 CNKI 出现验证码、登录页、401、403、429 或页面结构变化时，立即停止当前检索；不切换入口、代理或网络出口。ai4scholar 不可用时，报告具体工具错误，不以普通网页搜索替代 MCP 结果。目录缺失或校验失败时，停止期刊层级判定。
+
+### CNKI 返回 `challenge_detected` 怎么办
+
+这是**知网站点侧的正常安全防护**，不是安装故障：重装 Skill、重试、更换网络都不会改变。
+
+CNKI 检索在本工具中是尽力而为的补充能力。知网对自动化访问有站点级策略，在本工具的边界内（不登录、不使用你的浏览器配置文件、不改 User-Agent、不用代理、不做任何检测规避）可能长期无法取得结果。
+
+遇到时请：
+
+1. 改用 ai4scholar 完成检索（它本就是主要来源）；
+2. 需要中文近期文献时，按主题词自行在知网网页端检索，再把篇名交给本工具做期刊判级：
+
+```text
+python top-journal-search-lists/scripts/catalog_lookup.py lookup "期刊名A" "期刊名B"
+```
+
+3. 在成果里如实写明"CNKI 补充检索未能执行"，不要把它当作"该主题无中文文献"。

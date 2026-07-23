@@ -25,7 +25,10 @@ class SearchRequest:
     limit: int = 20
 
     def __post_init__(self) -> None:
-        normalized = unicodedata.normalize("NFKC", self.query).strip()
+        # 与 cache.normalize_cache_query 使用同一套空白折叠口径，否则
+        # "数字化  转型" 与 "数字化 转型" 会命中同一缓存项，却返回另一次
+        # 请求的 query 字面量，造成返回值与本次请求不一致。
+        normalized = " ".join(unicodedata.normalize("NFKC", self.query).split())
         if not normalized:
             raise ValueError("主题检索词不能为空")
         if not 1 <= self.limit <= 20:

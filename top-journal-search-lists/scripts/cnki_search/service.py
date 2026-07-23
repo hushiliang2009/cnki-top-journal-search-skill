@@ -24,6 +24,28 @@ def empty_outcome(status: SearchStatus, query: str, warning: str = "") -> Search
     return SearchOutcome(status, query, [], [], 0, [warning] if warning else [], utc_now())
 
 
+# 受限状态本身不说明"该主题无文献"。必须给出可操作的替代路径，否则调用方
+# 容易把一次未能执行的检索写成"未检索到相关文献"。
+_FALLBACK_HINTS = {
+    SearchStatus.CHALLENGE_DETECTED: (
+        "知网触发了站点安全验证，这是站点侧正常防护，不是安装故障，重试无效。"
+        "请改用 ai4scholar 检索；如需中文近期文献，可自行在知网网页端检索后，"
+        "用 catalog_lookup.py lookup 对期刊判级。本次未取得任何 CNKI 题录，"
+        "不能据此判断该主题无中文文献。"
+    ),
+    SearchStatus.LOGIN_REQUIRED: (
+        "知网要求登录，本工具不登录也不使用你的浏览器配置文件。"
+        "请改用 ai4scholar；本次未取得任何 CNKI 题录。"
+    ),
+    SearchStatus.FORBIDDEN: (
+        "知网拒绝了本次公开访问。请改用 ai4scholar；本次未取得任何 CNKI 题录。"
+    ),
+    SearchStatus.RATE_LIMITED: (
+        "知网提示访问过于频繁。请稍后再试或改用 ai4scholar；本次未取得任何 CNKI 题录。"
+    ),
+}
+
+
 def _redact_paths(message: str) -> str:
     """去掉异常消息里的本机绝对路径，只保留文件名。
 
@@ -43,7 +65,12 @@ class CnkiPublicSearchService:
         self.gate = gate or SerialSearchGate()
 
     def search(self, query: str, limit: int = 20) -> SearchOutcome:
-        request = SearchRequest(query, limit)
+        try:
+            request = SearchRequest(query, limit)
+        except ValueError as exc:
+            # 参数非法是可预期的调用错误，应走结构化状态而不是 MCP 的 isError，
+            # 否则调用方拿不到 status 也拿不到 warnings。
+            return empty_outcome(SearchStatus.PAGE_CONTRACT_CHANGED, str(query), str(exc))
         # 目录缺失是部署配置错误，重试毫无意义，只会白打一次 CNKI。
         # 必须在限速门与浏览器启动之前拦下，且不得报成 network_error。
         if not self.catalog.is_file():
@@ -66,7 +93,7 @@ class CnkiPublicSearchService:
                 elif status is SearchStatus.NETWORK_ERROR and attempt == 0:
                     continue
                 elif status is not SearchStatus.SUCCESS:
-                    return empty_outcome(status, request.query)
+                    return empty_outcome(status, request.query, _FALLBACK_HINTS.get(status, ""))
                 else:
                     parsed = parse_public_result_page(snapshot.html, query=request.query, limit=request.limit)
                     records = annotate_and_sort_records(parsed.records, catalog=self.catalog)

@@ -233,3 +233,19 @@ def test_browser_unavailable_is_structured_and_not_retried() -> None:
     assert outcome.status is SearchStatus.NETWORK_ERROR
     assert FailingFactory.calls == 1, "安装类故障重试无意义"
     assert any("浏览器不可用" in warning for warning in outcome.warnings)
+
+
+def test_restricted_states_carry_actionable_fallback_hint() -> None:
+    """受限状态不等于"该主题无文献"，必须给出可操作的替代路径。"""
+    factory = SequenceFactory(
+        [_snapshot(url="https://kns.cnki.net/verify/home", text="", html="<main></main>")]
+    )
+    outcome = CnkiPublicSearchService(
+        session_factory=factory, catalog=CATALOG, gate=CountingGate()
+    ).search("供应链金融")
+
+    assert outcome.status is SearchStatus.CHALLENGE_DETECTED
+    assert outcome.warnings, "challenge_detected 必须携带替代路径提示"
+    hint = outcome.warnings[0]
+    assert "ai4scholar" in hint
+    assert "不能据此判断该主题无中文文献" in hint

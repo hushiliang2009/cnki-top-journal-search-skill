@@ -16,11 +16,37 @@ $SkillSource = Split-Path -Parent $PSScriptRoot
 $TimeStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $Python = (Get-Command python -ErrorAction Stop).Source
 
+# 版本闸必须在任何写操作之前：mcp 与 playwright 都支持 3.10，pip 会安装成功，
+# 但 cnki_search 依赖 3.11+ 的 enum.StrEnum，服务器首次启动即崩溃且错误与安装
+# 过程毫无关联。安装器不安装项目本身，pyproject.toml 的 requires-python 从不被
+# pip 执行，因此必须在这里显式拦截；放在复制 Skill 之后会留下半装状态。
+& $Python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'
+if ($LASTEXITCODE -ne 0) {
+    $Found = (& $Python -V 2>&1)
+    throw "cnki-search 需要 Python 3.11 或更高版本，当前为 $Found。请升级 Python 后重试。"
+}
+
+# 备份保留份数：此前无限累积，生产环境实测已积到 14 份、617.8 KB
+$BackupKeep = 5
+
+function Remove-StaleBackup([string]$Path) {
+    $Parent = Split-Path -Parent $Path
+    $Leaf = Split-Path -Leaf $Path
+    Get-ChildItem -LiteralPath $Parent -Filter "$Leaf.backup-*" -Force -ErrorAction SilentlyContinue |
+        Sort-Object -Property Name -Descending |
+        Select-Object -Skip $BackupKeep |
+        ForEach-Object {
+            Remove-Item -LiteralPath $_.FullName -Recurse -Force
+            Write-Host "Pruned old backup: $($_.FullName)"
+        }
+}
+
 function Backup-File([string]$Path) {
     if (Test-Path -LiteralPath $Path) {
         $Backup = "$Path.backup-$TimeStamp"
         Copy-Item -LiteralPath $Path -Destination $Backup
         Write-Host "Backup: $Backup"
+        Remove-StaleBackup $Path
     }
 }
 
@@ -31,6 +57,7 @@ function Install-SkillCopy([string]$Destination) {
         $Backup = "$Destination.backup-$TimeStamp"
         Move-Item -LiteralPath $Destination -Destination $Backup
         Write-Host "Backup: $Backup"
+        Remove-StaleBackup $Destination
     }
     & $Python (Join-Path $SkillSource 'scripts\build_release.py') --copy-skill $Destination
     if ($LASTEXITCODE -ne 0) { throw "复制 Skill 白名单文件失败，退出码：$LASTEXITCODE" }
@@ -46,17 +73,6 @@ if ($ClaudeCode -or $ClaudeDesktop) { Install-SkillCopy $ClaudeSkill }
 
 $RuntimeRoot = if ($Codex) { Join-Path $CodexHome 'runtimes\cnki-search' } else { Join-Path $ClaudeHome 'runtimes\cnki-search' }
 New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
-
-# 版本闸：mcp 与 playwright 都支持 3.10，pip 会安装成功，但 cnki_search 依赖
-# 3.11+ 的 enum.StrEnum，服务器首次启动即崩溃且错误与安装过程毫无关联。
-# 安装器不安装项目本身，pyproject.toml 的 requires-python 从不被 pip 执行，
-# 因此必须在这里显式拦截。
-& $Python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'
-if ($LASTEXITCODE -ne 0) {
-    $Found = (& $Python -V 2>&1)
-    throw "cnki-search 需要 Python 3.11 或更高版本，当前为 $Found。请升级 Python 后重试。"
-}
-
 $RuntimePython = Join-Path $RuntimeRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $RuntimePython -PathType Leaf)) {
     & $Python -m venv (Join-Path $RuntimeRoot '.venv')

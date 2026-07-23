@@ -42,3 +42,31 @@ def test_public_tool_returns_service_outcome() -> None:
         "warnings": [],
         "searched_at": "2026-07-22T00:00:00+00:00",
     }
+
+
+def test_tool_schema_declares_machine_enforceable_limit_range() -> None:
+    """limit 的 1–20 此前只写在文档里，tools/list 的 schema 无任何约束。"""
+    from mcp.server.fastmcp import FastMCP
+
+    mcp = CnkiMcpServer(service=FakeService()).build_fastmcp(FastMCP)
+    tool = next(item for item in mcp._tool_manager.list_tools() if item.name == "cnki_search")
+    limit = tool.parameters["properties"]["limit"]
+    assert (limit["minimum"], limit["maximum"], limit["default"]) == (1, 20, 20)
+
+
+def test_server_announces_product_version_not_sdk_version() -> None:
+    """serverInfo 此前通告 MCP SDK 版本（1.28.1），而非本工具版本。"""
+    from mcp.server.fastmcp import FastMCP
+
+    from cnki_search import __version__
+
+    mcp = CnkiMcpServer(service=FakeService()).build_fastmcp(FastMCP)
+    assert mcp._mcp_server.version == __version__ == "0.2.0"
+
+
+def test_shutdown_does_not_block_on_queued_work() -> None:
+    """原实现 submit 一个空任务并 .result() 等待，队列里排着限速检索时会被阻塞。"""
+    server = CnkiMcpServer(service=FakeService())
+    server.shutdown()
+    server.shutdown()  # 幂等
+    assert server._shutdown is True
