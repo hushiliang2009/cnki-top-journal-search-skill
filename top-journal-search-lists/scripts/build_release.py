@@ -26,6 +26,7 @@ TEST_ALLOWLIST = (
     "tests/conftest.py",
     "tests/test_catalog_lookup.py",
     "tests/test_cnki_cache.py",
+    "tests/test_cnki_async.py",
     "tests/test_cnki_mcp.py",
     "tests/test_cnki_models.py",
     "tests/test_cnki_package_contract.py",
@@ -36,6 +37,7 @@ TEST_ALLOWLIST = (
     "tests/test_cnki_service.py",
     "tests/test_cnki_session.py",
     "tests/test_installers.py",
+    "tests/test_install_config_security.py",
     "tests/test_mcpb_manifest.py",
     "tests/fixtures/public_challenge.html",
     "tests/fixtures/public_home.html",
@@ -43,6 +45,9 @@ TEST_ALLOWLIST = (
     "tests/fixtures/public_no_results.html",
     "tests/fixtures/public_results.html",
     "tests/fixtures/public_results_nested_table.html",
+    "tests/fixtures/public_results_stage3b.html",
+    "tests/fixtures/public_results_stage3b_missing_td.html",
+    "tests/fixtures/public_results_stage3b_missing_tr.html",
     "tests/fixtures/public_results_with_paper_titles.html",
 )
 MCPB_ALLOWLIST = (
@@ -58,6 +63,7 @@ MCPB_ALLOWLIST = (
 SKILL_ALLOWLIST = (
     "README.md",
     "SKILL.md",
+    "pytest.ini",
     "agents/openai.yaml",
     "installers/install.ps1",
     "installers/install.sh",
