@@ -17,7 +17,7 @@ from cnki_search.install_config import (
 )
 
 requires_windows_powershell = pytest.mark.skipif(
-    shutil.which("powershell") is None,
+    os.name != "nt" or shutil.which("powershell") is None,
     reason="requires Windows PowerShell",
 )
 
