@@ -43,6 +43,8 @@ TEST_RELATIVE = (
     "tests/fixtures/public_incomplete_results.html",
     "tests/fixtures/public_no_results.html",
     "tests/fixtures/public_results.html",
+    "tests/fixtures/public_results_nested_table.html",
+    "tests/fixtures/public_results_with_paper_titles.html",
 )
 EXPECTED_SKILL_RELATIVE = (
     "README.md",

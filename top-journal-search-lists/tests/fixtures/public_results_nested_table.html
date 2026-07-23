@@ -1,0 +1,26 @@
+<!-- 构造件：依据四轮审计确证的畸形输入形态手工构造，非真实抓取。 -->
+<!-- 单元格内嵌套 <table>：其闭合标签会提前结束结果表，导致其后的
+     全部合法题录被静默丢弃，且不触发 PageContractChanged。 -->
+<table class="result-table-list">
+  <tbody>
+    <tr>
+      <td class="seq">1</td>
+      <td class="name">
+        <a href="/kcms2/article/abstract?v=aaa">带脚注表格的题录</a>
+        <table class="footnote"><tr><td>基金项目</td></tr></table>
+      </td>
+      <td class="author"><a>张三</a></td>
+      <td class="source"><a>经济研究</a></td>
+      <td class="date">2024</td>
+      <td class="data">期刊</td>
+    </tr>
+    <tr>
+      <td class="seq">2</td>
+      <td class="name"><a href="/kcms2/article/abstract?v=bbb">嵌套表格之后的合法题录</a></td>
+      <td class="author"><a>李四</a></td>
+      <td class="source"><a>管理世界</a></td>
+      <td class="date">2024</td>
+      <td class="data">期刊</td>
+    </tr>
+  </tbody>
+</table>

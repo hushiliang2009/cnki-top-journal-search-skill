@@ -44,6 +44,8 @@ TEST_ALLOWLIST = (
     "tests/fixtures/public_incomplete_results.html",
     "tests/fixtures/public_no_results.html",
     "tests/fixtures/public_results.html",
+    "tests/fixtures/public_results_nested_table.html",
+    "tests/fixtures/public_results_with_paper_titles.html",
 )
 MCPB_ALLOWLIST = (
     "manifest.json",
