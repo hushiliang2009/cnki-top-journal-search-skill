@@ -45,8 +45,15 @@ top-journal-search-lists/
 
 - 安装 Python 3.11 或更高版本，以及 Git；
 - 安装 Chrome、Edge 或 Chromium。没有兼容浏览器时，可安装 Playwright Chromium；
-- 确保当前账户具有私有仓库访问权限，并已检出本仓库；
-- 在 `agent/cnki-new-entry-only` 分支合并前，请检出该分支以取得本安装指南及安装器。
+- 私有仓库需要先以具有访问权限的账号完成 GitHub 认证；
+- 在 Windows、macOS 或 Linux 的终端中克隆并进入已验证分支：
+
+```sh
+git clone --branch agent/cnki-new-entry-only --single-branch https://github.com/hushiliang2009/cnki-top-journal-search-skill.git
+cd cnki-top-journal-search-skill
+```
+
+在该分支合并到默认分支后可省略 `--branch agent/cnki-new-entry-only --single-branch`。
 
 ## Windows 安装指南
 
@@ -120,6 +127,12 @@ sh ./top-journal-search-lists/installers/install.sh --codex
 sh ./top-journal-search-lists/installers/install.sh --claude-code
 ```
 
+同时安装 Codex CLI 和 Claude Code：
+
+```sh
+sh ./top-journal-search-lists/installers/install.sh --codex --claude-code
+```
+
 WSL 中的安装属于 Linux 侧安装，只配置 WSL 内的 Codex CLI 或 Claude Code，不会自动配置 Windows 桌面客户端。
 
 ## 安装器实际执行的操作
@@ -140,15 +153,32 @@ Codex 安装到 Codex Home 下的 `skills/top-journal-search-lists`，配置文�
 
 ## 安装后验证
 
-在仓库根目录运行：
+安装器已创建 MCP 运行环境。普通用户在仓库根目录进行目录验证；验证后重启相应客户端，确认 Skill 可调用且 `cnki-search` MCP 服务可用。
+
+### Windows
 
 ```text
 python top-journal-search-lists/scripts/catalog_lookup.py validate
 python top-journal-search-lists/scripts/catalog_lookup.py lookup "American Economic Review" "Nature Human Behaviour" "经济研究"
-python -m pytest -p no:cacheprovider top-journal-search-lists/tests -q
 ```
 
-目录示例的预期层级分别为 1、2、6。安装后重启相应客户端，再调用 `cnki_search(query, limit)` 验证 MCP 服务。结果按十级期刊层级排序；第二级内部按 `ncs_internal_rank` 升序排列。第七级没有独立记录时，须报告为空层级，不得伪造期刊或以其他层级记录替代。仅在用户明确提供其他目录文件时，才使用 `--catalog path/to/directory.md` 指定目录。
+### macOS/Linux
+
+```text
+python3 top-journal-search-lists/scripts/catalog_lookup.py validate
+python3 top-journal-search-lists/scripts/catalog_lookup.py lookup "American Economic Review" "Nature Human Behaviour" "经济研究"
+```
+
+目录示例的预期层级分别为 1、2、6。结果按十级期刊层级排序；第二级内部按 `ncs_internal_rank` 升序排列。第七级没有独立记录时，须报告为空层级，不得伪造期刊或以其他层级记录替代。仅在用户明确提供其他目录文件时，才使用 `--catalog path/to/directory.md` 指定目录。
+
+## 开发者完整测试
+
+完整测试不属于普通用户安装验证。请先在开发环境安装 pytest，或使用已有包含 pytest 的 Python 环境，再在仓库根目录执行：
+
+```text
+Windows: python -m pytest -p no:cacheprovider top-journal-search-lists/tests -q
+macOS/Linux: python3 -m pytest -p no:cacheprovider top-journal-search-lists/tests -q
+```
 
 ## 使用示例
 

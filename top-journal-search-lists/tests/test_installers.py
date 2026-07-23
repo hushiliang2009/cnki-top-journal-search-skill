@@ -245,3 +245,32 @@ def test_readme_documents_installer_runtime_and_platform_boundaries():
     )
     for text in required_text:
         assert text in readme
+
+
+def test_readme_documents_cross_computer_installation_and_verification():
+    skill_root = Path(__file__).resolve().parents[1]
+    readme = (skill_root / "README.md").read_text(encoding="utf-8")
+
+    def section(heading: str) -> str:
+        start = readme.index(heading)
+        end = readme.find("\n## ", start + len(heading))
+        return readme[start:] if end == -1 else readme[start:end]
+
+    preparation = section("## 安装前准备")
+    linux = section("## Linux 安装指南")
+    verification = section("## 安装后验证")
+    developer_checks = section("## 开发者完整测试")
+
+    assert "git clone --branch agent/cnki-new-entry-only --single-branch https://github.com/hushiliang2009/cnki-top-journal-search-skill.git" in preparation
+    assert "cd cnki-top-journal-search-skill" in preparation
+    assert "GitHub 认证" in preparation
+    assert "默认分支后可省略 `--branch agent/cnki-new-entry-only --single-branch`" in preparation
+    assert "sh ./top-journal-search-lists/installers/install.sh --codex --claude-code" in linux
+    assert "不提供 Claude Desktop 或 Codex Desktop" in linux
+    assert "Windows" in verification
+    assert "python top-journal-search-lists/scripts/catalog_lookup.py validate" in verification
+    assert "macOS/Linux" in verification
+    assert "python3 top-journal-search-lists/scripts/catalog_lookup.py validate" in verification
+    assert "pytest" not in verification
+    assert "pytest" in developer_checks
+    assert "开发环境安装 pytest" in developer_checks
