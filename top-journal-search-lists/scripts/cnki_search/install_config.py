@@ -3,8 +3,10 @@ from __future__ import annotations
 import copy
 import argparse
 import json
+import os
 import re
 import sys
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
@@ -79,8 +81,9 @@ def merge_claude_config(
 # 但它**必须**构成删除区间的边界，否则删除范围会越过它一路吃到下一个普通
 # 表头，把用户的 [[mcp_servers.custom.headers]]（含 API 密钥）一并删掉。
 _TOML_TABLE_HEADER = re.compile(
-    r"(?m)^[\t ]*(?P<array>\[?)\[(?P<path>[^\]\r\n]+)\]\]?[\t ]*(?:#.*)?(?:\r?\n|$)"
+    r"(?m)^[\t ]*(?:\[\[(?P<array_path>[^\]\r\n]+)\]\]|\[(?P<table_path>[^\]\r\n]+)\])[\t ]*(?:#.*)?(?:\r?\n|$)"
 )
+_TOML_ASSIGNMENT = re.compile(r"(?m)^[\t ]*(?P<key>[^#=\r\n]+?)\s*=")
 
 
 def _toml_key_path(value: str) -> tuple[str, ...] | None:
@@ -142,6 +145,83 @@ def _is_cnki_table(path: tuple[str, ...] | None) -> bool:
     )
 
 
+def _toml_table_headers(existing_toml: str) -> list[tuple[int, tuple[str, ...] | None]]:
+    return [
+        (match.start(), _toml_key_path(match.group("array_path") or match.group("table_path")))
+        for match in _TOML_TABLE_HEADER.finditer(existing_toml)
+    ]
+
+
+def _inline_table_end(existing_toml: str, start: int) -> tuple[int, int] | None:
+    while start < len(existing_toml) and existing_toml[start] in " \t":
+        start += 1
+    if start >= len(existing_toml) or existing_toml[start] != "{":
+        return None
+    depth = 0
+    quote: str | None = None
+    index = start
+    while index < len(existing_toml):
+        character = existing_toml[index]
+        if quote:
+            if quote == '"' and character == "\\":
+                index += 2
+                continue
+            if character == quote:
+                quote = None
+        elif character in {'"', "'"}:
+            quote = character
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return start, index
+        index += 1
+    return None
+
+
+def _root_inline_mcp_servers_table(
+    existing_toml: str, headers: list[tuple[int, tuple[str, ...] | None]],
+) -> tuple[int, int] | None:
+    header_index = 0
+    active_table: tuple[str, ...] | None = None
+    for assignment in _TOML_ASSIGNMENT.finditer(existing_toml):
+        while header_index < len(headers) and headers[header_index][0] < assignment.start():
+            active_table = headers[header_index][1]
+            header_index += 1
+        if active_table is None and _toml_key_path(assignment.group("key")) == ("mcp_servers",):
+            return _inline_table_end(existing_toml, assignment.end())
+    return None
+
+
+def _reject_unsupported_cnki_definitions(
+    existing_toml: str,
+    headers: list[tuple[int, tuple[str, ...] | None]],
+    parsed_config: Mapping[str, object],
+    root_inline_table: tuple[int, int] | None,
+) -> None:
+    if root_inline_table:
+        servers = parsed_config.get("mcp_servers")
+        if isinstance(servers, Mapping) and "cnki-search" in servers:
+            raise ValueError(
+                "现有配置以点分键或内联表定义了 mcp_servers.cnki-search，"
+                "安装器无法安全替换。请手工删除该条目后重试。"
+            )
+    header_index = 0
+    active_table: tuple[str, ...] | None = None
+    for assignment in _TOML_ASSIGNMENT.finditer(existing_toml):
+        while header_index < len(headers) and headers[header_index][0] < assignment.start():
+            active_table = headers[header_index][1]
+            header_index += 1
+        key_path = _toml_key_path(assignment.group("key"))
+        full_path = (*active_table, *key_path) if active_table and key_path else key_path
+        if _is_cnki_table(full_path) and not _is_cnki_table(active_table):
+            raise ValueError(
+                "现有配置以点分键或内联表定义了 mcp_servers.cnki-search，"
+                "安装器无法安全替换。请手工删除该条目后重试。"
+            )
+
+
 def _toml_string(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("Codex MCP 配置值必须是字符串")
@@ -166,36 +246,44 @@ def _render_codex_server_config(server_config: Mapping[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _existing_cnki_definition_is_replaceable(existing_toml: str) -> None:
-    """cnki 配置若以点分键或内联表定义，逐表头替换无法覆盖，必须明确报错。"""
-    try:
-        parsed = tomllib.loads(existing_toml)
-    except tomllib.TOMLDecodeError:
-        return  # 原文本身不合法，交由后续 tomllib.loads(merged) 统一报错
-    servers = parsed.get("mcp_servers")
-    if not isinstance(servers, Mapping) or "cnki-search" not in servers:
-        return
-    if not _TOML_TABLE_HEADER.search(existing_toml) or not any(
-        _is_cnki_table(_toml_key_path(match.group("path")))
-        for match in _TOML_TABLE_HEADER.finditer(existing_toml)
-    ):
-        raise ValueError(
-            "现有配置以点分键或内联表定义了 mcp_servers.cnki-search，"
-            "安装器无法安全替换。请手工删除该条目后重试。"
-        )
+def _render_codex_server_inline_entry(server_config: Mapping[str, object]) -> str:
+    command = _toml_string(server_config["command"])
+    args = server_config["args"]
+    env = server_config["env"]
+    if not isinstance(args, list) or not isinstance(env, Mapping):
+        raise ValueError("CNKI MCP 配置格式无效")
+    rendered_args = ", ".join(_toml_string(argument) for argument in args)
+    rendered_env = ", ".join(
+        f"{_toml_string(key)} = {_toml_string(value)}" for key, value in env.items()
+    )
+    return (
+        f'"cnki-search" = {{ command = {command}, args = [{rendered_args}], '
+        f"env = {{ {rendered_env} }} }}"
+    )
 
 
 def merge_codex_config(existing_toml: str, server_config: Mapping[str, object]) -> str:
-    _existing_cnki_definition_is_replaceable(existing_toml)
-    headers = [
-        (match.start(), _toml_key_path(match.group("path")), bool(match.group("array")))
-        for match in _TOML_TABLE_HEADER.finditer(existing_toml)
-    ]
+    parsed_config = tomllib.loads(existing_toml) if existing_toml.strip() else {}
+    headers = _toml_table_headers(existing_toml)
+    root_inline_table = _root_inline_mcp_servers_table(existing_toml, headers)
+    _reject_unsupported_cnki_definitions(
+        existing_toml, headers, parsed_config, root_inline_table
+    )
+    if root_inline_table:
+        _, end = root_inline_table
+        separator = ", " if existing_toml[root_inline_table[0] + 1 : end].strip() else ""
+        merged = (
+            existing_toml[:end]
+            + separator
+            + _render_codex_server_inline_entry(server_config)
+            + existing_toml[end:]
+        )
+        tomllib.loads(merged)
+        return merged
     retained: list[str] = []
     cursor = 0
-    for index, (start, path, is_array) in enumerate(headers):
-        # 数组表永远不是 cnki 表，但上面已让它参与 headers，从而正确充当边界
-        if is_array or not _is_cnki_table(path):
+    for index, (start, path) in enumerate(headers):
+        if not _is_cnki_table(path):
             continue
         end = headers[index + 1][0] if index + 1 < len(headers) else len(existing_toml)
         if start < cursor:
@@ -209,6 +297,21 @@ def merge_codex_config(existing_toml: str, server_config: Mapping[str, object]) 
     merged += _render_codex_server_config(server_config)
     tomllib.loads(merged)
     return merged
+
+
+def _atomic_write_text(config_path: Path, content: str) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{config_path.name}.", suffix=".tmp", dir=config_path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, config_path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -250,9 +353,7 @@ def _run(args: argparse.Namespace) -> int:
         current = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
         merged = merge_codex_config(current, server_config)
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = config_path.with_name(f"{config_path.name}.tmp")
-    temporary.write_text(merged, encoding="utf-8")
-    temporary.replace(config_path)
+    _atomic_write_text(config_path, merged)
     return 0
 
 
