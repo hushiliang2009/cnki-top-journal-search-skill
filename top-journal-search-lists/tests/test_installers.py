@@ -197,3 +197,29 @@ def test_merge_codex_cli_writes_parseable_toml_with_windows_paths() -> None:
     finally:
         if config.exists():
             config.unlink()
+
+
+def test_readme_documents_supported_platforms_clients_and_installed_names():
+    skill_root = Path(__file__).resolve().parents[1]
+    readme = (skill_root / "README.md").read_text(encoding="utf-8")
+
+    required_text = (
+        "Top Journal and Public CNKI Search",
+        "$top-journal-search-lists",
+        "cnki-search",
+        "cnki_search(query, limit)",
+        "Claude Code",
+        "Claude Desktop",
+        "Codex CLI",
+        "Codex Desktop",
+        "## Windows 安装指南",
+        "## macOS 安装指南",
+        "## Linux 安装指南",
+        "-Codex -ClaudeCode -ClaudeDesktop",
+        "--codex --claude-code --claude-desktop",
+        "手工复制",
+        "不会自动配置",
+        "官方 Linux 桌面客户端",
+    )
+    for text in required_text:
+        assert text in readme
