@@ -175,9 +175,16 @@ python3 top-journal-search-lists/scripts/catalog_lookup.py lookup "American Econ
 
 完整测试不属于普通用户安装验证。请先在开发环境安装 pytest，或使用已有包含 pytest 的 Python 环境，再在仓库根目录执行：
 
+### Windows
+
 ```text
-Windows: python -m pytest -p no:cacheprovider top-journal-search-lists/tests -q
-macOS/Linux: python3 -m pytest -p no:cacheprovider top-journal-search-lists/tests -q
+python -m pytest -p no:cacheprovider top-journal-search-lists/tests -q
+```
+
+### macOS/Linux
+
+```text
+python3 -m pytest -p no:cacheprovider top-journal-search-lists/tests -q
 ```
 
 ## 使用示例

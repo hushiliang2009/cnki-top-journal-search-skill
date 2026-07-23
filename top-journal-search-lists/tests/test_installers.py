@@ -203,6 +203,11 @@ def test_readme_documents_supported_platforms_clients_and_installed_names():
     skill_root = Path(__file__).resolve().parents[1]
     readme = (skill_root / "README.md").read_text(encoding="utf-8")
 
+    def section(heading: str) -> str:
+        start = readme.index(heading)
+        end = readme.find("\n## ", start + len(heading))
+        return readme[start:] if end == -1 else readme[start:end]
+
     required_text = (
         "Top Journal and Public CNKI Search",
         "$top-journal-search-lists",
@@ -215,14 +220,17 @@ def test_readme_documents_supported_platforms_clients_and_installed_names():
         "## Windows 安装指南",
         "## macOS 安装指南",
         "## Linux 安装指南",
-        "-Codex -ClaudeCode -ClaudeDesktop",
-        "--codex --claude-code --claude-desktop",
         "手工复制",
         "不会自动配置",
         "官方 Linux 桌面客户端",
     )
     for text in required_text:
         assert text in readme
+
+    windows = section("## Windows 安装指南")
+    macos = section("## macOS 安装指南")
+    assert "powershell -ExecutionPolicy Bypass -File .\\top-journal-search-lists\\installers\\install.ps1 -Codex -ClaudeCode -ClaudeDesktop" in windows
+    assert "sh ./top-journal-search-lists/installers/install.sh --codex --claude-code --claude-desktop" in macos
 
 
 def test_readme_documents_installer_runtime_and_platform_boundaries():
@@ -274,3 +282,5 @@ def test_readme_documents_cross_computer_installation_and_verification():
     assert "pytest" not in verification
     assert "pytest" in developer_checks
     assert "开发环境安装 pytest" in developer_checks
+    assert "Windows: python -m pytest" not in developer_checks
+    assert "macOS/Linux: python3 -m pytest" not in developer_checks
