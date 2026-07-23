@@ -16,6 +16,11 @@ from cnki_search.install_config import (
     merge_claude_config,
 )
 
+requires_windows_powershell = pytest.mark.skipif(
+    shutil.which("powershell") is None,
+    reason="requires Windows PowerShell",
+)
+
 
 def test_installers_require_explicit_client_targets(skill_root: Path) -> None:
     powershell = (skill_root / "installers/install.ps1").read_text(encoding="utf-8")
@@ -67,6 +72,7 @@ def test_installers_require_runtime_self_checks_and_transactional_restore(skill_
     assert "rotate_backups" in shell
 
 
+@requires_windows_powershell
 def test_powershell_51_parses_no_bom_utf8_installer_with_ascii_executable_text(skill_root: Path) -> None:
     installer = skill_root / "installers/install.ps1"
     payload = installer.read_bytes()
@@ -230,6 +236,7 @@ def _run_shell_installer(copied_skill: Path, environment: dict[str, str]) -> sub
     )
 
 
+@requires_windows_powershell
 def test_powershell_rejects_python_310_before_creating_install_paths(
     skill_root: Path, tmp_path: Path,
 ) -> None:
@@ -261,6 +268,7 @@ def test_powershell_rejects_python_310_before_creating_install_paths(
     assert not (codex_home / "runtimes").exists()
 
 
+@requires_windows_powershell
 def test_powershell_runtime_failure_restores_skill_and_config(skill_root: Path, tmp_path: Path) -> None:
     runtime_python = tmp_path / "failing-runtime.ps1"
     _write_recording_powershell_runtime(runtime_python, fail_browser_check=True)
@@ -337,6 +345,7 @@ def test_shell_runtime_failure_restores_skill_and_config(skill_root: Path, tmp_p
     assert config.read_text(encoding="utf-8") == "[mcp_servers.zotero]\ncommand = 'zotero-mcp'\n"
 
 
+@requires_windows_powershell
 def test_powershell_success_runs_self_checks_and_retains_exactly_three_backups(
     skill_root: Path, tmp_path: Path,
 ) -> None:
