@@ -3,7 +3,6 @@ import json
 import importlib.util
 import os
 from pathlib import Path
-import shutil
 import zipfile
 
 
@@ -85,6 +84,11 @@ def _load_builder(skill_root: Path):
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _copy_clean_skill(module, source: Path, target: Path) -> Path:
+    module.copy_skill_tree(source, target)
+    return target
 
 
 def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
@@ -172,8 +176,8 @@ def test_release_archives_have_exact_allowlisted_members_and_source_bytes(skill_
 
 def test_release_build_is_reproducible_across_source_mtimes(skill_root: Path, tmp_path: Path) -> None:
     module = _load_builder(skill_root)
-    first_root = shutil.copytree(skill_root, tmp_path / "first-skill")
-    second_root = shutil.copytree(skill_root, tmp_path / "second-skill")
+    first_root = _copy_clean_skill(module, skill_root, tmp_path / "first-skill")
+    second_root = _copy_clean_skill(module, skill_root, tmp_path / "second-skill")
     for path in second_root.rglob("*"):
         if path.is_file():
             os.utime(path, (946684800, 946684800))
@@ -201,7 +205,7 @@ def test_checksums_match_built_artifacts(skill_root: Path, tmp_path: Path) -> No
 
 def test_release_build_excludes_unlisted_and_state_baits(skill_root: Path, tmp_path: Path) -> None:
     module = _load_builder(skill_root)
-    bait_root = shutil.copytree(skill_root, tmp_path / "bait-skill")
+    bait_root = _copy_clean_skill(module, skill_root, tmp_path / "bait-skill")
     baits = (
         bait_root / "Cookie",
         bait_root / "Local State",

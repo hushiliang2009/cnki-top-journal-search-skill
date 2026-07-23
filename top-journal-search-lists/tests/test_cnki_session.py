@@ -48,7 +48,7 @@ def test_browser_launch_is_headless_and_has_no_persistent_state() -> None:
     fake = FakePlaywright()
     BrowserFactory(fake).launch_ephemeral()
     assert fake.chromium.launch_kwargs["headless"] is True
-    assert "args" not in fake.chromium.launch_kwargs
+    assert fake.chromium.launch_kwargs["args"] == ["--no-proxy-server"]
     assert "user_data_dir" not in fake.chromium.launch_kwargs
     assert "storage_state" not in fake.chromium.launch_kwargs
     assert "proxy" not in fake.chromium.launch_kwargs

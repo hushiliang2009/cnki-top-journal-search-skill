@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import os
 import shutil
-import tempfile
 import zipfile
+import uuid
 from pathlib import Path
 
 
@@ -75,6 +77,27 @@ ALLOWLIST = SKILL_ALLOWLIST
 ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)
 REGULAR_MODE = 0o100644
 EXECUTABLE_MODE = 0o100755
+_BUILD_TEMP_ROOT = Path(__file__).resolve().parents[2] / ".build-tmp"
+
+
+def _resolve_build_temp_root() -> Path:
+    candidate = os.getenv("CNKI_BUILD_TMPDIR")
+    if candidate:
+        return Path(candidate).expanduser().resolve()
+    return _BUILD_TEMP_ROOT
+
+
+# Use a context-managed TemporaryDirectory-style workspace without tempfile's
+# Windows chmod path, which is unstable under the Python 3.14 test runtime.
+@contextlib.contextmanager
+def _build_workspace(build_temp_root: Path):
+    build_temp_root.mkdir(parents=True, exist_ok=True)
+    workspace = build_temp_root / f"cnki-public-build-{uuid.uuid4().hex}"
+    workspace.mkdir()
+    try:
+        yield workspace
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
 
 
 def copy_skill_tree(source: Path, target: Path) -> None:
@@ -118,8 +141,8 @@ def build(skill_root: Path, output_dir: Path) -> list[Path]:
     for target in (skill_zip, mcpb_zip, checksums):
         target.unlink(missing_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="cnki-public-build-") as temporary:
-        staging = Path(temporary)
+    build_temp_root = _resolve_build_temp_root()
+    with _build_workspace(build_temp_root) as staging:
         skill_stage = staging / "top-journal-search-lists"
         copy_skill_tree(skill_root, skill_stage)
         _zip_tree(skill_stage, skill_zip, prefix="top-journal-search-lists")

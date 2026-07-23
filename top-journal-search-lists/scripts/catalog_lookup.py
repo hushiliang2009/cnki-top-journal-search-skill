@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 
 
-SKILL_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CATALOG = (
-    SKILL_ROOT / "references" / "Academic_Journal_Master_Directory_20260715.md"
-)
+MODULE_DIR = Path(__file__).resolve().parent
+PARENT_DIR = MODULE_DIR.parent
+CATALOG_ROOTS = (MODULE_DIR, PARENT_DIR)
+CATALOG_FILENAME = "Academic_Journal_Master_Directory_20260715.md"
 EXPECTED_GROUPS = [
     "economics_top5",
     "ncs_pnas",
@@ -41,7 +41,16 @@ TOP5 = [
 ]
 CATALOG_VERSION = "2026-07-15"
 CatalogIndex = dict[str, list[dict[str, Any]]]
-_DISPLAY_SUFFIX = re.compile(r"\s*(?:\(网络首发\)|\[网络首发\]|【网络首发】|网络首发)\s*$")
+COMMUNICATIONS_SERIES = (
+    "Communications Biology",
+    "Communications Chemistry",
+    "Communications Earth & Environment",
+    "Communications Engineering",
+    "Communications Materials",
+    "Communications Medicine",
+    "Communications Physics",
+)
+_DISPLAY_SUFFIX = re.compile(r"\s*(?:\(网络首发\)|\[网络首发\]|「网络首发」)\s*$")
 GENERIC_NCS_LABELS = (
     "五大",
     "部分",
@@ -52,6 +61,19 @@ GENERIC_NCS_LABELS = (
 )
 
 
+def _resolve_catalog_path(path: Path | None = None) -> Path:
+    if path is not None:
+        return path
+    for root in CATALOG_ROOTS:
+        candidate = root / "references" / CATALOG_FILENAME
+        if candidate.is_file():
+            return candidate
+        fallback = root / CATALOG_FILENAME
+        if fallback.is_file():
+            return fallback
+    raise FileNotFoundError(f"未找到默认期刊目录文件：{CATALOG_FILENAME}")
+
+
 def normalize_title(value: str) -> str:
     """Return a case- and punctuation-insensitive journal key."""
     value = unicodedata.normalize("NFKC", value).casefold()
@@ -59,9 +81,32 @@ def normalize_title(value: str) -> str:
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value)
 
 
+def _normalize_conservative(value: str) -> str:
+    value = unicodedata.normalize("NFKC", value).casefold()
+    value = value.replace("&", " and ")
+    value = re.sub(r"\s+", "", value)
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff.]+", "", value)
+
+
+def _strip_leading_article(value: str) -> str:
+    if value.startswith("the") and len(value) > 3:
+        return value[3:]
+    return value
+
+
+def _title_signatures(title: str) -> tuple[str, str]:
+    normalized = _strip_leading_article(normalize_title(title))
+    conservative = _strip_leading_article(_normalize_conservative(title))
+    return normalized, conservative
+
+
+DEFAULT_CATALOG = _resolve_catalog_path()
+
+
 def _read_catalog(path: Path) -> str:
+    path = _resolve_catalog_path(path)
     if not path.is_file():
-        raise FileNotFoundError(f"综合期刊目录不存在：{path}")
+        raise FileNotFoundError(f"未找到期刊目录文件：{path}")
     return path.read_text(encoding="utf-8-sig").replace("\r\n", "\n")
 
 
@@ -71,18 +116,19 @@ def _extract_source_blocks(text: str) -> dict[str, str]:
     for match in pattern.finditer(text):
         filename = match.group(1).strip()
         if filename in blocks:
-            raise ValueError(f"来源区块存在重复来源标记：{filename}")
+            raise ValueError(f"源块重复存在：{filename}")
         end_marker = f"<!-- SOURCE_END: {filename} -->"
         end = text.find(end_marker, match.end())
         if end < 0:
-            raise ValueError(f"来源区块缺少结束标记：{filename}")
+            raise ValueError(f"源块未闭合：{filename}")
         blocks[filename] = text[match.end() : end].strip()
     return blocks
 
 
-def validate_catalog(path: Path = DEFAULT_CATALOG) -> dict[str, Any]:
+def validate_catalog(path: Path | None = None) -> dict[str, Any]:
     """Validate the master catalog's priority and source-block structure."""
-    text = _read_catalog(path)
+    catalog_path = _resolve_catalog_path(path)
+    text = _read_catalog(catalog_path)
     levels = [int(value) for value in re.findall(r"(?m)^  - level: (\d+)$", text)]
     groups = re.findall(r'(?m)^    group: "([^"]+)"$', text)
     blocks = _extract_source_blocks(text)
@@ -90,15 +136,15 @@ def validate_catalog(path: Path = DEFAULT_CATALOG) -> dict[str, Any]:
     if levels != list(range(1, 11)):
         raise ValueError(f"综合目录检索层级无效：{levels}")
     if groups != EXPECTED_GROUPS:
-        raise ValueError(f"综合目录优先级分组无效：{groups}")
+        raise ValueError(f"优先级分组不符合预期：{groups}")
     sources = list(blocks)
     if sources != EXPECTED_SOURCES:
-        raise ValueError(f"综合目录来源文件无效：{sources}")
+        raise ValueError(f"来源文件清单不正确：{sources}")
     if version_match is None or version_match.group(1) != CATALOG_VERSION:
         raise ValueError("综合目录版本无效")
     return {
         "valid": True,
-        "catalog": str(path),
+        "catalog": str(catalog_path),
         "priority_levels": len(levels),
         "priority_groups": groups,
         "source_blocks": len(blocks),
@@ -112,24 +158,38 @@ def _clean_title(raw: str) -> str:
     raw = re.sub(r"^\d+\.\s+", "", raw)
     raw = re.sub(r"^\s*\*+\s*", "", raw)
     raw = raw.replace("**", "").strip()
-    raw = re.split(r"\s+-\s+|：", raw, maxsplit=1)[0].strip()
-    if re.match(r"^[A-Za-z]", raw):
-        raw = re.sub(r"\s+[（(][^（）()]+[）)]$", "", raw)
-    return raw.strip(" .；;，,")
+    raw = raw.replace("＆", "&")
+    raw = re.sub(r"\s*&\s*", " & ", raw)
+    raw = re.sub(r"^\[.*?\]\s*", "", raw)
+    raw = re.sub(r"\s*[\(\uFF08][^)\uFF09]*[\)\uFF09]\s*", "", raw)
+    raw = re.sub(r"\s*[\[\u3010][^\]\u3011]*[\]\u3011]\s*", "", raw)
+    dash_match = re.match(r"^(.+?)\s*[\-–—]\s*([\u4e00-\u9fff].*)$", raw)
+    if dash_match:
+        raw = dash_match.group(1).strip()
+    return raw.strip(" .")
 
 
 def _keys_for_title(title: str) -> set[str]:
-    key = normalize_title(title)
-    keys = {key} if key else set()
-    if key.startswith("the") and len(key) > 6:
-        keys.add(key[3:])
-    return keys
+    normalized, conservative = _title_signatures(title)
+    words = re.findall(r"[0-9a-z\u4e00-\u9fff]+", title.casefold())
+    keys = {normalized, conservative}
+    if normalized.startswith("the") and len(normalized) > 3:
+        keys.add(normalized[3:])
+    if conservative.startswith("the") and len(conservative) > 3:
+        keys.add(conservative[3:])
+    if len(words) >= 2 and words[-1] == "history":
+        head = words[-2]
+        if head:
+            keys.add(f"{head}of{words[-1]}")
+            if head.endswith("ic"):
+                keys.add(f"{head[:-2]}icsof{words[-1]}")
+    return {key for key in keys if key and len(key) >= 2}
 
 
 def clean_lookup_title(value: str) -> tuple[str, str]:
     """Remove only the supported online-first display suffix."""
-    normalized = unicodedata.normalize("NFKC", value).strip()
-    cleaned = _DISPLAY_SUFFIX.sub("", normalized).strip()
+    normalized = unicodedata.normalize("NFKC", value).rstrip()
+    cleaned = _DISPLAY_SUFFIX.sub("", normalized).rstrip()
     method = "controlled_display_suffix" if cleaned != normalized else "normalized_exact"
     return cleaned, method
 
@@ -146,15 +206,17 @@ def _add(
 ) -> None:
     title = _clean_title(title)
     keys = _keys_for_title(title)
-    if not keys or max(map(len, keys)) < 2:
+    if not keys:
         return
 
+    normalized_signature, merge_signature = _title_signatures(title)
     existing = next(
         (
             candidate
             for key in keys
             for candidate in index.get(key, [])
-            if candidate["matched_title"] == title
+            if candidate.get("normalized_signature") == normalized_signature
+            and candidate.get("merge_signature") == merge_signature
         ),
         None,
     )
@@ -166,6 +228,8 @@ def _add(
             "source_catalogs": [],
             "subject_categories": [],
             "ncs_internal_rank": ncs_internal_rank,
+            "normalized_signature": normalized_signature,
+            "merge_signature": merge_signature,
         }
     if source not in existing["source_catalogs"]:
         existing["source_catalogs"].append(source)
@@ -188,18 +252,34 @@ def _add(
 def _index_ncs(index: CatalogIndex, text: str) -> None:
     social_heading = "### 🌟 置顶板块：人文、哲学与社会科学（含交叉研究）期刊"
     first_main_heading = "### 第一部分：Nature"
-    social_start = text.find(social_heading)
     social_end = text.find(first_main_heading)
-    if social_start < 0 or social_end < 0 or social_start >= social_end:
+    social_start = text.find(social_heading)
+    if social_start >= 0 and social_end >= 0 and social_start < social_end:
+        internal_rank = 1
+    elif social_end < 0:
         raise ValueError("NCS_PNAS 人文社科置顶板块结构无效")
+    else:
+        internal_rank = 2
 
     for line_match in re.finditer(r"(?m)^\s*\*\s+.*$", text):
         line = line_match.group(0)
         line_position = line_match.start()
-        internal_rank = 1 if social_start < line_position < social_end else 2
+        if social_start >= 0 and social_end >= 0 and social_start < social_end:
+            internal_rank = 1 if social_start < line_position < social_end else 2
         bold_titles = re.findall(r"\*\*([^*]+)\*\*", line)
         candidates = bold_titles or [re.sub(r"^\s*\*\s+", "", line)]
         for candidate in candidates:
+            if "Communications 系列" in candidate:
+                for series_title in COMMUNICATIONS_SERIES:
+                    _add(
+                        index,
+                        series_title,
+                        2,
+                        "ncs_pnas",
+                        "NCS_PNAS_Directory.md",
+                        ncs_internal_rank=internal_rank,
+                    )
+                continue
             if any(label in candidate for label in GENERIC_NCS_LABELS):
                 continue
             _add(
@@ -211,20 +291,26 @@ def _index_ncs(index: CatalogIndex, text: str) -> None:
                 ncs_internal_rank=internal_rank,
             )
 
-
 def _index_top(index: CatalogIndex, text: str) -> None:
     current_level = 7
     current_group = "other_top_journals"
     for line in text.splitlines():
-        if "中文顶尖期刊目录" in line:
+        is_heading = line.startswith("#")
+        if is_heading and "中文核心期刊目录" in line:
             current_level, current_group = 6, "chinese_top_journals"
-        elif "英文综合顶尖期刊目录" in line:
+        elif is_heading and "中文顶尖期刊目录" in line:
+            current_level, current_group = 6, "chinese_top_journals"
+        elif is_heading and "综述类期刊目录" in line:
             current_level, current_group = 7, "other_top_journals"
-        elif "UTD24 期刊目录" in line:
+        elif is_heading and "UTD24" in line:
             current_level, current_group = 3, "utd24"
-        elif "FT50 期刊目录" in line:
+        elif is_heading and "FT50" in line:
             current_level, current_group = 4, "ft50"
-        elif "细分领域顶尖期刊" in line or "Field Top Journals" in line:
+        elif is_heading and (
+            "领域顶刊" in line
+            or "各细分领域顶尖期刊" in line
+            or "Field Top Journals" in line
+        ):
             current_level, current_group = 5, "field_top"
         elif line.startswith("* "):
             _add(
@@ -234,7 +320,6 @@ def _index_top(index: CatalogIndex, text: str) -> None:
                 current_group,
                 "Top_Academic_Journals_all.md",
             )
-
 
 def _index_numbered_source(
     index: CatalogIndex,
@@ -275,10 +360,11 @@ def _index_cssci(index: CatalogIndex, text: str) -> None:
             )
 
 
-def build_index(path: Path = DEFAULT_CATALOG) -> CatalogIndex:
+def build_index(path: Path | None = None) -> CatalogIndex:
     """Build a normalized journal index and retain each journal's best rank."""
-    validate_catalog(path)
-    text = _read_catalog(path)
+    catalog_path = _resolve_catalog_path(path)
+    validate_catalog(catalog_path)
+    text = _read_catalog(catalog_path)
     blocks = _extract_source_blocks(text)
     index: CatalogIndex = {}
 
@@ -289,7 +375,7 @@ def build_index(path: Path = DEFAULT_CATALOG) -> CatalogIndex:
             1,
             "economics_top5",
             "Top_Academic_Journals_all.md",
-            subject_category="经济学 Top 5",
+            subject_category="顶尖榜Top 5",
         )
 
     _index_ncs(index, blocks["NCS_PNAS_Directory.md"])
@@ -315,11 +401,29 @@ def build_index(path: Path = DEFAULT_CATALOG) -> CatalogIndex:
 def lookup_journal(index: CatalogIndex, journal: str) -> dict[str, Any]:
     """Look up one journal while preserving ambiguous normalized matches."""
     cleaned, method = clean_lookup_title(journal)
-    candidates: list[dict[str, Any]] = []
+    candidates = []
     for key in _keys_for_title(cleaned):
         for candidate in index.get(key, []):
             if candidate not in candidates:
                 candidates.append(candidate)
+    query_signature = _title_signatures(cleaned)
+    normalized_collisions = [
+        candidate
+        for candidate in candidates
+        if candidate["normalized_signature"] == query_signature[0]
+    ]
+    exact_candidates = [
+        candidate
+        for candidate in candidates
+        if (
+            candidate["normalized_signature"],
+            candidate["merge_signature"],
+        )
+        == query_signature
+    ]
+    if exact_candidates and len(normalized_collisions) <= len(exact_candidates):
+        candidates = exact_candidates
+
     base = {
         "input": journal,
         "normalized": normalize_title(cleaned),
@@ -336,23 +440,27 @@ def lookup_journal(index: CatalogIndex, journal: str) -> dict[str, Any]:
     }
     if not candidates:
         return base | {"status": "unmatched", "match_method": None, "candidates": [], **empty}
-    if len(candidates) > 1:
+
+    signatures = {(item["normalized_signature"], item["merge_signature"]) for item in candidates}
+    if len(signatures) == 1:
+        winner = candidates[0]
         return base | {
-            "status": "ambiguous",
-            "match_method": None,
-            "candidates": [item["matched_title"] for item in candidates],
-            **empty,
+            "status": "matched",
+            "match_method": method,
+            "candidates": [],
+            "manual_review_required": False,
+            **winner,
         }
+
     return base | {
-        "status": "matched",
-        "match_method": method,
-        "candidates": [],
-        "manual_review_required": False,
-        **candidates[0],
+        "status": "ambiguous",
+        "match_method": None,
+        "candidates": [item["matched_title"] for item in candidates],
+        **empty,
     }
 
 
-def lookup_journals(path: Path, journals: list[str]) -> list[dict[str, Any]]:
+def lookup_journals(path: Path | None, journals: list[str]) -> list[dict[str, Any]]:
     """Look up journals and return their highest priority memberships."""
     index = build_index(path)
     return [lookup_journal(index, journal) for journal in journals]
@@ -360,11 +468,11 @@ def lookup_journals(path: Path, journals: list[str]) -> list[dict[str, Any]]:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="校验综合期刊目录并查询期刊的最高检索层级。"
+        description="校验期刊主目录并按布局返回检索结果清单"
     )
-    parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+    parser.add_argument("--catalog", type=Path, default=None)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("validate", help="校验综合目录结构")
+    subparsers.add_parser("validate", help="校验目录结构完整性")
     lookup = subparsers.add_parser("lookup", help="查询一个或多个期刊")
     lookup.add_argument("journals", nargs="+")
     return parser
@@ -372,10 +480,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
-    if args.command == "validate":
-        result: Any = validate_catalog(args.catalog)
-    else:
-        result = lookup_journals(args.catalog, args.journals)
+    try:
+        if args.command == "validate":
+            result: Any = validate_catalog(args.catalog)
+        else:
+            result = lookup_journals(args.catalog, args.journals)
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2))

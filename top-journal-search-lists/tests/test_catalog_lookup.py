@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import importlib.util
 import json
@@ -266,3 +266,141 @@ class CatalogLookupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+CATALOG_LAYOUTS = (
+    ("scripts", ROOT / "scripts" / "catalog_lookup.py"),
+    ("mcpb", ROOT / "mcpb" / "src" / "catalog_lookup.py"),
+)
+
+_VARIANT_KEY_EXPECTATIONS = {
+    "accountingreview": 3,
+    "journalofaccountingandeconomics": 3,
+    "journaloffinance": 3,
+    "reviewoffinancialstudies": 3,
+    "accountingorganizationsandsociety": 4,
+    "americaneconomicjournalappliedeconomics": 5,
+    "americaneconomicjournalmacroeconomics": 5,
+    "americaneconomicjournalmicroeconomics": 5,
+    "americaneconomicjournaleconomicpolicy": 5,
+    "americaneconomicreviewinsights": 5,
+    "auditingajournalofpracticeandtheory": 5,
+    "corporategovernanceaninternationalreview": 5,
+    "environmentalandresourceeconomics": 5,
+    "genevapapersonriskandinsuranceissuesandpractice": 5,
+    "insurancemathematicsandeconomics": 5,
+    "journalofeconomicdynamicsandcontrol": 5,
+    "journaloflawandeconomics": 5,
+    "journaloflaweconomicsandorganization": 5,
+    "journalofmoneycreditandbanking": 5,
+    "randdmanagement": 5,
+    "supplychainmanagementaninternationaljournal": 5,
+    "transportationresearchpartbmethodological": 5,
+    "transportationresearchpartapolicyandpractice": 5,
+    "transportationresearchpartelogisticsandtransportationreview": 5,
+    "economicsofhistory": 5,
+    "humanitiesandsocialsciencescommunications": 2,
+    "npjscienceoflearning": 2,
+    "npjurbansustainability": 2,
+    "cellstemcell": 2,
+    "trendsinendocrinologyandmetabolism": 2,
+    "transportationresearchpartdtransportandenvironment": 8,
+    "journalsofgerontologyseriesabiologicalsciencesandmedicalsciences": 8,
+    "journaloftheroyalstatisticalsocietyseriesastatisticsinsociety": 8,
+    "structuralequationmodelingamultidisciplinaryjournal": 8,
+    "transportmetricaatransportscience": 8,
+}
+
+
+def _load_layout_module(path: Path):
+    spec = importlib.util.spec_from_file_location(f"catalog_lookup_{path.name}", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法加载布局模块：{path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _get_two_variants(module, key: str, index: dict[str, list[dict]]) -> list[str]:
+    candidates = []
+    seen = set()
+    for buckets in index.values():
+        for entry in buckets:
+            entry_keys = (
+                module._keys_for_title(entry["matched_title"])
+                if hasattr(module, "_keys_for_title")
+                else {module.normalize_title(entry["matched_title"])}
+            )
+            if key not in entry_keys:
+                continue
+            title = entry["matched_title"]
+            if title in seen:
+                continue
+            candidates.append(title)
+            seen.add(title)
+    if not candidates:
+        return []
+    if len(candidates) >= 2:
+        return candidates[:2]
+    primary = candidates[0]
+    if " and " in primary:
+        return [primary, primary.replace(" and ", " & ")]
+    if "&" in primary:
+        return [primary, primary.replace(" & ", " and ")]
+    return [primary, f"The {primary}"]
+
+
+class CatalogLookupCrossLayoutTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.layout_modules = [(_load_layout_module(path), label, path) for label, path in CATALOG_LAYOUTS]
+
+    def test_default_catalog_is_discoverable_in_both_layouts(self):
+        for module, _label, _path in self.layout_modules:
+            self.assertTrue(module.DEFAULT_CATALOG.is_file())
+
+    def test_invalid_catalog_path_or_format_is_reported_without_traceback(self):
+        for module, _label, path in self.layout_modules:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(path),
+                    "--catalog",
+                    "missing-catalog.md",
+                    "lookup",
+                    "American Economic Review",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("FileNotFoundError", completed.stderr)
+            self.assertNotIn("Traceback", completed.stderr)
+
+    def test_layouts_build_index_and_merge_communications_series_to_level_2(self):
+        for module, _label, _path in self.layout_modules:
+            index = module.build_index(module.DEFAULT_CATALOG)
+            for title in ("Communications Biology", "Communications Chemistry"):
+                result = module.lookup_journals(
+                    module.DEFAULT_CATALOG,
+                    [title],
+                )[0]
+                self.assertEqual(result["status"], "matched")
+                self.assertEqual(result["priority_level"], 2)
+
+    def test_variant_grouping_and_min_level_for_expected_keys_in_both_layouts(self):
+        for module, _label, _path in self.layout_modules:
+            index = module.build_index(module.DEFAULT_CATALOG)
+            for key, expected in _VARIANT_KEY_EXPECTATIONS.items():
+                variants = _get_two_variants(module, key, index)
+                self.assertGreaterEqual(
+                    len(variants),
+                    1,
+                    f"未找到变体：{key}",
+                )
+                for variant in variants:
+                    result = module.lookup_journals(module.DEFAULT_CATALOG, [variant])[0]
+                    self.assertEqual(result["status"], "matched", result)
+                    self.assertEqual(result["priority_level"], expected)
+                if len(variants) > 1:
+                    self.assertNotEqual(variants[0], variants[-1])

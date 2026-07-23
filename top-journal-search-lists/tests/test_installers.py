@@ -1,6 +1,5 @@
 import importlib.util
 from pathlib import Path, PurePosixPath, PureWindowsPath
-import shutil
 
 import tomllib
 
@@ -39,7 +38,8 @@ def test_allowlisted_install_copy_excludes_workspace_baits(
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    source = shutil.copytree(skill_root, tmp_path / "source")
+    source = tmp_path / "source"
+    module.copy_skill_tree(skill_root, source)
     for relative in ("Cookie", "Local State", "random-extra.txt", "scripts/cnki_search/random_extra.py"):
         bait = source / relative
         bait.parent.mkdir(parents=True, exist_ok=True)
