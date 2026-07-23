@@ -43,7 +43,7 @@ top-journal-search-lists/
 
 ## 安装前准备
 
-- 安装 Python 3.11 或更高版本，以及 Git；
+- 安装 Python 3.11 或更高版本，以及 Git；Windows 安装器可用 `-PythonExe` 指定解释器，macOS/Linux 安装器读取 `CNKI_PYTHON`，未指定时分别使用 `python` 和 `python3`；
 - 安装 Chrome、Edge 或 Chromium。没有兼容浏览器时，可安装 Playwright Chromium；
 - 私有仓库需要先以具有访问权限的账号完成 GitHub 认证；
 - 在 Windows、macOS 或 Linux 的终端中克隆并进入已验证分支：
@@ -145,7 +145,7 @@ WSL 中的安装属于 Linux 侧安装，绝不会配置 Windows ChatGPT Desktop
 
 ## 安装器实际执行的操作
 
-安装器复制完整 Skill，创建独立 Python 运行环境，安装 `mcp` 与 `playwright`，并仅向所选客户端增量写入 `cnki-search` MCP 配置。修改已有配置前会生成带时间戳的备份，不删除 Zotero、ai4scholar 等其他 MCP 服务。
+安装器复制完整 Skill，创建独立 Python 运行环境，安装 `mcp` 与 `playwright`，并执行 `python -m playwright install chromium chromium-headless-shell`。依赖安装后，安装器会进行导入检查、临时 Chromium 的离线启动和关闭，以及 MCP 自检；不会打开 CNKI 或其他网址。修改已有内容前会生成带时间戳的备份；安装失败会恢复原有 Skill 和配置，不删除 Zotero、ai4scholar 等其他 MCP 服务。安装完整成功后，每个目标仅保留最近 3 份由安装器生成的时间戳备份。
 
 ## 安装位置与配置文件
 

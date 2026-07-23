@@ -1,5 +1,8 @@
 import importlib.util
+import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
+import subprocess
+import sys
 
 import tomllib
 
@@ -28,6 +31,234 @@ def test_installers_reuse_allowlisted_skill_copy(skill_root: Path) -> None:
     assert "--copy-skill" in shell
     assert "Copy-Item -LiteralPath $SkillSource -Destination $Destination -Recurse" not in powershell
     assert 'cp -R "$skill_source" "$destination"' not in shell
+
+
+def test_installers_validate_selected_python_before_any_install_write(skill_root: Path) -> None:
+    powershell = (skill_root / "installers/install.ps1").read_text(encoding="utf-8")
+    shell = (skill_root / "installers/install.sh").read_text(encoding="utf-8")
+
+    assert "[string]$PythonExe = 'python'" in powershell
+    assert "function Assert-PythonVersion" in powershell
+    assert "Python 3.11 or higher is required" in powershell
+    assert powershell.index("Assert-PythonVersion") < powershell.index("Install-SkillCopy")
+    assert powershell.index("Assert-PythonVersion") < powershell.index("New-Item -ItemType Directory")
+
+    assert 'python_command=${CNKI_PYTHON:-python3}' in shell
+    assert "assert_python_version" in shell
+    assert "Python 3.11 or higher is required" in shell
+    assert shell.index("assert_python_version") < shell.index("install_skill")
+    assert shell.index("assert_python_version") < shell.index('mkdir -p "$runtime_root"')
+
+
+def test_installers_require_offline_playwright_runtime_self_check(skill_root: Path) -> None:
+    powershell = (skill_root / "installers/install.ps1").read_text(encoding="utf-8")
+    shell = (skill_root / "installers/install.sh").read_text(encoding="utf-8")
+
+    for script in (powershell, shell):
+        assert "-m playwright install chromium chromium-headless-shell" in script
+        assert "import mcp, playwright" in script
+        assert "chromium.launch" in script
+        assert "https://" not in script
+        assert "http://" not in script
+        assert "cnki" not in script.lower().split("chromium.launch", 1)[1].splitlines()[0]
+
+
+def test_installers_self_check_imports_the_installed_mcp_server_via_argv(skill_root: Path) -> None:
+    powershell = (skill_root / "installers/install.ps1").read_text(encoding="utf-8")
+    shell = (skill_root / "installers/install.sh").read_text(encoding="utf-8")
+
+    for script in (powershell, shell):
+        assert "import cnki_search.mcp_server" in script
+        assert "sys.argv[1]" in script
+        assert "scripts" in script
+
+
+def test_installers_define_rollback_and_exact_backup_rotation(skill_root: Path) -> None:
+    powershell = (skill_root / "installers/install.ps1").read_text(encoding="utf-8")
+    shell = (skill_root / "installers/install.sh").read_text(encoding="utf-8")
+
+    for script in (powershell, shell):
+        assert "backup-" in script
+        assert "Restore-Transaction" in script or "rollback_transaction" in script
+        assert "Rotate-Backups" in script or "rotate_backups" in script
+        assert "3" in script
+    assert r"\.backup-\d{8}-\d{6}$" in powershell
+    assert "backup-????????-??????" in shell
+
+
+def test_readme_documents_installer_safety_requirements(skill_root: Path) -> None:
+    readme = (skill_root / "README.md").read_text(encoding="utf-8")
+
+    for text in (
+        "Python 3.11 或更高版本",
+        "`-PythonExe`",
+        "`CNKI_PYTHON`",
+        "python -m playwright install chromium chromium-headless-shell",
+        "导入检查",
+        "离线启动",
+        "恢复原有 Skill 和配置",
+        "最近 3 份",
+    ):
+        assert text in readme
+
+
+def test_powershell_rejects_python_310_before_creating_install_paths(
+    skill_root: Path, tmp_path: Path,
+) -> None:
+    fake_python = tmp_path / "python310.cmd"
+    fake_python.write_text("@echo off\necho Python 3.10.9\nexit /b 0\n", encoding="utf-8")
+    userprofile = tmp_path / "profile"
+    codex_home = tmp_path / "codex-home"
+    appdata = tmp_path / "appdata"
+    environment = os.environ | {
+        "USERPROFILE": str(userprofile),
+        "APPDATA": str(appdata),
+        "CODEX_HOME": str(codex_home),
+    }
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            (
+                f"& '{skill_root / 'installers' / 'install.ps1'}' "
+                f"-Codex -PythonExe '{fake_python}'"
+            ),
+        ],
+        cwd=skill_root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "Python 3.10.9" in result.stderr
+    assert "Python 3.11 or higher is required" in result.stderr
+    assert not (codex_home / "skills").exists()
+    assert not (codex_home / "runtimes").exists()
+    assert not (appdata / "Claude").exists()
+
+
+def _write_recording_runtime(path: Path, *, fail_browser_check: bool) -> None:
+    failure = "if ($joined -like '*chromium.launch*') { exit 71 }\n" if fail_browser_check else ""
+    path.write_text(
+        "param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)\n"
+        "$joined = $Arguments -join ' '\n"
+        "Write-Output \"RUNTIME:$joined\"\n"
+        f"{failure}"
+        "if ($Arguments[0] -eq '-m' -or $Arguments[0] -eq '-c') { exit 0 }\n"
+        "& $env:CNKI_TEST_REAL_PYTHON @Arguments\n"
+        "exit $LASTEXITCODE\n",
+        encoding="utf-8",
+    )
+
+
+def _run_powershell_installer(
+    skill_root: Path, environment: dict[str, str], runtime_python: Path, timestamp: str,
+) -> subprocess.CompletedProcess[str]:
+    command = (
+        f"& '{skill_root / 'installers' / 'install.ps1'}' -Codex "
+        f"-PythonExe '{sys.executable}' -InternalRuntimePython '{runtime_python}' "
+        f"-InternalTimeStamp '{timestamp}'"
+    )
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=skill_root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_powershell_success_runs_required_offline_runtime_sequence(
+    skill_root: Path, tmp_path: Path,
+) -> None:
+    runtime_python = tmp_path / "recording-runtime.ps1"
+    _write_recording_runtime(runtime_python, fail_browser_check=False)
+    codex_home = tmp_path / "codex-home"
+    environment = os.environ | {
+        "USERPROFILE": str(tmp_path / "profile"),
+        "APPDATA": str(tmp_path / "appdata"),
+        "CODEX_HOME": str(codex_home),
+        "CNKI_TEST_REAL_PYTHON": sys.executable,
+    }
+
+    result = _run_powershell_installer(skill_root, environment, runtime_python, "20260723-120001")
+
+    assert result.returncode == 0, result.stderr
+    commands = result.stdout
+    assert "-m pip install mcp>=1,<2 playwright>=1.45,<2" in commands
+    assert "-m playwright install chromium chromium-headless-shell" in commands
+    assert "import mcp, playwright" in commands
+    assert "chromium.launch" in commands
+
+
+def test_powershell_browser_self_check_failure_restores_existing_skill_and_config(
+    skill_root: Path, tmp_path: Path,
+) -> None:
+    runtime_python = tmp_path / "failing-runtime.ps1"
+    _write_recording_runtime(runtime_python, fail_browser_check=True)
+    codex_home = tmp_path / "codex-home"
+    original_skill = codex_home / "skills" / "top-journal-search-lists"
+    original_skill.mkdir(parents=True)
+    (original_skill / "original.txt").write_text("original skill", encoding="utf-8")
+    config = codex_home / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("[mcp_servers.zotero]\ncommand = 'zotero-mcp'\n", encoding="utf-8")
+    environment = os.environ | {
+        "USERPROFILE": str(tmp_path / "profile"),
+        "APPDATA": str(tmp_path / "appdata"),
+        "CODEX_HOME": str(codex_home),
+        "CNKI_TEST_REAL_PYTHON": sys.executable,
+    }
+
+    result = _run_powershell_installer(skill_root, environment, runtime_python, "20260723-120002")
+
+    assert result.returncode != 0
+    assert "Launching the offline Chromium self-check" in result.stderr
+    assert "chromium.launch" in result.stdout
+    assert (original_skill / "original.txt").read_text(encoding="utf-8") == "original skill"
+    assert config.read_text(encoding="utf-8") == "[mcp_servers.zotero]\ncommand = 'zotero-mcp'\n"
+
+
+def test_powershell_success_rotates_only_four_matching_backups_to_three(
+    skill_root: Path, tmp_path: Path,
+) -> None:
+    runtime_python = tmp_path / "recording-runtime.ps1"
+    _write_recording_runtime(runtime_python, fail_browser_check=False)
+    codex_home = tmp_path / "codex-home"
+    original_skill = codex_home / "skills" / "top-journal-search-lists"
+    original_skill.mkdir(parents=True)
+    (original_skill / "seed.txt").write_text("seed", encoding="utf-8")
+    config = codex_home / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("[profiles.default]\nmodel = 'gpt-5'\n", encoding="utf-8")
+    unmatched_skill = original_skill.with_name(f"{original_skill.name}.backup-not-installer")
+    unmatched_skill.mkdir()
+    unmatched_config = config.with_name("config.toml.backup-not-installer")
+    unmatched_config.write_text("keep", encoding="utf-8")
+    environment = os.environ | {
+        "USERPROFILE": str(tmp_path / "profile"),
+        "APPDATA": str(tmp_path / "appdata"),
+        "CODEX_HOME": str(codex_home),
+        "CNKI_TEST_REAL_PYTHON": sys.executable,
+    }
+
+    for timestamp in ("20260723-120101", "20260723-120102", "20260723-120103", "20260723-120104"):
+        result = _run_powershell_installer(skill_root, environment, runtime_python, timestamp)
+        assert result.returncode == 0, result.stderr
+
+    skill_backups = sorted(original_skill.parent.glob("top-journal-search-lists.backup-????????-??????"))
+    config_backups = sorted(config.parent.glob("config.toml.backup-????????-??????"))
+    assert len(skill_backups) == 3
+    assert len(config_backups) == 3
+    assert unmatched_skill.is_dir()
+    assert unmatched_config.read_text(encoding="utf-8") == "keep"
 
 
 def test_allowlisted_install_copy_excludes_workspace_baits(
