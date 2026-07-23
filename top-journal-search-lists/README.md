@@ -37,8 +37,8 @@ top-journal-search-lists/
 
 | 平台 | 支持的客户端 |
 | --- | --- |
-| Windows | Codex CLI、Codex Desktop、Claude Code、Claude Desktop |
-| macOS | Codex CLI、Codex Desktop、Claude Code、Claude Desktop |
+| Windows | Codex CLI、ChatGPT Desktop 中的 Codex、Claude Code、Claude Desktop |
+| macOS | Codex CLI、ChatGPT Desktop 中的 Codex、Claude Code、Claude Desktop |
 | Linux | Codex CLI、Claude Code |
 
 ## 安装前准备
@@ -57,9 +57,9 @@ cd cnki-top-journal-search-skill
 
 ## Windows 安装指南
 
-在仓库根目录的 PowerShell 中执行。`-Codex` 同时覆盖 Codex CLI 和 Codex Desktop，因为两者共用 Codex 主目录及 `config.toml`。Claude Code 和 Claude Desktop 的 MCP 配置文件不同，必须分别使用 `-ClaudeCode` 与 `-ClaudeDesktop`。
+在仓库根目录的 PowerShell 中执行。`-Codex` 同时覆盖 Codex CLI 和 ChatGPT Desktop 中的 Codex，因为两者共用 Codex 主目录及 `config.toml`。Claude Code 和 Claude Desktop 的 MCP 配置文件不同，必须分别使用 `-ClaudeCode` 与 `-ClaudeDesktop`。
 
-仅安装 Codex CLI 或 Codex Desktop：
+仅安装 Codex CLI 或配置 ChatGPT Desktop 中的 Codex：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\top-journal-search-lists\installers\install.ps1 -Codex
@@ -85,9 +85,9 @@ powershell -ExecutionPolicy Bypass -File .\top-journal-search-lists\installers\i
 
 ## macOS 安装指南
 
-在仓库根目录执行。`--codex` 同时覆盖 Codex CLI 和 Codex Desktop，因为两者共用 Codex 主目录及 `config.toml`。Claude Code 和 Claude Desktop 的 MCP 配置文件不同，必须分别使用 `--claude-code` 与 `--claude-desktop`。
+在仓库根目录执行。`--codex` 同时覆盖 Codex CLI 和 ChatGPT Desktop 中的 Codex，因为两者共用 Codex 主目录及 `config.toml`。Claude Code 和 Claude Desktop 的 MCP 配置文件不同，必须分别使用 `--claude-code` 与 `--claude-desktop`。
 
-仅安装 Codex CLI 或 Codex Desktop：
+仅安装 Codex CLI 或配置 ChatGPT Desktop 中的 Codex：
 
 ```sh
 sh ./top-journal-search-lists/installers/install.sh --codex
@@ -113,7 +113,7 @@ sh ./top-journal-search-lists/installers/install.sh --codex --claude-code --clau
 
 ## Linux 安装指南
 
-Linux 支持 Codex CLI 和 Claude Code。官方 Linux 桌面客户端不提供 Claude Desktop 或 Codex Desktop，因此不要使用 `--claude-desktop` 配置桌面客户端。
+Linux 支持 Codex CLI 和 Claude Code。官方 Linux 桌面客户端中尚未提供官方 Linux 版 ChatGPT Desktop，Claude Desktop 也不在本安装范围内，因此不要使用 `--claude-desktop` 配置桌面客户端。
 
 安装 Codex CLI：
 
@@ -133,7 +133,7 @@ sh ./top-journal-search-lists/installers/install.sh --claude-code
 sh ./top-journal-search-lists/installers/install.sh --codex --claude-code
 ```
 
-WSL 中的安装属于 Linux 侧安装，只配置 WSL 内的 Codex CLI 或 Claude Code，不会自动配置 Windows 桌面客户端。
+WSL 中的安装属于 Linux 侧安装，只配置 WSL 内的 Codex CLI 或 Claude Code，不会自动配置 Windows 桌面客户端，即 Windows 侧 ChatGPT Desktop 中的 Codex。
 
 ## 安装器实际执行的操作
 

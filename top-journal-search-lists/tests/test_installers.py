@@ -216,7 +216,7 @@ def test_readme_documents_supported_platforms_clients_and_installed_names():
         "Claude Code",
         "Claude Desktop",
         "Codex CLI",
-        "Codex Desktop",
+        "ChatGPT Desktop 中的 Codex",
         "## Windows 安装指南",
         "## macOS 安装指南",
         "## Linux 安装指南",
@@ -229,6 +229,10 @@ def test_readme_documents_supported_platforms_clients_and_installed_names():
 
     windows = section("## Windows 安装指南")
     macos = section("## macOS 安装指南")
+    assert "ChatGPT Desktop 中的 Codex" in readme
+    assert "Codex Desktop" not in readme
+    assert "ChatGPT Desktop 中的 Codex" in windows
+    assert "ChatGPT Desktop 中的 Codex" in macos
     assert "powershell -ExecutionPolicy Bypass -File .\\top-journal-search-lists\\installers\\install.ps1 -Codex -ClaudeCode -ClaudeDesktop" in windows
     assert "sh ./top-journal-search-lists/installers/install.sh --codex --claude-code --claude-desktop" in macos
 
@@ -240,7 +244,7 @@ def test_readme_documents_installer_runtime_and_platform_boundaries():
     required_text = (
         "`limit` 最大为 20",
         "Linux 支持 Codex CLI 和 Claude Code",
-        "不提供 Claude Desktop 或 Codex Desktop",
+        "官方 Linux 版 ChatGPT Desktop",
         "WSL 中的安装属于 Linux 侧安装",
         "不会自动配置 Windows 桌面客户端",
         "复制完整 Skill",
@@ -274,7 +278,9 @@ def test_readme_documents_cross_computer_installation_and_verification():
     assert "GitHub 认证" in preparation
     assert "默认分支后可省略 `--branch agent/cnki-new-entry-only --single-branch`" in preparation
     assert "sh ./top-journal-search-lists/installers/install.sh --codex --claude-code" in linux
-    assert "不提供 Claude Desktop 或 Codex Desktop" in linux
+    assert "官方 Linux 版 ChatGPT Desktop" in linux
+    wsl_text = linux
+    assert "Windows 侧 ChatGPT Desktop 中的 Codex" in wsl_text
     assert "Windows" in verification
     assert "python top-journal-search-lists/scripts/catalog_lookup.py validate" in verification
     assert "macOS/Linux" in verification
