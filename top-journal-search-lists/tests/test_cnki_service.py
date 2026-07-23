@@ -161,7 +161,7 @@ def test_restricted_or_changed_state_never_retries(snapshot: SearchSnapshot, exp
 
 
 def test_cache_hit_skips_session_and_gate() -> None:
-    factory = SequenceFactory([_snapshot(text="未检索到相关文献")])
+    factory = SequenceFactory([_snapshot(text="未检索到相关文献", html=RESTRICTED_PAGE_HTML)])
     gate = CountingGate()
     service = CnkiPublicSearchService(session_factory=factory, catalog=CATALOG, gate=gate)
     assert service.search("主题").status is SearchStatus.NO_RESULTS

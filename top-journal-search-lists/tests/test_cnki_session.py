@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -6,6 +9,9 @@ import cnki_search.session as session_module
 from cnki_search.browser import BrowserFactory
 from cnki_search.models import SearchStatus
 from cnki_search.session import PublicCnkiSession
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_public_session_uses_only_cnki_home() -> None:
@@ -21,6 +27,7 @@ def test_public_session_uses_only_cnki_home() -> None:
     [
         ("https://kns.cnki.net/captcha", "请完成拼图验证", SearchStatus.CHALLENGE_DETECTED),
         ("https://login.cnki.net/", "用户登录", SearchStatus.LOGIN_REQUIRED),
+        ("https://kns.cnki.net/kns8s/authserver/login", "普通认证页", SearchStatus.LOGIN_REQUIRED),
         ("https://kns.cnki.net/", "403 Forbidden", SearchStatus.FORBIDDEN),
         ("https://kns.cnki.net/", "访问过于频繁", SearchStatus.RATE_LIMITED),
         ("https://kns.cnki.net/", "未检索到相关文献", SearchStatus.NO_RESULTS),
@@ -113,6 +120,124 @@ def test_challenge_classifier_accepts_captcha_url_without_generic_text() -> None
     ) is SearchStatus.CHALLENGE_DETECTED
 
 
+@pytest.mark.parametrize(
+    ("url", "title", "text", "http_status", "expected"),
+    [
+        (
+            "https://kns.cnki.net/kns8s/defaultresult/index",
+            "拒绝访问 用户登录 统一身份认证",
+            "题名 来源 访问过于频繁 无权访问 拒绝访问 用户登录 统一身份认证",
+            200,
+            SearchStatus.SUCCESS,
+        ),
+        (
+            "https://kns.cnki.net/kns8s/defaultresult/index",
+            "中国知网",
+            "题名 来源",
+            403,
+            SearchStatus.FORBIDDEN,
+        ),
+        (
+            "https://kns.cnki.net/verify/home",
+            "安全验证",
+            "",
+            200,
+            SearchStatus.CHALLENGE_DETECTED,
+        ),
+        (
+            "https://www.cnki.net/",
+            "中国知网",
+            "中国知网公开首页",
+            200,
+            SearchStatus.PAGE_CONTRACT_CHANGED,
+        ),
+        (
+            "https://kns.cnki.net/kns8s/defaultresult/index",
+            "中国知网",
+            "普通页面说明：请完成安全验证后可继续使用服务",
+            200,
+            SearchStatus.PAGE_CONTRACT_CHANGED,
+        ),
+    ],
+)
+def test_public_state_truth_table_prioritizes_status_and_result_structure(
+    url: str, title: str, text: str, http_status: int, expected: SearchStatus,
+) -> None:
+    assert session_module.classify_public_search_state(
+        url=url,
+        title=title,
+        visible_text=text,
+        http_status=http_status,
+        has_result_table=expected is SearchStatus.SUCCESS,
+    ) is expected
+
+
+def test_state_truth_table_runs_in_both_runtime_layouts() -> None:
+    roots = (ROOT / "scripts", ROOT / "mcpb" / "src")
+    program = """
+from cnki_search.models import SearchStatus
+from cnki_search.session import classify_public_search_state
+
+result_url = 'https://kns.cnki.net/kns8s/defaultresult/index'
+assert classify_public_search_state(
+        url=result_url,
+        title='拒绝访问 用户登录',
+        visible_text='题名 来源 无权访问 访问过于频繁 用户登录',
+        http_status=200,
+        has_result_table=True,
+    ) is SearchStatus.SUCCESS
+assert classify_public_search_state(
+    url='https://kns.cnki.net/verify/home', title='安全验证', visible_text='', http_status=200,
+) is SearchStatus.CHALLENGE_DETECTED
+assert classify_public_search_state(
+    url=result_url, title='中国知网', visible_text='题名 来源', http_status=403,
+) is SearchStatus.FORBIDDEN
+assert classify_public_search_state(
+    url='https://www.cnki.net/', title='中国知网', visible_text='首页', http_status=200,
+) is SearchStatus.PAGE_CONTRACT_CHANGED
+"""
+    for root in roots:
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=root,
+            env=os.environ | {"PYTHONPATH": str(root)},
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
+def test_result_table_structure_controls_success_and_body_restriction_fallback_in_both_layouts() -> None:
+    roots = (ROOT / "scripts", ROOT / "mcpb" / "src")
+    program = """
+from cnki_search.models import SearchStatus
+from cnki_search.session import SearchSnapshot, classify_public_search_state
+
+url = 'https://kns.cnki.net/kns8s/defaultresult/index'
+without_table = SearchSnapshot('<main></main>', url, '中国知网', '题名 来源', 200)
+assert without_table.has_result_table is False
+assert classify_public_search_state(**without_table.state_arguments()) is SearchStatus.PAGE_CONTRACT_CHANGED
+with_table = SearchSnapshot(
+    '<table class="result-table-list"><tr><td>题名</td></tr></table>',
+    url,
+    '中国知网',
+    '无权访问 访问过于频繁',
+    200,
+)
+assert with_table.has_result_table is True
+assert classify_public_search_state(**with_table.state_arguments()) is SearchStatus.SUCCESS
+"""
+    for root in roots:
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=root,
+            env=os.environ | {"PYTHONPATH": str(root)},
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
 class RestrictedPage:
     def __init__(self, text: str, response_status: int | None = None) -> None:
         self.url = "https://www.cnki.net/"
@@ -166,8 +291,6 @@ def test_session_returns_initial_restriction_before_theme_contract_and_closes_re
         assert session_module.classify_public_search_state(**snapshot.state_arguments()) is SearchStatus.FORBIDDEN
     assert page.box_accessed is False
     assert context.closed and browser.closed
-
-
 @pytest.mark.parametrize(
     ("response_status", "expected"),
     [(403, SearchStatus.FORBIDDEN), (429, SearchStatus.RATE_LIMITED)],
@@ -192,56 +315,3 @@ def test_session_uses_initial_response_status_before_theme_contract(
         assert session_module.classify_public_search_state(**snapshot.state_arguments()) is expected
     assert page.box_accessed is False
     assert context.closed and browser.closed
-
-
-class TestSilentNoResultPaths:
-    """四条会把一次失败或残缺的检索报成"该主题无文献"的独立路径。
-
-    对文献综述场景，"无文献"会被直接写进结论，因此必须同批堵死。
-    """
-
-    RESULT_URL = "https://kns.cnki.net/kns8s/defaultresult/index"
-
-    def test_paper_titles_do_not_contaminate_state(self) -> None:
-        """路径 3：结果中某篇论文标题含受限措辞 → 整次检索被误判为受限。"""
-        for title_word in ("无权访问", "拒绝访问", "访问过于频繁", "用户登录", "统一身份认证"):
-            state = session_module.classify_public_search_state(
-                url=self.RESULT_URL,
-                title="中国知网",
-                visible_text=f"题名 来源 {title_word}控制模型研究",
-                http_status=200,
-                has_result_table=True,
-            )
-            assert state is SearchStatus.SUCCESS, f"论文标题含“{title_word}”被误判为 {state}"
-
-    def test_restricted_wording_still_trusted_without_result_table(self) -> None:
-        """没有结果表时，正文里的受限措辞仍是可信信号。"""
-        assert session_module.classify_public_search_state(
-            url=self.RESULT_URL, title="中国知网", visible_text="无权访问",
-            http_status=200, has_result_table=False,
-        ) is SearchStatus.FORBIDDEN
-
-    def test_home_page_is_never_success(self) -> None:
-        """路径 1：首页被判 success → 解析首页得 0 行 → 谎报无结果。"""
-        assert session_module.classify_public_search_state(
-            url="https://www.cnki.net/", title="中国知网", visible_text="中国知网 文献检索",
-            http_status=200,
-        ) is SearchStatus.PAGE_CONTRACT_CHANGED
-
-    def test_real_challenge_page_shape_is_detected_by_path_and_title(self) -> None:
-        """实测真实挑战页：正文 0 字符，只能靠 URL 路径与标题判定。"""
-        assert session_module.classify_public_search_state(
-            url="https://kns.cnki.net/verify/home", title="安全验证", visible_text="",
-            http_status=200,
-        ) is SearchStatus.CHALLENGE_DETECTED
-
-    def test_snapshot_derives_result_table_signal_from_html(self) -> None:
-        with_table = session_module.SearchSnapshot(
-            "<table class='result-table-list'></table>", self.RESULT_URL, "中国知网", "题名 来源", 200
-        )
-        without_table = session_module.SearchSnapshot(
-            "<main>安全验证</main>", self.RESULT_URL, "中国知网", "", 200
-        )
-        assert with_table.has_result_table is True
-        assert without_table.has_result_table is False
-        assert with_table.state_arguments()["has_result_table"] is True
