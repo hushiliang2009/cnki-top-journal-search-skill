@@ -19,6 +19,7 @@ def test_ci_runs_full_non_live_release_matrix(skill_root: Path) -> None:
         'python-version: ["3.11", "3.12", "3.13", "3.14"]',
         'python-version: ["3.11"]',
         "python -m pytest -q -p no:cacheprovider",
+        '"pytest>=8,<10"',
         "scripts/catalog_lookup.py validate",
         "tests/_mcp_handshake.py",
         "tests/_mcpb_handshake.py",
