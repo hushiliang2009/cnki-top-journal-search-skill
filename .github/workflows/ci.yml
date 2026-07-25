@@ -33,6 +33,8 @@ jobs:
       - working-directory: top-journal-search-lists
         run: python tests/_mcpb_handshake.py
       - working-directory: top-journal-search-lists
+        run: python tests/_mcpb_raw_handshake.py
+      - working-directory: top-journal-search-lists
         run: python scripts/build_release.py --output release
       - working-directory: top-journal-search-lists
         run: python -c "from pathlib import Path; import zipfile; files = [Path('release/top-journal-search-lists_Skill.zip'), Path('release/cnki-search.mcpb'), Path('release/checksums.sha256')]; assert all(path.is_file() and path.stat().st_size > 0 for path in files); assert all(zipfile.ZipFile(path).namelist() for path in files[:2])"
@@ -63,6 +65,8 @@ jobs:
         run: python tests/_mcp_handshake.py
       - working-directory: top-journal-search-lists
         run: python tests/_mcpb_handshake.py
+      - working-directory: top-journal-search-lists
+        run: python tests/_mcpb_raw_handshake.py
       - working-directory: top-journal-search-lists
         run: python scripts/build_release.py --output release
       - working-directory: top-journal-search-lists

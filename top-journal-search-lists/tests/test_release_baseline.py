@@ -23,6 +23,7 @@ def test_ci_runs_full_non_live_release_matrix(skill_root: Path) -> None:
         "scripts/catalog_lookup.py validate",
         "tests/_mcp_handshake.py",
         "tests/_mcpb_handshake.py",
+        "tests/_mcpb_raw_handshake.py",
         "scripts/build_release.py --output release",
         "zipfile.ZipFile",
         "installer:",
