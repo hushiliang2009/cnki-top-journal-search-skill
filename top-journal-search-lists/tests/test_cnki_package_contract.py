@@ -189,8 +189,10 @@ def test_live_smoke_speaks_the_current_async_session_protocol(skill_root: Path) 
     }
     assert result.payload["records"][0]["journal_raw"] == "经济研究"
     assert result.payload["records"][0]["publication_year"] == 2024
-    for key in result.payload:
-        assert not any(token in key.casefold() for token in smoke.FORBIDDEN_FIELD_TOKENS)
+
+    # 证据已过脱敏守卫（否则 run_smoke 内就抛了）；这里正向确认守卫会拦下嵌套的敏感键。
+    with pytest.raises(ValueError, match="敏感字段"):
+        smoke._assert_no_sensitive_fields({"records": [{"detail_url": "https://example.invalid"}]})
 
 
 @pytest.mark.parametrize(
