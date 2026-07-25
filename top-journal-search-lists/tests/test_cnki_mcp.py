@@ -124,7 +124,7 @@ def test_server_announces_product_version_not_sdk_version() -> None:
     from cnki_search import __version__
 
     mcp = CnkiMcpServer(service=FakeService()).build_fastmcp(FastMCP)
-    assert mcp._mcp_server.version == __version__ == "0.3.0"
+    assert mcp._mcp_server.version == __version__ == "0.3.1"
 
 
 def test_shutdown_does_not_block_on_queued_work() -> None:
