@@ -152,6 +152,8 @@ WSL 中的安装属于 Linux 侧安装，绝不会配置 Windows ChatGPT Desktop
 
 安装器复制完整 Skill，创建独立 Python 运行环境，安装 `mcp` 与 `playwright`，并执行 `python -m playwright install chromium chromium-headless-shell`。依赖安装后，安装器会进行导入检查、临时 Chromium 的离线启动和关闭，以及 MCP 自检；不会打开 CNKI 或其他网址。修改已有内容前会生成带时间戳的备份；安装失败会恢复原有 Skill 和配置，不删除 Zotero、ai4scholar 等其他 MCP 服务。安装完整成功后，每个目标仅保留最近 3 份由安装器生成的时间戳备份。
 
+旧版 Skill 的备份写入 `<Home>/backups/skills/top-journal-search-lists.backup-<时间戳>`，位于 `skills/` 扫描目录之外。客户端按 `<Home>/skills/*/SKILL.md` 发现技能且不过滤目录名，备份若留在 `skills/` 内会被当作一个同名同描述的独立技能加载。配置文件的备份仍与原文件同目录（如 `~/.claude.json.backup-<时间戳>`），那些路径不在扫描范围内。
+
 ## 安装位置与配置文件
 
 Codex 安装到 Codex Home 下的 `skills/top-journal-search-lists`，配置文件为 `config.toml`。Claude 安装到 Claude Home 下的 `skills/top-journal-search-lists`。只要选择 Codex，运行环境位于 Codex Home 下的 `runtimes/cnki-search`；仅选择 Claude 目标时，运行环境位于 Claude Home 下的 `runtimes/cnki-search`。Claude Code 配置文件为 `~/.claude.json`，Claude Desktop 使用其平台对应的 `claude_desktop_config.json`。

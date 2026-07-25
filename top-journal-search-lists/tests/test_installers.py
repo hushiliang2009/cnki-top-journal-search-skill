@@ -380,7 +380,10 @@ def test_powershell_success_runs_self_checks_and_retains_exactly_three_backups(
     assert commands.index("-m playwright install") < commands.index("import mcp, playwright")
     assert commands.index("import mcp, playwright") < commands.index("import cnki_search.mcp_server")
     assert commands.index("import cnki_search.mcp_server") < commands.index("chromium.launch")
-    assert len(list(original_skill.parent.glob("top-journal-search-lists.backup-????????-??????"))) == 3
+    skill_backups = codex_home / "backups" / "skills"
+    assert len(list(skill_backups.glob("top-journal-search-lists.backup-????????-??????"))) == 3
+    # 备份必须留在 skills 扫描目录之外，否则会被当作同名技能加载
+    assert not list(original_skill.parent.glob("top-journal-search-lists.backup-*"))
     assert len(list(config.parent.glob("config.toml.backup-????????-??????"))) == 3
 
 
@@ -416,7 +419,10 @@ def test_shell_success_runs_self_checks_and_retains_exactly_three_backups(
     assert "import mcp, playwright" in commands
     assert "import cnki_search.mcp_server" in commands
     assert "chromium.launch" in commands
-    assert len(list(original_skill.parent.glob("top-journal-search-lists.backup-????????-??????"))) == 3
+    skill_backups = codex_home / "backups" / "skills"
+    assert len(list(skill_backups.glob("top-journal-search-lists.backup-????????-??????"))) == 3
+    # 备份必须留在 skills 扫描目录之外，否则会被当作同名技能加载
+    assert not list(original_skill.parent.glob("top-journal-search-lists.backup-*"))
     assert len(list(config.parent.glob("config.toml.backup-????????-??????"))) == 3
 
 

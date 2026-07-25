@@ -83,14 +83,21 @@ cleanup_transaction() {
 }
 trap cleanup_transaction 0
 
+# 备份必须落在 skills 扫描目录之外：客户端按 <Home>/skills/*/SKILL.md 发现技能，
+# 不过滤目录名，原地改名的 top-journal-search-lists.backup-* 会被当作同名同描述的
+# 独立技能加载，旧版本行为随之复活。备份改写到 <Home>/backups/skills/ 下。
 install_skill() {
   destination=$1
+  backup_root=$2
   mkdir -p "$(dirname -- "$destination")"
   if [ -e "$destination" ]; then
-    backup="$destination.backup-$timestamp"
+    leaf=$(basename -- "$destination")
+    mkdir -p "$backup_root"
+    backup="$backup_root/$leaf.backup-$timestamp"
     mv "$destination" "$backup"
     printf '%s|%s\n' "$destination" "$backup" >> "$transaction_dir/moved_skills"
-    printf '%s\n' "$destination" >> "$transaction_dir/backup_targets"
+    # rotate_backups 按 dirname/basename 推导备份位置，记入备份根下的前缀路径即可复用
+    printf '%s\n' "$backup_root/$leaf" >> "$transaction_dir/backup_targets"
   else
     printf '%s\n' "$destination" >> "$transaction_dir/created_skills"
   fi
@@ -138,10 +145,10 @@ rotate_backups() {
 codex_skill="$codex_home/skills/top-journal-search-lists"
 claude_skill="$claude_home/skills/top-journal-search-lists"
 if [ "$codex" = true ]; then
-  install_skill "$codex_skill"
+  install_skill "$codex_skill" "$codex_home/backups/skills"
 fi
 if [ "$claude_code" = true ] || [ "$claude_desktop" = true ]; then
-  install_skill "$claude_skill"
+  install_skill "$claude_skill" "$claude_home/backups/skills"
 fi
 if [ "$codex" = true ]; then
   installed_skill="$codex_skill"

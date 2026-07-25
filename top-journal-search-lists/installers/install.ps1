@@ -47,14 +47,22 @@ function Backup-Config([string]$Path) {
     }
 }
 
-function Install-SkillCopy([string]$Destination) {
+# Backups must land outside the skills scan root. Clients discover skills through
+# <Home>/skills/*/SKILL.md without filtering directory names, so an in-place
+# top-journal-search-lists.backup-* is loaded as a separate skill carrying the same
+# name and description, reviving the old version. Back up under <Home>/backups/skills.
+function Install-SkillCopy([string]$Destination, [string]$BackupRoot) {
     $parent = Split-Path -Parent $Destination
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
     if (Test-Path -LiteralPath $Destination) {
-        $backup = "$Destination.backup-$TimeStamp"
+        $leaf = Split-Path -Leaf $Destination
+        New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
+        $backup = Join-Path $BackupRoot "$leaf.backup-$TimeStamp"
         Move-Item -LiteralPath $Destination -Destination $backup -ErrorAction Stop
         $script:MovedSkills += [pscustomobject]@{ Path = $Destination; Backup = $backup }
-        $script:BackupTargets += $Destination
+        # Rotate-Backups derives the location from dirname/basename, so recording the
+        # prefix path under the backup root keeps it reusable as-is.
+        $script:BackupTargets += (Join-Path $BackupRoot $leaf)
     }
     else {
         $script:CreatedSkills += $Destination
@@ -115,8 +123,8 @@ $Succeeded = $false
 try {
     $CodexSkill = Join-Path $CodexHome 'skills\top-journal-search-lists'
     $ClaudeSkill = Join-Path $ClaudeHome 'skills\top-journal-search-lists'
-    if ($Codex) { Install-SkillCopy $CodexSkill }
-    if ($ClaudeCode -or $ClaudeDesktop) { Install-SkillCopy $ClaudeSkill }
+    if ($Codex) { Install-SkillCopy $CodexSkill (Join-Path $CodexHome 'backups\skills') }
+    if ($ClaudeCode -or $ClaudeDesktop) { Install-SkillCopy $ClaudeSkill (Join-Path $ClaudeHome 'backups\skills') }
     $InstalledSkill = if ($Codex) { $CodexSkill } else { $ClaudeSkill }
 
     $RuntimeRoot = if ($Codex) { Join-Path $CodexHome 'runtimes\cnki-search' } else { Join-Path $ClaudeHome 'runtimes\cnki-search' }
