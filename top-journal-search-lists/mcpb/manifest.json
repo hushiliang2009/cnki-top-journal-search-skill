@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "cnki-search",
   "display_name": "CNKI Public Theme Search",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Public CNKI theme search with master-journal classification; no login or downloads.",
   "author": {
     "name": "Top Journal Search Lists"

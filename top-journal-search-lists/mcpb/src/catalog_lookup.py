@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import unicodedata
@@ -9,10 +10,29 @@ from pathlib import Path
 from typing import Any
 
 
+CATALOG_FILENAME = "Academic_Journal_Master_Directory_20260715.md"
+
+
+def _resolve_default_catalog() -> Path:
+    """按实际布局定位综合期刊目录，兼容 Skill 与 MCPB 两种目录深度。
+
+    Skill 布局：scripts/catalog_lookup.py → <root>/references/
+    MCPB 布局：mcpb/src/catalog_lookup.py → mcpb/src/references/
+    两者相差一层，固定深度推导必然有一种失败。
+    """
+    configured = os.environ.get("CNKI_CATALOG_PATH")
+    if configured and Path(configured).is_file():
+        return Path(configured)
+    here = Path(__file__).resolve().parent
+    for base in (here, here.parent):
+        candidate = base / "references" / CATALOG_FILENAME
+        if candidate.is_file():
+            return candidate
+    return here.parent / "references" / CATALOG_FILENAME
+
+
 SKILL_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CATALOG = (
-    SKILL_ROOT / "references" / "Academic_Journal_Master_Directory_20260715.md"
-)
+DEFAULT_CATALOG = _resolve_default_catalog()
 EXPECTED_GROUPS = [
     "economics_top5",
     "ncs_pnas",
@@ -41,7 +61,9 @@ TOP5 = [
 ]
 CATALOG_VERSION = "2026-07-15"
 CatalogIndex = dict[str, list[dict[str, Any]]]
-_DISPLAY_SUFFIX = re.compile(r"\s*(?:\(网络首发\)|\[网络首发\]|【网络首发】|网络首发)\s*$")
+# 不带前后 \s* 量词：两端的 \s* 与末尾锚点组合会产生二次方回溯。
+# 调用方先 strip，再匹配后缀，行为等价且是线性的。
+_DISPLAY_SUFFIX = re.compile(r"(?:\(网络首发\)|\[网络首发\]|【网络首发】|网络首发)$")
 GENERIC_NCS_LABELS = (
     "五大",
     "部分",
@@ -59,9 +81,41 @@ def normalize_title(value: str) -> str:
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value)
 
 
+def _normalize_conservative(value: str) -> str:
+    """保留句点等可区分真实同形刊名的少量符号。"""
+    value = unicodedata.normalize("NFKC", value).casefold().replace("&", " and ")
+    value = re.sub(r"\s+", "", value)
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff.]+", "", value)
+
+
+def _title_signatures(title: str) -> tuple[str, str]:
+    normalized = normalize_title(title)
+    conservative = _normalize_conservative(title)
+    if normalized.startswith("the") and len(normalized) > 3:
+        normalized = normalized[3:]
+    if conservative.startswith("the") and len(conservative) > 3:
+        conservative = conservative[3:]
+    return normalized, conservative
+
+
+def variant_key(title: str) -> str:
+    """\u8fd4\u56de\u6bd4 normalize_title \u66f4\u4fdd\u5b88\u7684\u201c\u4e66\u5199\u53d8\u4f53\u952e\u201d\u3002
+
+    normalize_title \u4f1a\u5265\u6389\u5168\u90e8\u6807\u70b9\u4e0e\u7a7a\u767d\uff0c\u56e0\u6b64\u4e24\u672c**\u771f\u6b63\u4e0d\u540c**\u7684\u671f\u520a
+    \uff08\u5982 `A.B` \u4e0e `AB`\uff09\u4f1a\u843d\u8fdb\u540c\u4e00\u4e2a\u952e\uff0c\u5fc5\u987b\u4fdd\u7559\u4e3a ambiguous\u3002
+    variant_key \u53ea\u5f52\u5e76\u540c\u4e00\u672c\u520a\u7684\u4e66\u5199\u5dee\u5f02\u2014\u2014\u51a0\u8bcd The \u6709\u65e0\u3001& \u4e0e and\u3001
+    \u526f\u6807\u9898\u5206\u9694\u7b26 : / - / ,\u3001\u5168\u534a\u89d2\u62ec\u53f7\u4e0e\u5927\u5c0f\u5199\u2014\u2014\u4ece\u800c\u628a\u201c\u540c\u520a\u53d8\u4f53\u201d
+    \u4e0e\u201c\u771f\u6b67\u4e49\u201d\u533a\u5206\u5f00\u3002
+    """
+    value = unicodedata.normalize("NFKC", title).casefold().replace("&", " and ")
+    value = re.sub(r"[:\uff1a,\uff0c\-\u2013\u2014/()\uff08\uff09\[\]]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[4:] if value.startswith("the ") else value
+
+
 def _read_catalog(path: Path) -> str:
     if not path.is_file():
-        raise FileNotFoundError(f"综合期刊目录不存在：{path}")
+        raise FileNotFoundError(f"综合期刊目录不存在：{CATALOG_FILENAME}")
     return path.read_text(encoding="utf-8-sig").replace("\r\n", "\n")
 
 
@@ -112,24 +166,33 @@ def _clean_title(raw: str) -> str:
     raw = re.sub(r"^\d+\.\s+", "", raw)
     raw = re.sub(r"^\s*\*+\s*", "", raw)
     raw = raw.replace("**", "").strip()
-    raw = re.split(r"\s+-\s+|：", raw, maxsplit=1)[0].strip()
-    if re.match(r"^[A-Za-z]", raw):
-        raw = re.sub(r"\s+[（(][^（）()]+[）)]$", "", raw)
+    # 仅将精确 ASCII 分隔符 " - " 后的中文视为目录说明。没有中文说明时，
+    # 括号、方括号、双语并列刊名及其他破折号形式均属于刊名本身。
+    dash = re.match(r"^(?P<title>.+?) - (?P<description>[一-鿿].*)$", raw)
+    if dash:
+        raw = dash.group("title").strip()
+        raw = re.sub(r"\s*(?:[（(][^（）()]+[）)]|\[[^\]]+\]|【[^】]+】)$", "", raw)
     return raw.strip(" .；;，,")
 
 
+def _catalog_source_title(raw: str) -> str:
+    """移除目录行末的英文缩写或中文注释，不改变普通标题清洗语义。"""
+    title = _clean_title(raw)
+    if re.match(r"^[A-Za-z]", title):
+        title = re.sub(r"\s*(?:[（(][^（）()]+[）)]|\[[^\]]+\]|【[^】]+】)$", "", title)
+    return title.strip()
+
+
 def _keys_for_title(title: str) -> set[str]:
-    key = normalize_title(title)
-    keys = {key} if key else set()
-    if key.startswith("the") and len(key) > 6:
-        keys.add(key[3:])
-    return keys
+    normalized, conservative = _title_signatures(title)
+    keys = {normalized, conservative}
+    return {key for key in keys if key and len(key) >= 2}
 
 
 def clean_lookup_title(value: str) -> tuple[str, str]:
     """Remove only the supported online-first display suffix."""
     normalized = unicodedata.normalize("NFKC", value).strip()
-    cleaned = _DISPLAY_SUFFIX.sub("", normalized).strip()
+    cleaned = _DISPLAY_SUFFIX.sub("", normalized.rstrip()).strip()
     method = "controlled_display_suffix" if cleaned != normalized else "normalized_exact"
     return cleaned, method
 
@@ -149,12 +212,18 @@ def _add(
     if not keys or max(map(len, keys)) < 2:
         return
 
+    # 用 variant_key 而非字符串精确相等判断“是否同一本刊”：同一本刊的不同
+    # 书写形式（The 有无、& / and、副标题分隔符、全半角括号）会落进同一个
+    # lookup key，若按精确相等去重则永远命中不到，会生成两个条目并被
+    # lookup_journal 判为 ambiguous。
+    normalized_signature, merge_signature = _title_signatures(title)
     existing = next(
         (
             candidate
             for key in keys
             for candidate in index.get(key, [])
-            if candidate["matched_title"] == title
+            if candidate.get("normalized_signature") == normalized_signature
+            and candidate.get("merge_signature") == merge_signature
         ),
         None,
     )
@@ -166,6 +235,8 @@ def _add(
             "source_catalogs": [],
             "subject_categories": [],
             "ncs_internal_rank": ncs_internal_rank,
+            "normalized_signature": normalized_signature,
+            "merge_signature": merge_signature,
         }
     if source not in existing["source_catalogs"]:
         existing["source_catalogs"].append(source)
@@ -204,7 +275,7 @@ def _index_ncs(index: CatalogIndex, text: str) -> None:
                 continue
             _add(
                 index,
-                candidate,
+                _catalog_source_title(candidate),
                 2,
                 "ncs_pnas",
                 "NCS_PNAS_Directory.md",
@@ -229,7 +300,7 @@ def _index_top(index: CatalogIndex, text: str) -> None:
         elif line.startswith("* "):
             _add(
                 index,
-                line,
+                _catalog_source_title(line),
                 current_level,
                 current_group,
                 "Top_Academic_Journals_all.md",
@@ -320,13 +391,29 @@ def lookup_journal(index: CatalogIndex, journal: str) -> dict[str, Any]:
         for candidate in index.get(key, []):
             if candidate not in candidates:
                 candidates.append(candidate)
+    query_signature = _title_signatures(cleaned)
+    normalized_collisions = [
+        candidate
+        for candidate in candidates
+        if candidate.get("normalized_signature") == query_signature[0]
+    ]
+    exact_candidates = [
+        candidate
+        for candidate in candidates
+        if (
+            candidate.get("normalized_signature"),
+            candidate.get("merge_signature"),
+        ) == query_signature
+    ]
+    if exact_candidates and len(normalized_collisions) <= len(exact_candidates):
+        candidates = exact_candidates
     base = {
         "input": journal,
         "normalized": normalize_title(cleaned),
         "catalog_version": CATALOG_VERSION,
         "manual_review_required": True,
     }
-    empty = {
+    empty: dict[str, Any] = {
         "matched_title": None,
         "priority_level": None,
         "priority_group": None,
@@ -336,7 +423,11 @@ def lookup_journal(index: CatalogIndex, journal: str) -> dict[str, Any]:
     }
     if not candidates:
         return base | {"status": "unmatched", "match_method": None, "candidates": [], **empty}
-    if len(candidates) > 1:
+    signatures = {
+        (candidate.get("normalized_signature"), candidate.get("merge_signature"))
+        for candidate in candidates
+    }
+    if len(signatures) > 1:
         return base | {
             "status": "ambiguous",
             "match_method": None,
@@ -372,12 +463,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
-    if args.command == "validate":
-        result: Any = validate_catalog(args.catalog)
-    else:
-        result = lookup_journals(args.catalog, args.journals)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    try:
+        if args.command == "validate":
+            result: Any = validate_catalog(args.catalog)
+        else:
+            result = lookup_journals(args.catalog, args.journals)
+    except (FileNotFoundError, ValueError) as exc:
+        # 面向普通用户的 CLI 不应抛裸 traceback
+        print(f"错误：{exc}", file=sys.stderr)
+        return 1
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

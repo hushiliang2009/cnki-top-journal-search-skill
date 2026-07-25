@@ -13,6 +13,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 pytest-cache-files-*/
+.pytest-runtime/
 .coverage
 htmlcov/
 
@@ -50,10 +51,8 @@ user-data-dir/
 *.tar
 *.gz
 
-# Generated output; keep installer sources under version control
+# Generated output
 outputs/*
-!outputs/install.ps1
-!outputs/install.sh
 
 # Working and audit material stays local
 work/

@@ -25,7 +25,8 @@ top-journal-search-lists/
 
 | 项目 | 安装后的名称 |
 | --- | --- |
-| Skill 显示名称 | Top Journal and Public CNKI Search |
+| Skill 显示名称（Claude Code、Codex CLI） | `top-journal-search-lists`，取自 `SKILL.md` 的 `name` 字段 |
+| Skill 显示名称（ChatGPT Desktop 中的 Codex） | Top Journal and Public CNKI Search，取自 `agents/openai.yaml` |
 | Skill 目录 | `top-journal-search-lists` |
 | 调用方式 | `$top-journal-search-lists` |
 | MCP 服务 | `cnki-search` |
@@ -43,17 +44,21 @@ top-journal-search-lists/
 
 ## 安装前准备
 
-- 安装 Python 3.11 或更高版本，以及 Git；
-- 安装 Chrome、Edge 或 Chromium。没有兼容浏览器时，可安装 Playwright Chromium；
-- 私有仓库需要先以具有访问权限的账号完成 GitHub 认证；
-- 在 Windows、macOS 或 Linux 的终端中克隆并进入已验证分支：
+- 安装 Python 3.11 或更高版本，以及 Git。低于 3.11 时安装器会拒绝安装并给出提示；Windows 安装器可用 `-PythonExe` 指定解释器，macOS/Linux 安装器读取 `CNKI_PYTHON`，未指定时分别使用 `python` 和 `python3`；
+- 安装 Chrome、Edge 或 Chromium。没有兼容浏览器时安装 Playwright Chromium，安装器会自动执行：
 
 ```sh
-git clone --branch agent/cnki-new-entry-only --single-branch https://github.com/hushiliang2009/cnki-top-journal-search-skill.git
-cd cnki-top-journal-search-skill
+python -m playwright install chromium chromium-headless-shell
 ```
 
-在该分支合并到默认分支后可省略 `--branch agent/cnki-new-entry-only --single-branch`。
+  两个包都要装：只装 `chromium` 不会一并落地 headless shell，无头模式仍会启动失败。
+- 私有仓库需要先以具有访问权限的账号完成 GitHub 认证；
+- 在 Windows、macOS 或 Linux 的终端中克隆并进入仓库：
+
+```sh
+git clone https://github.com/hushiliang2009/cnki-top-journal-search-skill.git
+cd cnki-top-journal-search-skill
+```
 
 ## Windows 安装指南
 
@@ -145,7 +150,7 @@ WSL 中的安装属于 Linux 侧安装，绝不会配置 Windows ChatGPT Desktop
 
 ## 安装器实际执行的操作
 
-安装器复制完整 Skill，创建独立 Python 运行环境，安装 `mcp` 与 `playwright`，并仅向所选客户端增量写入 `cnki-search` MCP 配置。修改已有配置前会生成带时间戳的备份，不删除 Zotero、ai4scholar 等其他 MCP 服务。
+安装器复制完整 Skill，创建独立 Python 运行环境，安装 `mcp` 与 `playwright`，并执行 `python -m playwright install chromium chromium-headless-shell`。依赖安装后，安装器会进行导入检查、临时 Chromium 的离线启动和关闭，以及 MCP 自检；不会打开 CNKI 或其他网址。修改已有内容前会生成带时间戳的备份；安装失败会恢复原有 Skill 和配置，不删除 Zotero、ai4scholar 等其他 MCP 服务。安装完整成功后，每个目标仅保留最近 3 份由安装器生成的时间戳备份。
 
 ## 安装位置与配置文件
 
@@ -208,3 +213,20 @@ python3 -m pytest -p no:cacheprovider top-journal-search-lists/tests -q
 ## 异常处理
 
 CNKI 出现验证码、登录页、401、403、429 或页面结构变化时，立即停止当前检索；不切换入口、代理或网络出口。ai4scholar 不可用时，报告具体工具错误，不以普通网页搜索替代 MCP 结果。目录缺失或校验失败时，停止期刊层级判定。
+
+### CNKI 返回 `challenge_detected` 怎么办
+
+这是**知网站点侧的正常安全防护**，不是安装故障：重装 Skill、重试、更换网络都不会改变。
+
+CNKI 检索在本工具中是尽力而为的补充能力。知网对自动化访问有站点级策略，在本工具的边界内（不登录、不使用你的浏览器配置文件、不改 User-Agent、不用代理、不做任何检测规避）可能长期无法取得结果。
+
+遇到时请：
+
+1. 改用 ai4scholar 完成检索（它本就是主要来源）；
+2. 需要中文近期文献时，按主题词自行在知网网页端检索，再把篇名交给本工具做期刊判级：
+
+```text
+python top-journal-search-lists/scripts/catalog_lookup.py lookup "期刊名A" "期刊名B"
+```
+
+3. 在成果里如实写明"CNKI 补充检索未能执行"，不要把它当作"该主题无中文文献"。

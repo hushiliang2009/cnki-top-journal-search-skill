@@ -1,3 +1,7 @@
+import asyncio
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -6,6 +10,9 @@ import cnki_search.session as session_module
 from cnki_search.browser import BrowserFactory
 from cnki_search.models import SearchStatus
 from cnki_search.session import PublicCnkiSession
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_public_session_uses_only_cnki_home() -> None:
@@ -21,6 +28,7 @@ def test_public_session_uses_only_cnki_home() -> None:
     [
         ("https://kns.cnki.net/captcha", "请完成拼图验证", SearchStatus.CHALLENGE_DETECTED),
         ("https://login.cnki.net/", "用户登录", SearchStatus.LOGIN_REQUIRED),
+        ("https://kns.cnki.net/kns8s/authserver/login", "普通认证页", SearchStatus.LOGIN_REQUIRED),
         ("https://kns.cnki.net/", "403 Forbidden", SearchStatus.FORBIDDEN),
         ("https://kns.cnki.net/", "访问过于频繁", SearchStatus.RATE_LIMITED),
         ("https://kns.cnki.net/", "未检索到相关文献", SearchStatus.NO_RESULTS),
@@ -46,7 +54,7 @@ class FakePlaywright:
 
 def test_browser_launch_is_headless_and_has_no_persistent_state() -> None:
     fake = FakePlaywright()
-    BrowserFactory(fake).launch_ephemeral()
+    asyncio.run(BrowserFactory(fake).launch_ephemeral())
     assert fake.chromium.launch_kwargs["headless"] is True
     assert fake.chromium.launch_kwargs["args"] == ["--no-proxy-server", "--proxy-bypass-list=*"]
     assert "user_data_dir" not in fake.chromium.launch_kwargs
@@ -95,7 +103,7 @@ def test_session_converts_playwright_style_timeout_and_closes_initialization_res
     session = PublicCnkiSession(browser_factory=Factory())
     session._playwright = playwright
     with pytest.raises(RuntimeError) as raised:
-        session.__enter__()
+        asyncio.run(session.__aenter__())
     assert type(raised.value).__name__ == "TransientBrowserError"
     assert page.closed and context.closed and browser.closed and playwright.closed
     assert session.page is None and session.context is None and session.browser is None
@@ -111,6 +119,124 @@ def test_challenge_classifier_accepts_captcha_url_without_generic_text() -> None
     assert session_module.classify_public_search_state(
         url="https://kns.cnki.net/captcha", title="", visible_text="请稍候"
     ) is SearchStatus.CHALLENGE_DETECTED
+
+
+@pytest.mark.parametrize(
+    ("url", "title", "text", "http_status", "expected"),
+    [
+        (
+            "https://kns.cnki.net/kns8s/defaultresult/index",
+            "拒绝访问 用户登录 统一身份认证",
+            "题名 来源 访问过于频繁 无权访问 拒绝访问 用户登录 统一身份认证",
+            200,
+            SearchStatus.SUCCESS,
+        ),
+        (
+            "https://kns.cnki.net/kns8s/defaultresult/index",
+            "中国知网",
+            "题名 来源",
+            403,
+            SearchStatus.FORBIDDEN,
+        ),
+        (
+            "https://kns.cnki.net/verify/home",
+            "安全验证",
+            "",
+            200,
+            SearchStatus.CHALLENGE_DETECTED,
+        ),
+        (
+            "https://www.cnki.net/",
+            "中国知网",
+            "中国知网公开首页",
+            200,
+            SearchStatus.PAGE_CONTRACT_CHANGED,
+        ),
+        (
+            "https://kns.cnki.net/kns8s/defaultresult/index",
+            "中国知网",
+            "普通页面说明：请完成安全验证后可继续使用服务",
+            200,
+            SearchStatus.PAGE_CONTRACT_CHANGED,
+        ),
+    ],
+)
+def test_public_state_truth_table_prioritizes_status_and_result_structure(
+    url: str, title: str, text: str, http_status: int, expected: SearchStatus,
+) -> None:
+    assert session_module.classify_public_search_state(
+        url=url,
+        title=title,
+        visible_text=text,
+        http_status=http_status,
+        has_result_table=expected is SearchStatus.SUCCESS,
+    ) is expected
+
+
+def test_state_truth_table_runs_in_both_runtime_layouts() -> None:
+    roots = (ROOT / "scripts", ROOT / "mcpb" / "src")
+    program = """
+from cnki_search.models import SearchStatus
+from cnki_search.session import classify_public_search_state
+
+result_url = 'https://kns.cnki.net/kns8s/defaultresult/index'
+assert classify_public_search_state(
+        url=result_url,
+        title='拒绝访问 用户登录',
+        visible_text='题名 来源 无权访问 访问过于频繁 用户登录',
+        http_status=200,
+        has_result_table=True,
+    ) is SearchStatus.SUCCESS
+assert classify_public_search_state(
+    url='https://kns.cnki.net/verify/home', title='安全验证', visible_text='', http_status=200,
+) is SearchStatus.CHALLENGE_DETECTED
+assert classify_public_search_state(
+    url=result_url, title='中国知网', visible_text='题名 来源', http_status=403,
+) is SearchStatus.FORBIDDEN
+assert classify_public_search_state(
+    url='https://www.cnki.net/', title='中国知网', visible_text='首页', http_status=200,
+) is SearchStatus.PAGE_CONTRACT_CHANGED
+"""
+    for root in roots:
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=root,
+            env=os.environ | {"PYTHONPATH": str(root)},
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
+def test_result_table_structure_controls_success_and_body_restriction_fallback_in_both_layouts() -> None:
+    roots = (ROOT / "scripts", ROOT / "mcpb" / "src")
+    program = """
+from cnki_search.models import SearchStatus
+from cnki_search.session import SearchSnapshot, classify_public_search_state
+
+url = 'https://kns.cnki.net/kns8s/defaultresult/index'
+without_table = SearchSnapshot('<main></main>', url, '中国知网', '题名 来源', 200)
+assert without_table.has_result_table is False
+assert classify_public_search_state(**without_table.state_arguments()) is SearchStatus.PAGE_CONTRACT_CHANGED
+with_table = SearchSnapshot(
+    '<table class="result-table-list"><tr><td>题名</td></tr></table>',
+    url,
+    '中国知网',
+    '无权访问 访问过于频繁',
+    200,
+)
+assert with_table.has_result_table is True
+assert classify_public_search_state(**with_table.state_arguments()) is SearchStatus.SUCCESS
+"""
+    for root in roots:
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=root,
+            env=os.environ | {"PYTHONPATH": str(root)},
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
 
 
 class RestrictedPage:
@@ -149,6 +275,10 @@ class RestrictedPage:
         raise AssertionError("受限首页不得访问主题框")
 
 
+async def _search_with_session(session: PublicCnkiSession, query: str):
+    async with session:
+        return await session.search(query)
+
 def test_session_returns_initial_restriction_before_theme_contract_and_closes_resources() -> None:
     page = RestrictedPage("403 Forbidden")
     context = _Closable()
@@ -161,13 +291,10 @@ def test_session_returns_initial_restriction_before_theme_contract_and_closes_re
             return browser
 
     session = PublicCnkiSession(browser_factory=Factory())
-    with session:
-        snapshot = session.search("主题")
-        assert session_module.classify_public_search_state(**snapshot.state_arguments()) is SearchStatus.FORBIDDEN
+    snapshot = asyncio.run(_search_with_session(session, "主题"))
+    assert session_module.classify_public_search_state(**snapshot.state_arguments()) is SearchStatus.FORBIDDEN
     assert page.box_accessed is False
     assert context.closed and browser.closed
-
-
 @pytest.mark.parametrize(
     ("response_status", "expected"),
     [(403, SearchStatus.FORBIDDEN), (429, SearchStatus.RATE_LIMITED)],
@@ -186,9 +313,8 @@ def test_session_uses_initial_response_status_before_theme_contract(
             return browser
 
     session = PublicCnkiSession(browser_factory=Factory())
-    with session:
-        snapshot = session.search("主题")
-        assert snapshot.http_status == response_status
-        assert session_module.classify_public_search_state(**snapshot.state_arguments()) is expected
+    snapshot = asyncio.run(_search_with_session(session, "主题"))
+    assert snapshot.http_status == response_status
+    assert session_module.classify_public_search_state(**snapshot.state_arguments()) is expected
     assert page.box_accessed is False
     assert context.closed and browser.closed

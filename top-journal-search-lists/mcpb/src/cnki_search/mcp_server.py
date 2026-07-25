@@ -1,57 +1,67 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial, wraps
-from typing import Any, Callable
+from typing import Annotated, Any
 
+from pydantic import Field
+
+from . import __version__
 from .service import CnkiPublicSearchService
 
-
 REQUIRED_TOOLS = ["cnki_search"]
-
+MIN_LIMIT = 1
+MAX_LIMIT = 20
 
 class CnkiMcpServer:
     def __init__(self, service: CnkiPublicSearchService | None = None) -> None:
         self.service = service or CnkiPublicSearchService()
-        self._tool_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cnki-public")
+        self._tasks: set[asyncio.Task[Any]] = set()
         self._shutdown = False
 
     def tool_names(self) -> list[str]:
         return list(REQUIRED_TOOLS)
 
-    def cnki_search(self, query: str, limit: int = 20) -> dict[str, Any]:
-        return self.service.search(query, limit).to_dict()
-
-    def _async_tool(self, function: Callable[..., dict[str, Any]]) -> Callable[..., Any]:
-        @wraps(function)
-        async def invoke(*args: Any, **kwargs: Any) -> dict[str, Any]:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(self._tool_executor, partial(function, *args, **kwargs))
-
-        return invoke
+    async def cnki_search(self, query: str, limit: int = MAX_LIMIT) -> dict[str, Any]:
+        if self._shutdown:
+            raise RuntimeError("CNKI MCP server has been shut down")
+        task = asyncio.current_task()
+        if task is not None:
+            self._tasks.add(task)
+        try:
+            return (await self.service.search(query, limit)).to_dict()
+        finally:
+            if task is not None:
+                self._tasks.discard(task)
 
     def shutdown(self) -> None:
         if self._shutdown:
             return
         self._shutdown = True
         try:
-            self._tool_executor.submit(lambda: None).result()
-        finally:
-            self._tool_executor.shutdown(wait=True)
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        for task in tuple(self._tasks):
+            if task is not current and not task.done():
+                task.cancel()
 
     def build_fastmcp(self, fastmcp_class: type | None = None) -> Any:
         if fastmcp_class is None:
             from mcp.server.fastmcp import FastMCP
-
             fastmcp_class = FastMCP
         mcp = fastmcp_class("CNKI Public Search")
-        mcp.tool(
-            name="cnki_search",
-            description="从中国知网公开首页执行固定主题检索，并按主期刊目录标注第一页期刊论文。",
-        )(self._async_tool(self.cnki_search))
-        return mcp
+        lowlevel = getattr(mcp, "_mcp_server", None)
+        if lowlevel is not None:
+            lowlevel.version = __version__
 
+        async def cnki_search(
+            query: Annotated[str, Field(min_length=1, pattern=r".*\S.*")],
+            limit: Annotated[int, Field(ge=MIN_LIMIT, le=MAX_LIMIT)] = MAX_LIMIT,
+        ) -> dict[str, Any]:
+            return await self.cnki_search(query, limit)
+
+        mcp.tool(name="cnki_search", description="从中国知网公开首页执行固定主题检索，并标注第一页期刊论文。")(cnki_search)
+        return mcp
 
 def main() -> None:
     server = CnkiMcpServer()
@@ -59,7 +69,6 @@ def main() -> None:
         server.build_fastmcp().run(transport="stdio")
     finally:
         server.shutdown()
-
 
 if __name__ == "__main__":
     main()

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
-from .browser import BrowserFactory, start_playwright
+from .browser import BrowserFactory, await_maybe, start_playwright
 from .models import SearchStatus
 from .search import PageContractChanged, PublicThemeSearchRunner, validate_public_theme_search_contract
 
@@ -12,14 +12,15 @@ from .search import PageContractChanged, PublicThemeSearchRunner, validate_publi
 CNKI_HOME_URL = "https://www.cnki.net/"
 CNKI_RESULT_HOST = "kns.cnki.net"
 CNKI_RESULT_PATH_PREFIX = "/kns8s/defaultresult/"
+PUBLIC_RESULT_TABLE_MARKER = "result-table-list"
 
 
 class TransientBrowserError(RuntimeError):
-    """可安全重试一次的公开浏览器访问失败。"""
+    pass
 
 
 def _is_playwright_timeout(error: BaseException) -> bool:
-    return any(
+    return isinstance(error, TimeoutError) or any(
         item.__name__ == "TimeoutError" and item.__module__.startswith("playwright.")
         for item in type(error).__mro__
     )
@@ -33,51 +34,42 @@ class SearchSnapshot:
     visible_text: str
     http_status: int | None = None
 
+    @property
+    def has_result_table(self) -> bool:
+        return PUBLIC_RESULT_TABLE_MARKER in self.html
+
     def state_arguments(self) -> dict[str, Any]:
-        return {
-            "url": self.url,
-            "title": self.title,
-            "visible_text": self.visible_text,
-            "http_status": self.http_status,
-        }
+        return {"url": self.url, "title": self.title, "visible_text": self.visible_text,
+                "http_status": self.http_status, "has_result_table": self.has_result_table}
 
 
-def classify_public_search_state(
-    *, url: str, title: str, visible_text: str, http_status: int | None = None,
-) -> SearchStatus:
-    identity = f"{url}\n{title}\n{visible_text}".casefold()
+def classify_public_search_state(*, url: str, title: str, visible_text: str,
+                                 http_status: int | None = None,
+                                 has_result_table: bool = False) -> SearchStatus:
     parsed = urlparse(url)
-    url_identity = f"{parsed.hostname or ''}{parsed.path}{parsed.query}".casefold()
-    title_identity = title.casefold()
-    visible_identity = visible_text.casefold()
-    if http_status in {401, 403} or any(
-        token in identity for token in ("401 unauthorized", "403 forbidden", "无权访问", "拒绝访问")
-    ):
+    hostname, path = (parsed.hostname or "").casefold(), parsed.path.casefold()
+    title_identity, visible_identity = title.casefold(), visible_text.casefold()
+    if http_status in {401, 403}:
         return SearchStatus.FORBIDDEN
-    if http_status == 429 or any(
-        token in identity for token in ("429 too many requests", "访问过于频繁", "操作频繁")
-    ):
+    if http_status == 429:
         return SearchStatus.RATE_LIMITED
     if http_status is not None and 500 <= http_status <= 599:
         return SearchStatus.NETWORK_ERROR
-    if (
-        "captcha" in url_identity
-        or any(token in title_identity for token in ("验证码", "安全验证", "拼图验证"))
-        or any(
-            token in visible_identity
-            for token in ("请完成拼图验证", "请输入验证码", "请完成安全验证", "拖动滑块完成验证")
-        )
-    ):
+    if "/verify/" in path or "captcha" in path or any(token in title_identity for token in ("验证码", "安全验证", "拼图验证")):
         return SearchStatus.CHALLENGE_DETECTED
-    if any(token in identity for token in ("login.cnki.net", "authserver", "用户登录", "统一身份认证")):
+    if hostname == "login.cnki.net" or "authserver" in path:
         return SearchStatus.LOGIN_REQUIRED
-    if "未检索到相关文献" in visible_text:
-        return SearchStatus.NO_RESULTS
-    if parsed.hostname == "www.cnki.net" and "中国知网" in identity:
+    if hostname == CNKI_RESULT_HOST and path.startswith(CNKI_RESULT_PATH_PREFIX) and has_result_table:
         return SearchStatus.SUCCESS
-    if parsed.hostname == CNKI_RESULT_HOST and parsed.path.casefold().startswith(CNKI_RESULT_PATH_PREFIX):
-        if "题名" in visible_text and "来源" in visible_text:
-            return SearchStatus.SUCCESS
+    if not has_result_table:
+        if "未检索到相关文献" in visible_text:
+            return SearchStatus.NO_RESULTS
+        if any(token in visible_identity for token in ("401 unauthorized", "403 forbidden", "无权访问", "拒绝访问")):
+            return SearchStatus.FORBIDDEN
+        if any(token in visible_identity for token in ("429 too many requests", "访问过于频繁", "操作频繁")):
+            return SearchStatus.RATE_LIMITED
+        if any(token in visible_identity for token in ("用户登录", "统一身份认证")):
+            return SearchStatus.LOGIN_REQUIRED
     return SearchStatus.PAGE_CONTRACT_CHANGED
 
 
@@ -90,68 +82,58 @@ class PublicCnkiSession:
         self.page: Any = None
         self._home_response_status: int | None = None
 
-    def __enter__(self) -> "PublicCnkiSession":
+    async def __aenter__(self) -> "PublicCnkiSession":
         try:
             if self._browser_factory is None:
-                self._playwright = start_playwright()
+                self._playwright = await start_playwright()
                 self._browser_factory = BrowserFactory(self._playwright)
-            self.browser = self._browser_factory.launch_ephemeral()
-            self.context = self.browser.new_context(locale="zh-CN", accept_downloads=False)
-            self.page = self.context.new_page()
-            response = self.page.goto(CNKI_HOME_URL, wait_until="domcontentloaded")
+            self.browser = await await_maybe(self._browser_factory.launch_ephemeral())
+            self.context = await await_maybe(self.browser.new_context(locale="zh-CN", accept_downloads=False))
+            self.page = await await_maybe(self.context.new_page())
+            response = await await_maybe(self.page.goto(CNKI_HOME_URL, wait_until="domcontentloaded"))
             self._home_response_status = getattr(response, "status", None)
             return self
-        except Exception as exc:
-            self._close_resources()
+        except BaseException as exc:
+            await self._close_resources()
             if _is_playwright_timeout(exc):
                 raise TransientBrowserError("知网公开首页访问超时") from exc
             raise
 
-    def search(self, query: str) -> SearchSnapshot:
+    async def search(self, query: str) -> SearchSnapshot:
         try:
             if self.page is None:
                 raise RuntimeError("公开检索会话未启动")
-            body = self.page.locator("body").inner_text(timeout=10_000)
-            initial = SearchSnapshot(
-                self.page.content(), self.page.url, self.page.title(), body, self._home_response_status,
-            )
+            body = await await_maybe(self.page.locator("body").inner_text(timeout=10_000))
+            initial = SearchSnapshot(await await_maybe(self.page.content()), self.page.url,
+                                     await await_maybe(self.page.title()), body, self._home_response_status)
             if classify_public_search_state(**initial.state_arguments()) in {
-                SearchStatus.CHALLENGE_DETECTED,
-                SearchStatus.LOGIN_REQUIRED,
-                SearchStatus.FORBIDDEN,
-                SearchStatus.RATE_LIMITED,
-                SearchStatus.NETWORK_ERROR,
-                SearchStatus.NO_RESULTS,
+                SearchStatus.CHALLENGE_DETECTED, SearchStatus.LOGIN_REQUIRED, SearchStatus.FORBIDDEN,
+                SearchStatus.RATE_LIMITED, SearchStatus.NETWORK_ERROR, SearchStatus.NO_RESULTS,
             }:
                 return initial
             if self.page.url != CNKI_HOME_URL:
                 raise PageContractChanged("知网公开首页未就绪")
-            validate_public_theme_search_contract(self.page)
-            http_status = PublicThemeSearchRunner().run(self.page, query)
-            body = self.page.locator("body").inner_text(timeout=10_000)
-            return SearchSnapshot(self.page.content(), self.page.url, self.page.title(), body, http_status)
-        except Exception as exc:
+            await validate_public_theme_search_contract(self.page)
+            http_status = await PublicThemeSearchRunner().run(self.page, query)
+            body = await await_maybe(self.page.locator("body").inner_text(timeout=10_000))
+            return SearchSnapshot(await await_maybe(self.page.content()), self.page.url,
+                                  await await_maybe(self.page.title()), body, http_status)
+        except BaseException as exc:
             if _is_playwright_timeout(exc):
                 raise TransientBrowserError("知网公开检索超时") from exc
             raise
 
-    def __exit__(self, *_exc: object) -> None:
-        self._close_resources()
+    async def __aexit__(self, *_exc: object) -> None:
+        await self._close_resources()
 
-    def _close_resources(self) -> None:
-        for resource, method in (
-            (self.page, "close"),
-            (self.context, "close"),
-            (self.browser, "close"),
-            (self._playwright, "stop"),
-        ):
+    async def _close_resources(self) -> None:
+        for resource, method in ((self.page, "close"), (self.context, "close"),
+                                 (self.browser, "close"), (self._playwright, "stop")):
             if resource is not None:
                 try:
-                    getattr(resource, method)()
+                    await await_maybe(getattr(resource, method)())
                 except Exception:
                     pass
-        self.context = None
-        self.browser = None
-        self.page = None
+        self.context = self.browser = self.page = None
         self._home_response_status = None
         self._playwright = None

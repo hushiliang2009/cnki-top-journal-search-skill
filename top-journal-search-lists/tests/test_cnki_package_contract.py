@@ -1,4 +1,13 @@
+import ast
+import importlib
+import json
+import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
+
+import pytest
 
 
 LEGACY_MODULES = {
@@ -39,20 +48,105 @@ def test_package_exposes_public_home_and_no_legacy_capabilities(skill_root: Path
     assert not bundled_names & LEGACY_MODULES
 
 
-def test_main_and_mcpb_sources_and_catalog_are_identical(skill_root: Path) -> None:
-    main = skill_root / "scripts/cnki_search"
-    bundled = skill_root / "mcpb/src/cnki_search"
-    assert [path.name for path in sorted(main.glob("*.py"))] == [
-        path.name for path in sorted(bundled.glob("*.py"))
-    ]
-    for source in main.glob("*.py"):
-        assert source.read_bytes() == (bundled / source.name).read_bytes()
-    assert (skill_root / "scripts/catalog_lookup.py").read_bytes() == (
-        skill_root / "mcpb/src/catalog_lookup.py"
-    ).read_bytes()
-    assert (skill_root / "references/Academic_Journal_Master_Directory_20260715.md").read_bytes() == (
-        skill_root / "mcpb/src/references/Academic_Journal_Master_Directory_20260715.md"
-    ).read_bytes()
+def _run_layout_contract(layout_root: Path) -> dict[str, object]:
+    program = textwrap.dedent(
+        """
+        import json
+        from pathlib import Path
+
+        import catalog_lookup
+        from cnki_search.models import SearchRequest
+        from cnki_search.session import CNKI_HOME_URL
+
+        invalid_limits = []
+        for limit in (0, 21):
+            try:
+                SearchRequest("topic", limit)
+            except ValueError:
+                invalid_limits.append(limit)
+        request = SearchRequest("  topic   phrase  ", 1)
+        print(json.dumps({
+            "home_url": CNKI_HOME_URL,
+            "normalized_query": request.query,
+            "invalid_limits": invalid_limits,
+            "catalog_exists": Path(catalog_lookup.DEFAULT_CATALOG).is_file(),
+        }))
+        """
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(layout_root)
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=environment,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_skill_and_mcpb_layouts_independently_meet_runtime_contract(skill_root: Path) -> None:
+    for layout_name, layout_root in {
+        "skill": skill_root / "scripts",
+        "mcpb": skill_root / "mcpb/src",
+    }.items():
+        state = _run_layout_contract(layout_root)
+        assert state["home_url"] == "https://www.cnki.net/", layout_name
+        assert state["normalized_query"] == "topic phrase", layout_name
+        assert state["invalid_limits"] == [0, 21], layout_name
+        assert state["catalog_exists"] is True, layout_name
+
+
+def test_helper_scripts_reference_only_existing_runtime_symbols(skill_root: Path) -> None:
+    """辅助脚本不随契约测试执行，需显式校验其引用的运行时符号仍然存在。"""
+    helpers = sorted((skill_root / "tests").glob("_*.py"))
+    assert helpers, "tests/ 下应至少保留一个辅助脚本"
+    for helper in helpers:
+        tree = ast.parse(helper.read_text(encoding="utf-8"), filename=str(helper))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.level:
+                continue
+            if node.module is None or not node.module.startswith("cnki_search"):
+                continue
+            module = importlib.import_module(node.module)
+            for alias in node.names:
+                assert hasattr(module, alias.name), (
+                    f"{helper.name} 引用了 {node.module}.{alias.name}，该符号已不存在"
+                )
+
+
+@pytest.mark.parametrize(
+    ("package_dir", "module_dir"),
+    [("", "scripts"), ("mcpb", "src")],
+    ids=["skill_layout", "mcpb_layout"],
+)
+def test_catalog_resolves_under_both_distribution_layouts(
+    skill_root: Path, package_dir: str, module_dir: str,
+) -> None:
+    """Skill 与 MCPB 两种布局的目录深度差一层，固定深度推导会有一种失败。
+
+    必须走子进程：conftest.py 把 sys.path 钉死在 scripts/，同进程测不到 MCPB 布局。
+    """
+    working_dir = skill_root / package_dir if package_dir else skill_root
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import sys; sys.path.insert(0, {module_dir!r});"
+            " import catalog_lookup as C;"
+            " print(C.DEFAULT_CATALOG.is_file()); print(C.DEFAULT_CATALOG)",
+        ],
+        cwd=working_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    found, resolved = completed.stdout.splitlines()[:2]
+    assert found == "True", f"{module_dir} 布局下未能定位综合期刊目录：{resolved}"
+    assert Path(resolved).is_file()
 
 
 def test_skill_uses_ai4scholar_as_primary_and_cnki_as_supplement(skill_root: Path) -> None:

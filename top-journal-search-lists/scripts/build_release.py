@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import shutil
-import tempfile
 import zipfile
 from pathlib import Path
 
@@ -14,7 +14,6 @@ CNKI_MODULES = (
     "cache.py",
     "install_config.py",
     "mcp_server.py",
-    "merge.py",
     "models.py",
     "ranking.py",
     "rate_limit.py",
@@ -24,11 +23,13 @@ CNKI_MODULES = (
     "session.py",
 )
 TEST_ALLOWLIST = (
+    "tests/_mcp_handshake.py",
+    "tests/_mcpb_handshake.py",
     "tests/conftest.py",
     "tests/test_catalog_lookup.py",
     "tests/test_cnki_cache.py",
+    "tests/test_cnki_async.py",
     "tests/test_cnki_mcp.py",
-    "tests/test_cnki_merge.py",
     "tests/test_cnki_models.py",
     "tests/test_cnki_package_contract.py",
     "tests/test_cnki_ranking.py",
@@ -38,14 +39,21 @@ TEST_ALLOWLIST = (
     "tests/test_cnki_service.py",
     "tests/test_cnki_session.py",
     "tests/test_installers.py",
+    "tests/test_install_config_security.py",
     "tests/test_mcpb_manifest.py",
     "tests/fixtures/public_challenge.html",
     "tests/fixtures/public_home.html",
     "tests/fixtures/public_incomplete_results.html",
     "tests/fixtures/public_no_results.html",
     "tests/fixtures/public_results.html",
+    "tests/fixtures/public_results_nested_table.html",
+    "tests/fixtures/public_results_stage3b.html",
+    "tests/fixtures/public_results_stage3b_missing_td.html",
+    "tests/fixtures/public_results_stage3b_missing_tr.html",
+    "tests/fixtures/public_results_with_paper_titles.html",
 )
 MCPB_ALLOWLIST = (
+    ".mcpbignore",
     "manifest.json",
     "pyproject.toml",
     "src/catalog_lookup.py",
@@ -57,6 +65,7 @@ MCPB_ALLOWLIST = (
 SKILL_ALLOWLIST = (
     "README.md",
     "SKILL.md",
+    "pytest.ini",
     "agents/openai.yaml",
     "installers/install.ps1",
     "installers/install.sh",
@@ -72,6 +81,18 @@ ALLOWLIST = SKILL_ALLOWLIST
 ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)
 REGULAR_MODE = 0o100644
 EXECUTABLE_MODE = 0o100755
+
+
+@contextlib.contextmanager
+def _build_workspace(output_dir: Path):
+    workspace = output_dir / ".stage"
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    workspace.mkdir(parents=True)
+    try:
+        yield workspace
+    finally:
+        shutil.rmtree(workspace)
 
 
 def copy_skill_tree(source: Path, target: Path) -> None:
@@ -115,8 +136,7 @@ def build(skill_root: Path, output_dir: Path) -> list[Path]:
     for target in (skill_zip, mcpb_zip, checksums):
         target.unlink(missing_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="cnki-public-build-") as temporary:
-        staging = Path(temporary)
+    with _build_workspace(output_dir) as staging:
         skill_stage = staging / "top-journal-search-lists"
         copy_skill_tree(skill_root, skill_stage)
         _zip_tree(skill_stage, skill_zip, prefix="top-journal-search-lists")
