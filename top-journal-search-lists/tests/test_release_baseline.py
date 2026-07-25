@@ -41,6 +41,18 @@ def test_ci_runs_full_non_live_release_matrix(skill_root: Path) -> None:
         assert forbidden not in workflow.casefold()
 
 
+def test_ci_uploads_only_the_canonical_ubuntu_python311_release(skill_root: Path) -> None:
+    workflow = (skill_root.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    ubuntu_job = workflow.split("\n  ubuntu:\n", 1)[1].split("\n  desktop:\n", 1)[0]
+    desktop_job = workflow.split("\n  desktop:\n", 1)[1].split("\n  installer:\n", 1)[0]
+
+    assert workflow.count("actions/upload-artifact@v4") == 1
+    assert "actions/upload-artifact@v4" in ubuntu_job
+    assert "if: matrix.python-version == '3.11'" in ubuntu_job
+    assert "name: release-canonical-ubuntu-py3.11" in ubuntu_job
+    assert "actions/upload-artifact@v4" not in desktop_job
+
+
 def test_root_ignore_does_not_hide_a_generated_outputs_directory() -> None:
     root_ignore = Path(__file__).resolve().parents[2] / ".gitignore"
     text = root_ignore.read_text(encoding="utf-8")
