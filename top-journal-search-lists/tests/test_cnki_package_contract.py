@@ -1,11 +1,14 @@
 import ast
+import asyncio
 import importlib
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -115,6 +118,81 @@ def test_helper_scripts_reference_only_existing_runtime_symbols(skill_root: Path
                 assert hasattr(module, alias.name), (
                     f"{helper.name} 引用了 {node.module}.{alias.name}，该符号已不存在"
                 )
+
+
+def _load_helper_module(skill_root: Path, name: str) -> Any:
+    path = skill_root / "tests" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # 先登记再执行：dataclass 解析注解时会回查 sys.modules[cls.__module__]。
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+_SMOKE_RESULT_HTML = """
+<table class="result-table-list"><tbody>
+  <tr>
+    <td class="name"><a>供应链持股与会计信息质量</a></td>
+    <td class="author"><a>张三</a><a>李四</a></td>
+    <td class="source"><a>经济研究</a></td>
+    <td class="date">2024-05-20 14:35:12</td>
+    <td class="data">期刊</td>
+  </tr>
+</tbody></table>
+"""
+
+
+def test_live_smoke_speaks_the_current_async_session_protocol(skill_root: Path) -> None:
+    """离线注入假会话端到端跑通实机冒烟脚本。
+
+    该脚本不进 CI（会对知网发真实请求），符号存在性检查也测不出同步/异步
+    协议漂移——运行时迁到异步后它曾整体失效而无人察觉。这里以注入方式覆盖。
+    """
+    if not (skill_root / "tests/_public_cnki_live_smoke.py").is_file():
+        pytest.skip("发布包不含实机冒烟脚本，本守卫仅在仓库检出下生效")
+    smoke = _load_helper_module(skill_root, "_public_cnki_live_smoke")
+    from cnki_search.session import SearchSnapshot
+
+    class FakeSession:
+        entered = exited = False
+
+        async def __aenter__(self) -> "FakeSession":
+            type(self).entered = True
+            return self
+
+        async def search(self, query: str) -> SearchSnapshot:
+            return SearchSnapshot(
+                html=_SMOKE_RESULT_HTML,
+                url="https://kns.cnki.net/kns8s/defaultresult/index",
+                title="中国知网",
+                visible_text="题名 作者 来源 供应链持股与会计信息质量",
+                http_status=200,
+            )
+
+        async def __aexit__(self, *_exc: object) -> None:
+            type(self).exited = True
+
+    result = asyncio.run(smoke.run_smoke("供应链持股", 20, session_factory=FakeSession))
+
+    assert FakeSession.entered and FakeSession.exited, "包装会话未走完异步上下文协议"
+    assert result.exit_code == 0, result.message
+    assert result.summary == {
+        "status": "success",
+        "record_count": 1,
+        "final_domain": "kns.cnki.net",
+    }
+    assert result.payload["records"][0]["journal_raw"] == "经济研究"
+    assert result.payload["records"][0]["publication_year"] == 2024
+
+    # 证据已过脱敏守卫（否则 run_smoke 内就抛了）；这里正向确认守卫会拦下嵌套的敏感键。
+    with pytest.raises(ValueError, match="敏感字段"):
+        smoke._assert_no_sensitive_fields({"records": [{"detail_url": "https://example.invalid"}]})
 
 
 @pytest.mark.parametrize(

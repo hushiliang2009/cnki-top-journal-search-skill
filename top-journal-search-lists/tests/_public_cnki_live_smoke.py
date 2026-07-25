@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -21,27 +23,39 @@ from cnki_search.session import PublicCnkiSession
 
 FORBIDDEN_FIELD_TOKENS = ("url", "cookie", "token", "session")
 ACCEPTED_STATUSES = {SearchStatus.SUCCESS, SearchStatus.PARTIAL}
+EXPECTED_RESULT_DOMAIN = "kns.cnki.net"
 
 
 class ObservedPublicCnkiSession:
-    """仅在进程内保留最终页面域名，避免把 URL 写入验证证据。"""
+    """包装运行时会话，仅在进程内保留最终页面域名，避免把 URL 写入验证证据。
 
-    final_domain: str | None = None
+    会话协议必须与 service.py 一致（异步上下文管理器 + 异步 search）。运行时
+    从同步迁到异步后，本脚本曾因仍调用 __enter__ 而整体失效；离线注入测试
+    test_live_smoke_speaks_the_current_async_session_protocol 现锁定该协议。
+    """
 
-    def __init__(self) -> None:
-        self._session = PublicCnkiSession()
+    def __init__(self, inner_factory: Callable[[], Any], observer: dict[str, Any]) -> None:
+        self._inner = inner_factory()
+        self._observer = observer
 
-    def __enter__(self) -> "ObservedPublicCnkiSession":
-        self._session.__enter__()
+    async def __aenter__(self) -> "ObservedPublicCnkiSession":
+        await self._inner.__aenter__()
         return self
 
-    def search(self, query: str) -> Any:
-        snapshot = self._session.search(query)
-        self.__class__.final_domain = urlparse(snapshot.url).hostname
+    async def search(self, query: str) -> Any:
+        snapshot = await self._inner.search(query)
+        self._observer["final_domain"] = urlparse(snapshot.url).hostname
         return snapshot
 
-    def __exit__(self, *exc: object) -> None:
-        self._session.__exit__(*exc)
+    async def __aexit__(self, *exc: object) -> None:
+        await self._inner.__aexit__(*exc)
+
+
+def observed_session_factory(
+    inner_factory: Callable[[], Any], observer: dict[str, Any]
+) -> Callable[[], ObservedPublicCnkiSession]:
+    """service 以零参调用 session_factory，这里把内层工厂与观察器闭包进去。"""
+    return lambda: ObservedPublicCnkiSession(inner_factory, observer)
 
 
 def _assert_no_sensitive_fields(value: Any, path: str = "$") -> None:
@@ -75,6 +89,39 @@ def _evidence_payload(outcome: Any) -> dict[str, Any]:
     return payload
 
 
+@dataclass(frozen=True, slots=True)
+class SmokeResult:
+    exit_code: int
+    payload: dict[str, Any]
+    summary: dict[str, Any]
+    message: str = ""
+
+
+async def run_smoke(
+    query: str, limit: int, *, session_factory: Callable[[], Any] = PublicCnkiSession
+) -> SmokeResult:
+    """执行一次公开检索并给出脱敏证据。session_factory 可注入，供离线回归使用。"""
+    request = SearchRequest(query, limit)
+    observer: dict[str, Any] = {"final_domain": None}
+    service = CnkiPublicSearchService(
+        session_factory=observed_session_factory(session_factory, observer)
+    )
+    outcome = await service.search(request.query, request.limit)
+    payload = _evidence_payload(outcome)
+    summary = {
+        "status": outcome.status.value,
+        "record_count": len(outcome.records),
+        "final_domain": observer["final_domain"],
+    }
+    if outcome.status not in ACCEPTED_STATUSES:
+        return SmokeResult(1, payload, summary, "CNKI 公开检索受限或页面合同变化；证据已保存。")
+    if not 1 <= len(outcome.records) <= request.limit:
+        return SmokeResult(1, payload, summary, "CNKI 公开检索未返回规定数量的正式期刊题录。")
+    if observer["final_domain"] != EXPECTED_RESULT_DOMAIN:
+        return SmokeResult(1, payload, summary, "CNKI 检索未到达规定的公开结果域名。")
+    return SmokeResult(0, payload, summary)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CNKI 公开首页主题检索实机冒烟验证")
     parser.add_argument("--query", required=True, help="固定主题检索词")
@@ -85,30 +132,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    request = SearchRequest(args.query, args.limit)
-    ObservedPublicCnkiSession.final_domain = None
-    outcome = CnkiPublicSearchService(session_factory=ObservedPublicCnkiSession).search(
-        request.query, request.limit
-    )
-    payload = _evidence_payload(outcome)
+    result = asyncio.run(run_smoke(args.query, args.limit))
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    summary = {
-        "status": outcome.status.value,
-        "record_count": len(outcome.records),
-        "final_domain": ObservedPublicCnkiSession.final_domain,
-    }
-    print(json.dumps(summary, ensure_ascii=False))
-    if outcome.status not in ACCEPTED_STATUSES:
-        print("CNKI 公开检索受限或页面合同变化；证据已保存，Task 8 未完成。", file=sys.stderr)
-        return 1
-    if not 1 <= len(outcome.records) <= request.limit:
-        print("CNKI 公开检索未返回规定数量的正式期刊题录。", file=sys.stderr)
-        return 1
-    if ObservedPublicCnkiSession.final_domain != "kns.cnki.net":
-        print("CNKI 检索未到达规定的公开结果域名。", file=sys.stderr)
-        return 1
-    return 0
+    args.output.write_text(
+        json.dumps(result.payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    print(json.dumps(result.summary, ensure_ascii=False))
+    if result.message:
+        print(result.message, file=sys.stderr)
+    return result.exit_code
 
 
 if __name__ == "__main__":
