@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+import cnki_search_env.service as service_module
 from cnki_search_env.models import SearchStatus
 from cnki_search_env.service import CnkiPublicSearchService
 from cnki_search_env.session import PublicCnkiSession, SearchSnapshot
@@ -95,7 +96,11 @@ def test_network_error_retries_once_only() -> None:
     assert (factory.calls, gate.calls) == (2, 2)
 
 
-def test_browser_preparation_finishes_before_search_timeout_starts() -> None:
+def test_browser_preparation_finishes_before_search_timeout_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 本测试只验证浏览器准备阶段；目录校验耗时由入口超时测试单独覆盖。
+    monkeypatch.setattr(service_module, "validate_catalog", lambda _path: None)
     preparation_calls = 0
 
     async def prepare_browser() -> None:
