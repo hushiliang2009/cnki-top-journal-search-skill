@@ -1,0 +1,8 @@
+<!-- 构造件：依据四轮审计六次真实拦截的诊断探针结果构造，非真实抓取。 -->
+<!-- 探针实测：http_status=200、title="安全验证"、path=/verify/home、
+     body 可见文本 0 字符、无 result-table-list。
+     即真实挑战页的正文是空的——判定只能依赖 URL 路径与 <title>。 -->
+<html lang="zh-CN">
+<head><title>安全验证</title></head>
+<body><div id="app"></div><script src="/verify/static/app.js"></script></body>
+</html>

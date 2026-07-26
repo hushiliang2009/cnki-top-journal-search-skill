@@ -53,6 +53,7 @@ user-data-dir/
 
 # Generated output
 outputs/*
+/top-journal-search-lists-env/release/
 
 # Working and audit material stays local
 work/

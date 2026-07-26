@@ -1,0 +1,6 @@
+interface:
+  display_name: "Top Environmental Journal Search"
+  short_description: "按环境科学十级期刊目录检索并整理文献"
+  default_prompt: "Use $top-journal-search-lists-env to search and synthesize environmental science literature by the approved ten-level journal hierarchy."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "cnki-search-env",
+  "display_name": "CNKI Environmental Public Theme Search",
+  "version": "0.1.0",
+  "description": "Public CNKI theme search with environmental journal classification; no login or downloads.",
+  "author": {
+    "name": "Top Environmental Journal Search"
+  },
+  "server": {
+    "type": "uv",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "src/server.py"]
+    }
+  },
+  "tools": [
+    {"name": "cnki_search_env", "description": "Search the public CNKI homepage and rank first-page records by the environmental journal catalog."}
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"],
+    "runtimes": {"python": ">=3.11"}
+  },
+  "keywords": ["CNKI", "environmental-science", "literature", "public-search", "journal-ranking"],
+  "license": "Apache-2.0"
+}
