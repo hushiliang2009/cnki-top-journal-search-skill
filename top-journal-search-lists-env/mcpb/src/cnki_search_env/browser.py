@@ -102,7 +102,9 @@ async def _install_playwright_browser_runtime(
     configure_playwright_browsers_path()
     process_options: dict[str, Any]
     if os.name == "nt":
-        process_options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        process_options = {
+            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP"),
+        }
     else:
         process_options = {"start_new_session": True}
     process = await asyncio.create_subprocess_exec(

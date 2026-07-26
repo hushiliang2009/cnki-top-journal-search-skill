@@ -4,6 +4,9 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
+import cnki_search_env.service as service_module
 from cnki_search_env.mcp_server import CnkiMcpServer
 from cnki_search_env.models import SearchOutcome, SearchStatus
 from cnki_search_env.rate_limit import SerialSearchGate
@@ -82,7 +85,12 @@ def test_async_session_cancellation_closes_every_resource() -> None:
     asyncio.run(scenario())
 
 
-def test_async_service_timeout_returns_network_error_and_queue_cancellation_does_not_start() -> None:
+def test_async_service_timeout_returns_network_error_and_queue_cancellation_does_not_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 本测试只检验网络会话超时与排队取消；目录校验耗时另有专门测试覆盖。
+    monkeypatch.setattr(service_module, "validate_catalog", lambda _path: None)
+
     async def scenario() -> None:
         started = 0
         entered = asyncio.Event()

@@ -267,7 +267,8 @@ def test_powershell_rejects_python_310_before_creating_install_paths(
         ],
         cwd=skill_root,
         env=environment,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
     )

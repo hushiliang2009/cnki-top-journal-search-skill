@@ -218,7 +218,9 @@ def test_catalog_resolves_under_both_distribution_layouts(
         ],
         cwd=working_dir,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        env=os.environ
+        | {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
