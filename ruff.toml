@@ -10,3 +10,4 @@ ignore = ["E501"]
 [lint.per-file-ignores]
 # 独立运行的手工冒烟脚本需先把 scripts/ 注入 sys.path 才能导入 cnki_search
 "top-journal-search-lists/tests/_*.py" = ["E402"]
+"top-journal-search-lists-env/tests/_*.py" = ["E402"]

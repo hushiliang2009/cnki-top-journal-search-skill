@@ -8,8 +8,8 @@ import sys
 import pytest
 import tomllib
 
-import cnki_search.install_config as install_config
-from cnki_search.install_config import (
+import cnki_search_env.install_config as install_config
+from cnki_search_env.install_config import (
     client_paths,
     cnki_server_config,
     main,
@@ -47,7 +47,7 @@ def test_installers_validate_selected_python_before_any_install_write(skill_root
     assert "[string]$PythonExe = 'python'" in powershell
     assert "function Assert-PythonVersion" in powershell
     assert powershell.rindex("Assert-PythonVersion $Python") < powershell.index("try {")
-    assert 'python_command=${CNKI_PYTHON:-python3}' in shell
+    assert 'python_command=${CNKI_ENV_PYTHON:-python3}' in shell
     assert "assert_python_version" in shell
     assert shell.rindex("assert_python_version") < shell.index("install_skill()")
 
@@ -58,8 +58,10 @@ def test_installers_require_runtime_self_checks_and_transactional_restore(skill_
 
     for script in (powershell, shell):
         assert "playwright install chromium chromium-headless-shell" in script
+        assert "PLAYWRIGHT_BROWSERS_PATH" in script
+        assert "playwright-browsers" in script
         assert "import mcp, playwright" in script
-        assert "import cnki_search.mcp_server" in script
+        assert "import cnki_search_env.mcp_server" in script
         assert "sys.argv[1]" in script
         assert "chromium.launch" in script
         assert "https://" not in script
@@ -113,6 +115,11 @@ def _write_recording_powershell_runtime(path: Path, *, fail_browser_check: bool)
         "param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)\n"
         "$joined = $Arguments -join ' '\n"
         "Write-Output \"RUNTIME:$joined\"\n"
+        "if ($env:CNKI_TEST_RUNTIME_ROOT) {\n"
+        "  New-Item -ItemType Directory -Path $env:CNKI_TEST_RUNTIME_ROOT -Force | Out-Null\n"
+        "  Set-Content -LiteralPath (Join-Path $env:CNKI_TEST_RUNTIME_ROOT 'partial-update.txt') "
+        "-Value 'partial runtime update'\n"
+        "}\n"
         f"{failure}"
         "if ($Arguments[0] -eq '-m' -or $Arguments[0] -eq '-c') { exit 0 }\n"
         "& $env:CNKI_TEST_REAL_PYTHON @Arguments\n"
@@ -194,6 +201,10 @@ def _write_recording_shell_runtime(path: Path, *, fail_browser_check: bool) -> N
     path.write_text(
         "#!/bin/sh\n"
         "printf 'RUNTIME:%s\\n' \"$*\"\n"
+        "if [ -n \"${CNKI_TEST_RUNTIME_ROOT:-}\" ]; then\n"
+        "  mkdir -p \"$CNKI_TEST_RUNTIME_ROOT\"\n"
+        "  printf '%s\\n' 'partial runtime update' > \"$CNKI_TEST_RUNTIME_ROOT/partial-update.txt\"\n"
+        "fi\n"
         f"{failure}"
         "if [ \"$1\" = '-m' ] || [ \"$1\" = '-c' ]; then exit 0; fi\n"
         "\"$CNKI_TEST_REAL_PYTHON\" \"$@\"\n",
@@ -270,13 +281,20 @@ def test_powershell_rejects_python_310_before_creating_install_paths(
 
 
 @requires_windows_powershell
-def test_powershell_runtime_failure_restores_skill_and_config(skill_root: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("existing_runtime", [True, False])
+def test_powershell_runtime_failure_restores_skill_and_config(
+    skill_root: Path, tmp_path: Path, existing_runtime: bool,
+) -> None:
     runtime_python = tmp_path / "failing-runtime.ps1"
     _write_recording_powershell_runtime(runtime_python, fail_browser_check=True)
     codex_home = tmp_path / "codex-home"
-    original_skill = codex_home / "skills" / "top-journal-search-lists"
+    original_skill = codex_home / "skills" / "top-journal-search-lists-env"
     original_skill.mkdir(parents=True)
     (original_skill / "original.txt").write_text("original skill", encoding="utf-8")
+    original_runtime = codex_home / "runtimes" / "cnki-search-env"
+    if existing_runtime:
+        original_runtime.mkdir(parents=True)
+        (original_runtime / "original-runtime.txt").write_text("original runtime", encoding="utf-8")
     config = codex_home / "config.toml"
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text("[mcp_servers.zotero]\ncommand = 'zotero-mcp'\n", encoding="utf-8")
@@ -285,6 +303,7 @@ def test_powershell_runtime_failure_restores_skill_and_config(skill_root: Path, 
         "APPDATA": str(tmp_path / "appdata"),
         "CODEX_HOME": str(codex_home),
         "CNKI_TEST_REAL_PYTHON": sys.executable,
+        "CNKI_TEST_RUNTIME_ROOT": str(original_runtime),
     }
 
     copied_skill = _prepare_powershell_test_skill(
@@ -295,6 +314,11 @@ def test_powershell_runtime_failure_restores_skill_and_config(skill_root: Path, 
     assert result.returncode != 0
     assert "chromium.launch" in result.stdout
     assert (original_skill / "original.txt").read_text(encoding="utf-8") == "original skill"
+    if existing_runtime:
+        assert (original_runtime / "original-runtime.txt").read_text(encoding="utf-8") == "original runtime"
+        assert not (original_runtime / "partial-update.txt").exists()
+    else:
+        assert not original_runtime.exists()
     assert config.read_text(encoding="utf-8") == "[mcp_servers.zotero]\ncommand = 'zotero-mcp'\n"
 
 
@@ -305,7 +329,7 @@ def test_shell_rejects_python_310_before_creating_install_paths(skill_root: Path
     copied_skill = _copy_test_skill(skill_root, tmp_path / "skill-copy")
     codex_home = tmp_path / "codex-home"
     environment = _shell_test_environment(
-        tmp_path, codex_home, **{"CNKI_PYTHON": _shell_path(fake_python)},
+        tmp_path, codex_home, **{"CNKI_ENV_PYTHON": _shell_path(fake_python)},
     )
 
     result = _run_shell_installer(copied_skill, environment)
@@ -316,16 +340,23 @@ def test_shell_rejects_python_310_before_creating_install_paths(skill_root: Path
     assert not (codex_home / "runtimes").exists()
 
 
-def test_shell_runtime_failure_restores_skill_and_config(skill_root: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("existing_runtime", [True, False])
+def test_shell_runtime_failure_restores_skill_and_config(
+    skill_root: Path, tmp_path: Path, existing_runtime: bool,
+) -> None:
     runtime_python = tmp_path / "failing-runtime.sh"
     _write_recording_shell_runtime(runtime_python, fail_browser_check=True)
     copied_skill = _prepare_shell_test_skill(
         skill_root, tmp_path / "skill-copy", runtime_python, "20260723-130002"
     )
     codex_home = tmp_path / "codex-home"
-    original_skill = codex_home / "skills" / "top-journal-search-lists"
+    original_skill = codex_home / "skills" / "top-journal-search-lists-env"
     original_skill.mkdir(parents=True)
     (original_skill / "original.txt").write_text("original skill", encoding="utf-8")
+    original_runtime = codex_home / "runtimes" / "cnki-search-env"
+    if existing_runtime:
+        original_runtime.mkdir(parents=True)
+        (original_runtime / "original-runtime.txt").write_text("original runtime", encoding="utf-8")
     config = codex_home / "config.toml"
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text("[mcp_servers.zotero]\ncommand = 'zotero-mcp'\n", encoding="utf-8")
@@ -333,8 +364,9 @@ def test_shell_runtime_failure_restores_skill_and_config(skill_root: Path, tmp_p
         tmp_path,
         codex_home,
         **{
-            "CNKI_PYTHON": _shell_path(Path(sys.executable)),
+            "CNKI_ENV_PYTHON": _shell_path(Path(sys.executable)),
             "CNKI_TEST_REAL_PYTHON": _shell_path(Path(sys.executable)),
+            "CNKI_TEST_RUNTIME_ROOT": _shell_path(original_runtime),
         },
     )
 
@@ -343,6 +375,11 @@ def test_shell_runtime_failure_restores_skill_and_config(skill_root: Path, tmp_p
     assert result.returncode != 0
     assert "chromium.launch" in result.stdout
     assert (original_skill / "original.txt").read_text(encoding="utf-8") == "original skill"
+    if existing_runtime:
+        assert (original_runtime / "original-runtime.txt").read_text(encoding="utf-8") == "original runtime"
+        assert not (original_runtime / "partial-update.txt").exists()
+    else:
+        assert not original_runtime.exists()
     assert config.read_text(encoding="utf-8") == "[mcp_servers.zotero]\ncommand = 'zotero-mcp'\n"
 
 
@@ -353,7 +390,7 @@ def test_powershell_success_runs_self_checks_and_retains_exactly_three_backups(
     runtime_python = tmp_path / "recording-runtime.ps1"
     _write_recording_powershell_runtime(runtime_python, fail_browser_check=False)
     codex_home = tmp_path / "codex-home"
-    original_skill = codex_home / "skills" / "top-journal-search-lists"
+    original_skill = codex_home / "skills" / "top-journal-search-lists-env"
     original_skill.mkdir(parents=True)
     config = codex_home / "config.toml"
     config.parent.mkdir(parents=True, exist_ok=True)
@@ -375,17 +412,58 @@ def test_powershell_success_runs_self_checks_and_retains_exactly_three_backups(
     assert "-m pip install mcp>=1,<2 playwright>=1.45,<2" in commands
     assert "-m playwright install chromium chromium-headless-shell" in commands
     assert "import mcp, playwright" in commands
-    assert "import cnki_search.mcp_server" in commands
+    assert "import cnki_search_env.mcp_server" in commands
     assert "chromium.launch" in commands
     assert commands.index("-m pip install") < commands.index("-m playwright install")
     assert commands.index("-m playwright install") < commands.index("import mcp, playwright")
-    assert commands.index("import mcp, playwright") < commands.index("import cnki_search.mcp_server")
-    assert commands.index("import cnki_search.mcp_server") < commands.index("chromium.launch")
+    assert commands.index("import mcp, playwright") < commands.index("import cnki_search_env.mcp_server")
+    assert commands.index("import cnki_search_env.mcp_server") < commands.index("chromium.launch")
     skill_backups = codex_home / "backups" / "skills"
-    assert len(list(skill_backups.glob("top-journal-search-lists.backup-????????-??????"))) == 3
+    assert len(list(skill_backups.glob("top-journal-search-lists-env.backup-????????-??????"))) == 3
+    runtime_backups = codex_home / "backups" / "runtimes"
+    assert len(list(runtime_backups.glob("cnki-search-env.backup-????????-??????"))) == 3
     # 备份必须留在 skills 扫描目录之外，否则会被当作同名技能加载
-    assert not list(original_skill.parent.glob("top-journal-search-lists.backup-*"))
+    assert not list(original_skill.parent.glob("top-journal-search-lists-env.backup-*"))
     assert len(list(config.parent.glob("config.toml.backup-????????-??????"))) == 3
+
+
+@requires_windows_powershell
+def test_environment_install_coexists_with_generic_skill_and_mcp(
+    skill_root: Path, tmp_path: Path,
+) -> None:
+    runtime_python = tmp_path / "recording-runtime.ps1"
+    _write_recording_powershell_runtime(runtime_python, fail_browser_check=False)
+    copied_skill = _prepare_powershell_test_skill(
+        skill_root, tmp_path / "skill-copy", runtime_python, "20260726-230001"
+    )
+    codex_home = tmp_path / "codex-home"
+    generic_skill = codex_home / "skills" / "top-journal-search-lists"
+    generic_skill.mkdir(parents=True)
+    (generic_skill / "generic.txt").write_text("keep generic", encoding="utf-8")
+    config = codex_home / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        "[mcp_servers.cnki-search]\n"
+        'command = "generic-python"\n'
+        'args = ["-m", "cnki_search.mcp_server"]\n',
+        encoding="utf-8",
+    )
+    environment = os.environ | {
+        "USERPROFILE": str(tmp_path / "profile"),
+        "APPDATA": str(tmp_path / "appdata"),
+        "CODEX_HOME": str(codex_home),
+        "CNKI_TEST_REAL_PYTHON": sys.executable,
+    }
+
+    result = _run_powershell_installer(copied_skill, environment)
+
+    assert result.returncode == 0, result.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["mcp_servers"]["cnki-search"]["command"] == "generic-python"
+    assert "cnki-search-env" in parsed["mcp_servers"]
+    assert (generic_skill / "generic.txt").read_text(encoding="utf-8") == "keep generic"
+    assert (codex_home / "skills" / "top-journal-search-lists-env").is_dir()
+    assert (codex_home / "runtimes" / "cnki-search-env").is_dir()
 
 
 def test_shell_success_runs_self_checks_and_retains_exactly_three_backups(
@@ -394,7 +472,7 @@ def test_shell_success_runs_self_checks_and_retains_exactly_three_backups(
     runtime_python = tmp_path / "recording-runtime.sh"
     _write_recording_shell_runtime(runtime_python, fail_browser_check=False)
     codex_home = tmp_path / "codex-home"
-    original_skill = codex_home / "skills" / "top-journal-search-lists"
+    original_skill = codex_home / "skills" / "top-journal-search-lists-env"
     original_skill.mkdir(parents=True)
     config = codex_home / "config.toml"
     config.parent.mkdir(parents=True, exist_ok=True)
@@ -403,7 +481,7 @@ def test_shell_success_runs_self_checks_and_retains_exactly_three_backups(
         tmp_path,
         codex_home,
         **{
-            "CNKI_PYTHON": _shell_path(Path(sys.executable)),
+            "CNKI_ENV_PYTHON": _shell_path(Path(sys.executable)),
             "CNKI_TEST_REAL_PYTHON": _shell_path(Path(sys.executable)),
         },
     )
@@ -418,12 +496,14 @@ def test_shell_success_runs_self_checks_and_retains_exactly_three_backups(
     assert "-m pip install mcp>=1,<2 playwright>=1.45,<2" in commands
     assert "-m playwright install chromium chromium-headless-shell" in commands
     assert "import mcp, playwright" in commands
-    assert "import cnki_search.mcp_server" in commands
+    assert "import cnki_search_env.mcp_server" in commands
     assert "chromium.launch" in commands
     skill_backups = codex_home / "backups" / "skills"
-    assert len(list(skill_backups.glob("top-journal-search-lists.backup-????????-??????"))) == 3
+    assert len(list(skill_backups.glob("top-journal-search-lists-env.backup-????????-??????"))) == 3
+    runtime_backups = codex_home / "backups" / "runtimes"
+    assert len(list(runtime_backups.glob("cnki-search-env.backup-????????-??????"))) == 3
     # 备份必须留在 skills 扫描目录之外，否则会被当作同名技能加载
-    assert not list(original_skill.parent.glob("top-journal-search-lists.backup-*"))
+    assert not list(original_skill.parent.glob("top-journal-search-lists-env.backup-*"))
     assert len(list(config.parent.glob("config.toml.backup-????????-??????"))) == 3
 
 
@@ -432,11 +512,13 @@ def test_readme_documents_installer_safety_requirements(skill_root: Path) -> Non
     for text in (
         "Python 3.11 或更高版本",
         "`-PythonExe`",
-        "`CNKI_PYTHON`",
+        "`CNKI_ENV_PYTHON`",
         "python -m playwright install chromium chromium-headless-shell",
         "导入检查",
         "离线启动",
-        "恢复原有 Skill 和配置",
+        "恢复原有 Skill、环境运行时和配置",
+        "`backups/runtimes/`",
+        "`CNKI_ENV_BROWSER_PATH`",
         "最近 3 份",
     ):
         assert text in readme
@@ -451,7 +533,7 @@ def test_allowlisted_install_copy_excludes_workspace_baits(
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     source = shutil.copytree(skill_root, tmp_path / "source")
-    for relative in ("Cookie", "Local State", "random-extra.txt", "scripts/cnki_search/random_extra.py"):
+    for relative in ("Cookie", "Local State", "random-extra.txt", "scripts/cnki_search_env/random_extra.py"):
         bait = source / relative
         bait.parent.mkdir(parents=True, exist_ok=True)
         bait.write_text("TASK7-INSTALL-BAIT", encoding="utf-8")
@@ -460,8 +542,8 @@ def test_allowlisted_install_copy_excludes_workspace_baits(
     module.copy_skill_tree(source, destination)
 
     assert (destination / "SKILL.md").is_file()
-    assert (destination / "scripts/cnki_search/service.py").is_file()
-    for relative in ("Cookie", "Local State", "random-extra.txt", "scripts/cnki_search/random_extra.py"):
+    assert (destination / "scripts/cnki_search_env/service.py").is_file()
+    for relative in ("Cookie", "Local State", "random-extra.txt", "scripts/cnki_search_env/random_extra.py"):
         assert not (destination / relative).exists()
 
 
@@ -470,7 +552,10 @@ def test_merge_claude_config_preserves_unrelated_servers() -> None:
     server = cnki_server_config(Path("C:/skill"), Path("C:/skill/.venv/Scripts/python.exe"))
     after = merge_claude_config(before, server)
     assert after["mcpServers"]["zotero"] == before["mcpServers"]["zotero"]
-    assert after["mcpServers"]["cnki-search"] == server
+    assert after["mcpServers"]["cnki-search-env"] == server
+    assert server["env"]["PLAYWRIGHT_BROWSERS_PATH"] == str(
+        Path("C:/skill/playwright-browsers")
+    )
     assert after["theme"] == "dark"
     assert before["mcpServers"].keys() == {"zotero"}
 
@@ -481,8 +566,8 @@ def test_windows_client_paths() -> None:
         platform="win32",
         env={"APPDATA": r"C:\CodexTest\AppData\Roaming"},
     )
-    assert str(paths.codex_skill).endswith(r".codex\skills\top-journal-search-lists")
-    assert str(paths.claude_skill).endswith(r".claude\skills\top-journal-search-lists")
+    assert str(paths.codex_skill).endswith(r".codex\skills\top-journal-search-lists-env")
+    assert str(paths.claude_skill).endswith(r".claude\skills\top-journal-search-lists-env")
     assert str(paths.claude_desktop_config).endswith(r"Claude\claude_desktop_config.json")
     assert str(paths.codex_config).endswith(r".codex\config.toml")
 
@@ -492,8 +577,8 @@ def test_macos_and_linux_client_paths() -> None:
     linux = client_paths(PurePosixPath("/home/test"), platform="linux", env={})
     assert str(mac.claude_desktop_config) == "/Users/test/Library/Application Support/Claude/claude_desktop_config.json"
     assert str(linux.claude_desktop_config) == "/home/test/.config/Claude/claude_desktop_config.json"
-    assert str(mac.codex_skill) == "/Users/test/.codex/skills/top-journal-search-lists"
-    assert str(linux.claude_skill) == "/home/test/.claude/skills/top-journal-search-lists"
+    assert str(mac.codex_skill) == "/Users/test/.codex/skills/top-journal-search-lists-env"
+    assert str(linux.claude_skill) == "/home/test/.claude/skills/top-journal-search-lists-env"
 
 
 def test_custom_homes_are_respected() -> None:
@@ -502,12 +587,12 @@ def test_custom_homes_are_respected() -> None:
         platform="linux",
         env={"CODEX_HOME": "/opt/codex", "CLAUDE_CONFIG_DIR": "/opt/claude"},
     )
-    assert str(paths.codex_skill) == "/opt/codex/skills/top-journal-search-lists"
-    assert str(paths.claude_skill) == "/opt/claude/skills/top-journal-search-lists"
+    assert str(paths.codex_skill) == "/opt/codex/skills/top-journal-search-lists-env"
+    assert str(paths.claude_skill) == "/opt/claude/skills/top-journal-search-lists-env"
 
 
 def test_install_config_cli_terms_are_available() -> None:
-    from cnki_search.install_config import build_parser
+    from cnki_search_env.install_config import build_parser
 
     parser = build_parser()
     args = parser.parse_args(
@@ -526,14 +611,14 @@ def test_install_config_cli_terms_are_available() -> None:
 
 def test_merge_codex_config_adds_a_parseable_server_without_existing_tables() -> None:
     server = cnki_server_config(
-        Path(r"C:\\学术资料\\top-journal-search-lists"),
+        Path(r"C:\\学术资料\\top-journal-search-lists-env"),
         Path(r"C:\\运行时\\python.exe"),
     )
 
     merged = install_config.merge_codex_config("# existing configuration\n", server)
 
     parsed = tomllib.loads(merged)
-    assert parsed["mcp_servers"]["cnki-search"] == server
+    assert parsed["mcp_servers"]["cnki-search-env"] == server
 
 
 def test_merge_codex_config_replaces_only_cnki_table_and_subtables() -> None:
@@ -543,11 +628,11 @@ command = "node"
 args = ["--experimental-repl-await"]
 startup_timeout_sec = 20
 
-[mcp_servers.cnki-search]
+[mcp_servers.cnki-search-env]
 command = "old-python"
 args = ["-m", "old_server"]
 
-[mcp_servers.cnki-search.env]
+[mcp_servers.cnki-search-env.env]
 PYTHONPATH = "old"
 
 [profiles.default]
@@ -563,14 +648,14 @@ model = "gpt-5"
     parsed = tomllib.loads(merged)
     assert parsed["mcp_servers"]["node_repl"]["args"] == ["--experimental-repl-await"]
     assert parsed["mcp_servers"]["node_repl"]["startup_timeout_sec"] == 20
-    assert parsed["mcp_servers"]["cnki-search"] == server
+    assert parsed["mcp_servers"]["cnki-search-env"] == server
 
 
 def test_merge_codex_config_replaces_quoted_and_unquoted_cnki_headers() -> None:
-    existing = """[mcp_servers.cnki-search]
+    existing = """[mcp_servers.cnki-search-env]
 command = "old-one"
 
-["mcp_servers"."cnki-search".env]
+["mcp_servers"."cnki-search-env".env]
 PYTHONPATH = "old-one"
 
 [mcp_servers.zotero]
@@ -582,7 +667,7 @@ command = "zotero-mcp"
 
     assert "old-one" not in merged
     assert "[mcp_servers.zotero]\ncommand = \"zotero-mcp\"\n" in merged
-    assert tomllib.loads(merged)["mcp_servers"]["cnki-search"] == server
+    assert tomllib.loads(merged)["mcp_servers"]["cnki-search-env"] == server
 
 
 def test_merge_codex_config_preserves_user_array_tables_and_secrets() -> None:
@@ -590,7 +675,7 @@ def test_merge_codex_config_preserves_user_array_tables_and_secrets() -> None:
     existing = """[mcp_servers.zotero]
 command = "zotero-mcp"
 
-[mcp_servers.cnki-search]
+[mcp_servers.cnki-search-env]
 command = "OLD-PYTHON-SHOULD-BE-REPLACED"
 
 [[mcp_servers.custom.headers]]
@@ -609,17 +694,17 @@ command = "ai4scholar"
     merged = install_config.merge_codex_config(existing, server)
 
     parsed = tomllib.loads(merged)
-    assert sorted(parsed["mcp_servers"]) == ["ai4scholar", "cnki-search", "custom", "zotero"]
+    assert sorted(parsed["mcp_servers"]) == ["ai4scholar", "cnki-search-env", "custom", "zotero"]
     assert parsed["mcp_servers"]["custom"]["headers"] == [
         {"name": "X-Api-Key", "value": "user-secret-token"},
         {"name": "X-Tenant", "value": "lab-01"},
     ]
     assert "OLD-PYTHON-SHOULD-BE-REPLACED" not in merged
-    assert parsed["mcp_servers"]["cnki-search"] == server
+    assert parsed["mcp_servers"]["cnki-search-env"] == server
 
 
 def test_merge_codex_config_rejects_unreplaceable_inline_cnki_definition() -> None:
-    existing = 'mcp_servers.cnki-search = { command = "old" }\n'
+    existing = 'mcp_servers.cnki-search-env = { command = "old" }\n'
     server = cnki_server_config(Path("/opt/skill"), Path("/opt/python"))
 
     with pytest.raises(ValueError, match="无法安全替换"):
@@ -628,7 +713,7 @@ def test_merge_codex_config_rejects_unreplaceable_inline_cnki_definition() -> No
 
 def test_merge_codex_cli_reports_readable_error_instead_of_traceback(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
-    config.write_text('mcp_servers.cnki-search = { command = "old" }\n', encoding="utf-8")
+    config.write_text('mcp_servers.cnki-search-env = { command = "old" }\n', encoding="utf-8")
 
     exit_code = main(
         ["merge-codex", "--config", str(config), "--skill-root", "/opt/skill", "--python", "/opt/py"]
@@ -636,11 +721,11 @@ def test_merge_codex_cli_reports_readable_error_instead_of_traceback(tmp_path: P
 
     assert exit_code == 1
     # 失败发生在写盘之前，用户配置不受损
-    assert config.read_text(encoding="utf-8") == 'mcp_servers.cnki-search = { command = "old" }\n'
+    assert config.read_text(encoding="utf-8") == 'mcp_servers.cnki-search-env = { command = "old" }\n'
 
 
 def test_installers_gate_python_version_and_install_browser(skill_root: Path) -> None:
-    """3.10 can install dependencies but cannot start cnki_search, so installers must reject it."""
+    """3.10 can install dependencies but cannot start cnki_search_env, so installers must reject it."""
     powershell = (skill_root / "installers/install.ps1").read_text(encoding="utf-8")
     shell = (skill_root / "installers/install.sh").read_text(encoding="utf-8")
     for content in (powershell, shell):
@@ -659,7 +744,7 @@ def test_merge_codex_cli_writes_parseable_toml_with_windows_paths() -> None:
                 "--config",
                 str(config),
                 "--skill-root",
-                r"C:\用户\学术资料\top-journal-search-lists",
+                r"C:\用户\学术资料\top-journal-search-lists-env",
                 "--python",
                 r"C:\用户\运行时\python.exe",
             ]
@@ -667,7 +752,7 @@ def test_merge_codex_cli_writes_parseable_toml_with_windows_paths() -> None:
 
         assert exit_code == 0
         parsed = tomllib.loads(config.read_text(encoding="utf-8"))
-        assert parsed["mcp_servers"]["cnki-search"]["command"] == r"C:\用户\运行时\python.exe"
+        assert parsed["mcp_servers"]["cnki-search-env"]["command"] == r"C:\用户\运行时\python.exe"
     finally:
         if config.exists():
             config.unlink()
@@ -683,10 +768,10 @@ def test_readme_documents_supported_platforms_clients_and_installed_names():
         return readme[start:] if end == -1 else readme[start:end]
 
     required_text = (
-        "Top Journal and Public CNKI Search",
-        "$top-journal-search-lists",
-        "cnki-search",
-        "cnki_search(query, limit)",
+        "Top Environmental Journal Search",
+        "$top-journal-search-lists-env",
+        "cnki-search-env",
+        "cnki_search_env(query, limit)",
         "Claude Code",
         "Claude Desktop",
         "Codex CLI",
@@ -707,8 +792,8 @@ def test_readme_documents_supported_platforms_clients_and_installed_names():
     assert "Codex Desktop" not in readme
     assert "ChatGPT Desktop 中的 Codex" in windows
     assert "ChatGPT Desktop 中的 Codex" in macos
-    assert "powershell -ExecutionPolicy Bypass -File .\\top-journal-search-lists\\installers\\install.ps1 -Codex -ClaudeCode -ClaudeDesktop" in windows
-    assert "sh ./top-journal-search-lists/installers/install.sh --codex --claude-code --claude-desktop" in macos
+    assert "powershell -ExecutionPolicy Bypass -File .\\top-journal-search-lists-env\\installers\\install.ps1 -Codex -ClaudeCode -ClaudeDesktop" in windows
+    assert "sh ./top-journal-search-lists-env/installers/install.sh --codex --claude-code --claude-desktop" in macos
 
 
 def test_readme_documents_installer_runtime_and_platform_boundaries():
@@ -756,18 +841,18 @@ def test_readme_documents_cross_computer_installation_and_verification():
     assert "Claude Desktop（Linux beta）" in linux
     assert "目前没有官方 Linux 版 ChatGPT Desktop" in linux
     assert "Claude Desktop 也不支持 Linux" not in linux
-    assert "sh ./top-journal-search-lists/installers/install.sh --claude-desktop" in linux
+    assert "sh ./top-journal-search-lists-env/installers/install.sh --claude-desktop" in linux
     assert (
-        "sh ./top-journal-search-lists/installers/install.sh "
+        "sh ./top-journal-search-lists-env/installers/install.sh "
         "--codex --claude-code --claude-desktop"
     ) in linux
     assert "~/.config/Claude/claude_desktop_config.json" in linux
     wsl_text = linux
     assert "Windows 侧 ChatGPT Desktop 中的 Codex" in wsl_text
     assert "Windows" in verification
-    assert "python top-journal-search-lists/scripts/catalog_lookup.py validate" in verification
+    assert "python top-journal-search-lists-env/scripts/catalog_lookup.py validate" in verification
     assert "macOS/Linux" in verification
-    assert "python3 top-journal-search-lists/scripts/catalog_lookup.py validate" in verification
+    assert "python3 top-journal-search-lists-env/scripts/catalog_lookup.py validate" in verification
     assert "pytest" not in verification
     assert "pytest" in developer_checks
     assert "开发环境安装 pytest" in developer_checks
