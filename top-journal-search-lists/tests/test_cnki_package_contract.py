@@ -30,12 +30,29 @@ def test_cnki_runtime_contract(skill_root: Path) -> None:
     assert "中国知网" in (skill_root / "README.md").read_text(encoding="utf-8")
 
 
-def test_package_exposes_public_home_and_no_legacy_capabilities(skill_root: Path) -> None:
-    code_files = [
-        *(skill_root / "scripts/cnki_search").glob("*.py"),
-        *(skill_root / "mcpb/src/cnki_search").glob("*.py"),
+#: 人工值守的 WebVPN 模式独占的模块。公开匿名模式的边界对它们不适用，
+#: 但它们各自的边界由 test_webvpn_modules_are_isolated_and_self_documented 单独把守。
+WEBVPN_MODULES = {"webvpn.py", "professional.py"}
+
+
+def _public_mode_sources(skill_root: Path) -> list[Path]:
+    return [
+        path
+        for directory in ("scripts/cnki_search", "mcpb/src/cnki_search")
+        for path in (skill_root / directory).glob("*.py")
+        if path.name not in WEBVPN_MODULES
     ]
-    combined = "\n".join(path.read_text(encoding="utf-8").casefold() for path in code_files)
+
+
+def test_package_exposes_public_home_and_no_legacy_capabilities(skill_root: Path) -> None:
+    """公开匿名模式的边界不因新增 WebVPN 模式而放松。
+
+    这些令牌当初是随登录/下载/高级检索能力一并移除的，此处防回退。
+    WebVPN 模式的代码集中在 WEBVPN_MODULES，不得渗回公开模式的模块。
+    """
+    combined = "\n".join(
+        path.read_text(encoding="utf-8").casefold() for path in _public_mode_sources(skill_root)
+    )
     assert "https://www.cnki.net/" in combined
     for token in (
         "webvpn",
@@ -46,9 +63,25 @@ def test_package_exposes_public_home_and_no_legacy_capabilities(skill_root: Path
         "detail_url",
         "download_url",
     ):
-        assert token not in combined
+        assert token not in combined, f"公开匿名模式的模块不得引入 {token}"
     bundled_names = {path.name for path in (skill_root / "mcpb/src/cnki_search").glob("*.py")}
     assert not bundled_names & LEGACY_MODULES
+
+
+def test_webvpn_modules_are_isolated_and_self_documented(skill_root: Path) -> None:
+    """WebVPN 模式必须在代码里写明它不可无人值守，且不得夹带检测规避手段。"""
+    for directory in ("scripts/cnki_search", "mcpb/src/cnki_search"):
+        module = (skill_root / directory / "webvpn.py").read_text(encoding="utf-8")
+        for statement in ("人工", "值守", "不得自动破解"):
+            assert statement in module, f"{directory}/webvpn.py 缺少人工值守声明：{statement}"
+        # 绕过风控的手段一律禁止，这条底线不随模式改变。只查实际用法，
+        # 说明文字里提到这些概念（例如解释"与 User-Agent 无关"）不算违规。
+        for forbidden in ("user_agent=", "--proxy-server", "--user-agent",
+                          "stealth", "navigator.webdriver"):
+            assert forbidden not in module.casefold(), f"webvpn.py 不得使用检测规避手段 {forbidden}"
+        # 票据跨进程无效，落盘只会平白多一处凭据泄露面。同样只禁实际调用。
+        for forbidden in ("storage_state=", ".storage_state("):
+            assert forbidden not in module, f"webvpn.py 不得持久化登录票据（{forbidden}）"
 
 
 def _run_layout_contract(layout_root: Path) -> dict[str, object]:
