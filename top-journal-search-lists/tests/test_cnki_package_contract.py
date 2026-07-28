@@ -266,16 +266,40 @@ def test_skill_uses_ai4scholar_as_primary_and_cnki_as_supplement(skill_root: Pat
         assert required in text
 
 
+DOCUMENTATION_FILES = ("SKILL.md", "README.md", "references/cnki-search-reference.md")
+
+
 def test_public_documentation_contract(skill_root: Path) -> None:
-    files = ("SKILL.md", "README.md", "references/cnki-search-reference.md")
+    """公开匿名模式的边界必须在每份文档里写明，且旧能力一律不得复活。
+
+    WebVPN 人工值守模式是并列的第二种模式，不放松这里的任何一条——它的额外
+    约束由 test_webvpn_documentation_states_its_constraints 单独把守。
+    """
     required = ("公开首页", "主题检索", "第一页", "不登录", "不下载", "不持久化 Cookie")
-    forbidden = ("WebVPN", "高级检索", "专业检索", "cnki_login", "cnki_fetch_details", "cnki_download")
-    for relative in files:
+    forbidden = ("cnki_login", "cnki_fetch_details", "cnki_download")
+    for relative in DOCUMENTATION_FILES:
         content = (skill_root / relative).read_text(encoding="utf-8")
         for item in required:
             assert item in content, f"{relative} 缺少 {item}"
         for item in forbidden:
             assert item not in content, f"{relative} 包含旧能力 {item}"
+
+
+def test_webvpn_documentation_states_its_constraints(skill_root: Path) -> None:
+    """凡是提到 WebVPN 或专业检索的文档，必须同时写明它不可无人值守。
+
+    否则读者会把它当成和公开检索一样可以随手调用的能力，进而安排定时任务，
+    而该模式在无人时必然失败（登录与验证码都需要人）。
+    """
+    for relative in DOCUMENTATION_FILES:
+        content = (skill_root / relative).read_text(encoding="utf-8")
+        if "WebVPN" not in content and "专业检索" not in content:
+            continue
+        for statement in ("人工值守", "不可用于定时任务", "机构授权"):
+            assert statement in content, f"{relative} 提到 WebVPN/专业检索但缺少：{statement}"
+        # 底线不随模式改变：机构合法认证 ≠ 检测规避
+        for statement in ("不伪造", "不轮换代理", "不自动破解"):
+            assert statement in content, f"{relative} 缺少检测规避禁令：{statement}"
 
 
 def test_documentation_describes_only_ephemeral_memory_cache(skill_root: Path) -> None:
