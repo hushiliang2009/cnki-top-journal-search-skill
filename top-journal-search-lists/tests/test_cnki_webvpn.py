@@ -416,6 +416,27 @@ def test_ephemeral_factory_closes_browser_when_context_creation_fails() -> None:
     assert browser.closed
 
 
+def test_ephemeral_factory_closes_browser_when_context_creation_is_cancelled() -> None:
+    page = FakePage(["中国知网"])
+    context = FakeContext(page)
+    browser = FakeBrowser(context)
+    playwright = FakePlaywright(browser)
+    cancellation = asyncio.CancelledError("new_context cancelled")
+
+    async def cancel_new_context(**_kwargs):
+        raise cancellation
+
+    browser.new_context = cancel_new_context
+
+    async def scenario() -> None:
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await webvpn._EphemeralContextFactory(playwright).launch()
+        assert raised.value is cancellation
+
+    asyncio.run(scenario())
+    assert browser.closed
+
+
 def test_session_cleans_up_when_factory_launch_fails_and_preserves_error() -> None:
     page = FakePage(["中国知网"])
     context = FakeContext(page)
@@ -440,6 +461,57 @@ def test_session_cleans_up_when_factory_launch_fails_and_preserves_error() -> No
         assert raised.value is failure
 
     asyncio.run(scenario())
+    assert playwright.stopped
+
+
+@pytest.mark.parametrize(
+    "initial_failure",
+    [RuntimeError("goto failed"), asyncio.CancelledError("goto cancelled")],
+    ids=["original_error", "original_cancellation"],
+)
+def test_session_finishes_cleanup_when_enter_task_is_cancelled_again(
+    initial_failure: BaseException,
+) -> None:
+    session, page, context, browser, playwright, _factory = _session(["中国知网"])
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+
+    async def fail_goto(_url: str, *, wait_until: str):
+        raise initial_failure
+
+    async def slow_context_close() -> None:
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        context.closed = True
+
+    page.goto = fail_goto
+    context.close = slow_context_close
+
+    async def scenario() -> BaseException:
+        async def enter() -> BaseException:
+            try:
+                await session.__aenter__()
+            except BaseException as raised:
+                return raised
+            raise AssertionError("__aenter__ 应当失败")
+
+        task = asyncio.create_task(enter())
+        await cleanup_started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        allow_cleanup.set()
+        result = await task
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return result
+
+    raised = asyncio.run(scenario())
+
+    assert raised is initial_failure
+    assert context.closed
+    assert browser.closed
     assert playwright.stopped
 
 

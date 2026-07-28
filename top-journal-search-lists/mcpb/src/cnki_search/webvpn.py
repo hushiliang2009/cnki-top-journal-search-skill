@@ -141,6 +141,17 @@ class WebVpnWindowClosed(RuntimeError):
     """浏览器窗口被关闭，会话无法继续。关窗等同于登出。"""
 
 
+async def _finish_cleanup(cleanup: Awaitable[Any]) -> None:
+    """等待清理任务完成，期间外层任务的重复取消不得中断资源回收。"""
+    task = asyncio.ensure_future(cleanup)
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    await task
+
+
 @dataclass(frozen=True, slots=True)
 class WebVpnConfig:
     """WebVPN 入口配置。
@@ -348,7 +359,7 @@ class WebVpnSession:
                 self.config.home_url, wait_until="domcontentloaded"))
             return self
         except BaseException:
-            await asyncio.shield(self.close())
+            await _finish_cleanup(self.close())
             raise
 
     async def wait_until_ready(self, *, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -386,7 +397,7 @@ class WebVpnSession:
             (self._playwright, "stop"),
         ):
             if resource is not None:
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception, asyncio.CancelledError):
                     await await_maybe(getattr(resource, method)())
         self.page = self.context = self.browser = self._playwright = None
 
@@ -665,10 +676,12 @@ class _EphemeralContextFactory:
                 accept_downloads=False,
             ))
             return browser, context
-        except Exception as exc:
+        except BaseException as exc:
             if browser is not None:
-                with contextlib.suppress(Exception):
-                    await await_maybe(browser.close())
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await _finish_cleanup(await_maybe(browser.close()))
+            if not isinstance(exc, Exception):
+                raise
             raise BrowserUnavailableError(
                 "无法启动有头浏览器：WebVPN 模式需要图形界面完成人工认证"
             ) from exc
