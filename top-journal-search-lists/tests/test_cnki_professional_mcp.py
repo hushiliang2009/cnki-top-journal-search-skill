@@ -1,9 +1,17 @@
 import asyncio
+from datetime import date
 
 import pytest
 
 from cnki_search import mcp_server
+from cnki_search.browser import BrowserUnavailableError
 from cnki_search.mcp_server import CnkiMcpServer
+from cnki_search.webvpn import (
+    ExpressionTruncated,
+    WebVpnLoginTimeout,
+    WebVpnNavigationError,
+    WebVpnWindowClosed,
+)
 
 
 class RecordingMcp:
@@ -70,6 +78,30 @@ def test_enabled_flag_follows_the_environment(monkeypatch: pytest.MonkeyPatch) -
     assert mcp_server.webvpn_enabled() is True
 
 
+def test_enabled_default_server_builds_production_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = FakeProfessionalService()
+    created = 0
+
+    async def build():
+        nonlocal created
+        created += 1
+        return runtime
+
+    monkeypatch.setenv(
+        "CNKI_WEBVPN_HOME", "https://webvpn.example.edu.cn/https/abc/"
+    )
+    monkeypatch.setattr(
+        mcp_server, "build_professional_runtime_from_env", build, raising=False
+    )
+    server = CnkiMcpServer()
+    result = asyncio.run(server.cnki_professional_search("数字经济"))
+
+    assert result["status"] == "success"
+    assert created == 1
+
+
 def test_english_priority_groups_are_refused_before_any_session_is_opened() -> None:
     service = FakeProfessionalService()
     server = _server_with_service(service)
@@ -126,3 +158,54 @@ def test_shutdown_still_rejects_professional_calls() -> None:
     server.shutdown()
     with pytest.raises(RuntimeError):
         asyncio.run(server.cnki_professional_search("主题"))
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (BrowserUnavailableError("没有图形界面"), "configuration_error"),
+        (ValueError("WebVPN 入口必须是 https 地址"), "configuration_error"),
+        (WebVpnLoginTimeout("登录超时"), "login_required"),
+        (WebVpnWindowClosed("窗口已关闭"), "login_required"),
+        (WebVpnNavigationError("页面改版"), "page_contract_changed"),
+        (ExpressionTruncated("表达式被截断"), "page_contract_changed"),
+    ],
+)
+def test_runtime_errors_are_mapped_to_stable_mcp_statuses(
+    error: Exception, expected_status: str
+) -> None:
+    class FailingRuntime:
+        async def search_group(self, *_args, **_kwargs):
+            raise error
+
+    server = _server_with_service(FailingRuntime())
+    result = asyncio.run(server.cnki_professional_search("数字经济"))
+
+    assert result["ok"] is False
+    assert result["status"] == expected_status
+    assert result["detail"] == str(error)
+
+
+def test_professional_cancellation_propagates() -> None:
+    class CancelledRuntime:
+        async def search_group(self, *_args, **_kwargs):
+            raise asyncio.CancelledError
+
+    server = _server_with_service(CancelledRuntime())
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(server.cnki_professional_search("数字经济"))
+
+
+def test_professional_year_schema_has_supported_bounds() -> None:
+    from mcp.server.fastmcp import FastMCP
+
+    mcp = CnkiMcpServer().build_fastmcp(FastMCP)
+    tool = next(
+        item
+        for item in mcp._tool_manager.list_tools()
+        if item.name == "cnki_professional_search"
+    )
+    for name in ("year_from", "year_to"):
+        integer_schema = tool.parameters["properties"][name]["anyOf"][0]
+        assert integer_schema["minimum"] == 1900
+        assert integer_schema["maximum"] == date.today().year + 1

@@ -32,7 +32,12 @@ def test_cnki_runtime_contract(skill_root: Path) -> None:
 
 #: 人工值守的 WebVPN 模式独占的模块。公开匿名模式的边界对它们不适用，
 #: 但它们各自的边界由 test_webvpn_modules_are_isolated_and_self_documented 单独把守。
-WEBVPN_MODULES = {"webvpn.py", "professional.py", "professional_service.py"}
+WEBVPN_MODULES = {
+    "webvpn.py",
+    "professional.py",
+    "professional_runtime.py",
+    "professional_service.py",
+}
 
 
 #: 两种模式共用的注册入口。它必须能命名 WebVPN 模式（工具描述、启用用的环境
