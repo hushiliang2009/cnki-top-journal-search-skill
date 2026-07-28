@@ -214,6 +214,32 @@ def _load_helper_module(skill_root: Path, name: str) -> Any:
     return module
 
 
+def test_webvpn_probe_uses_current_ephemeral_config_contract(
+    skill_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_helper_module(skill_root, "_webvpn_probe")
+    captured: list[Any] = []
+
+    async def fake_run_probe(config: Any, *, submit_topic: str | None = None) -> Any:
+        captured.append((config, submit_topic))
+        return probe.ProbeResult(0, {}, {"contract_ok": True})
+
+    monkeypatch.setattr(probe, "run_probe", fake_run_probe)
+    output = tmp_path / "webvpn-probe.json"
+
+    exit_code = probe.main([
+        "--home", "https://webvpn.example.edu.cn/https/abc/",
+        "--output", str(output),
+    ])
+
+    assert exit_code == 0
+    assert captured == [(
+        probe.WebVpnConfig("https://webvpn.example.edu.cn/https/abc/"),
+        None,
+    )]
+    assert output.is_file()
+
+
 _SMOKE_RESULT_HTML = """
 <table class="result-table-list"><tbody>
   <tr>

@@ -335,16 +335,21 @@ class WebVpnSession:
         self.page: Any = None
 
     async def __aenter__(self) -> "WebVpnSession":
-        if self._context_factory is None:
-            self._playwright = await _start_playwright()
-            self._context_factory = _EphemeralContextFactory(self._playwright)
-        else:
-            self._playwright = getattr(self._context_factory, "playwright", None)
-        self.browser, self.context = await await_maybe(self._context_factory.launch())
-        pages = getattr(self.context, "pages", None) or []
-        self.page = pages[0] if pages else await await_maybe(self.context.new_page())
-        await await_maybe(self.page.goto(self.config.home_url, wait_until="domcontentloaded"))
-        return self
+        try:
+            if self._context_factory is None:
+                self._playwright = await _start_playwright()
+                self._context_factory = _EphemeralContextFactory(self._playwright)
+            else:
+                self._playwright = getattr(self._context_factory, "playwright", None)
+            self.browser, self.context = await await_maybe(self._context_factory.launch())
+            pages = getattr(self.context, "pages", None) or []
+            self.page = pages[0] if pages else await await_maybe(self.context.new_page())
+            await await_maybe(self.page.goto(
+                self.config.home_url, wait_until="domcontentloaded"))
+            return self
+        except BaseException:
+            await asyncio.shield(self.close())
+            raise
 
     async def wait_until_ready(self, *, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                                now: Callable[[], float] = time.monotonic) -> None:
@@ -650,6 +655,7 @@ class _EphemeralContextFactory:
         self.playwright = playwright
 
     async def launch(self) -> tuple[Any, Any]:
+        browser = None
         try:
             browser = await await_maybe(
                 self.playwright.chromium.launch(headless=False)
@@ -660,6 +666,9 @@ class _EphemeralContextFactory:
             ))
             return browser, context
         except Exception as exc:
+            if browser is not None:
+                with contextlib.suppress(Exception):
+                    await await_maybe(browser.close())
             raise BrowserUnavailableError(
                 "无法启动有头浏览器：WebVPN 模式需要图形界面完成人工认证"
             ) from exc

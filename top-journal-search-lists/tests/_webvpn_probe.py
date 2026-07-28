@@ -207,8 +207,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="WebVPN 专业检索页结构探针（需人工登录，不进 CI）")
     parser.add_argument("--home", required=True,
                         help="所在机构 WebVPN 改写后的知网首页地址")
-    parser.add_argument("--profile", required=True, type=Path,
-                        help="专用浏览器配置文件目录（人工在其中登录一次）")
     parser.add_argument("--output", required=True, type=Path, help="脱敏 JSON 证据输出路径")
     parser.add_argument("--submit", metavar="TOPIC", default=None,
                         help="额外提交一次 13 本中文顶尖期刊的定向检索（会消耗限流预算）")
@@ -217,7 +215,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    config = WebVpnConfig(home_url=args.home, profile_dir=args.profile)
+    config = WebVpnConfig(home_url=args.home)
     result = asyncio.run(run_probe(config, submit_topic=args.submit))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
