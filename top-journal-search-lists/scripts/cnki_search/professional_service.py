@@ -27,6 +27,7 @@ from .professional import (
     ExpressionBatch,
     build_batches,
     build_expression,
+    build_topic_expression,
 )
 from .ranking import annotate_and_sort_records
 from .results import parse_public_result_page
@@ -54,9 +55,9 @@ class BatchOutcome:
     detail: str | None = None
 
 
-#: 页面驱动：接收一条表达式，返回 ``(status, html, url)``。
+#: 页面驱动：接收完整执行计划，返回 ``(status, html, url)``。
 #: 真实实现驱动浏览器；测试注入假实现即可完全离线。
-ExpressionExecutor = Callable[[str], Awaitable[tuple[str, str, str]]]
+ExpressionExecutor = Callable[[ExpressionBatch], Awaitable[tuple[str, str, str]]]
 
 
 class CnkiProfessionalSearchService:
@@ -81,12 +82,21 @@ class CnkiProfessionalSearchService:
             raise ValueError(
                 f"CNKI 专业检索只覆盖中文层级 {SUPPORTED_GROUPS}，收到 {group!r}"
             )
-        journals = journals_by_group(group, self.catalog)
-        batches = build_batches(topic, journals, year_from=year_from, year_to=year_to,
-                                max_chars=self.max_expression_chars)
+        batches = build_group_plans(
+            topic,
+            group,
+            catalog=self.catalog,
+            max_chars=self.max_expression_chars,
+            year_from=year_from,
+            year_to=year_to,
+        )
         summary = await self._run(batches, limit)
         summary["group"] = group
-        summary["journal_count"] = len(journals)
+        if group == CHINESE_TOP_GROUP:
+            summary["journal_count"] = 13
+        else:
+            summary["journal_count"] = None
+            summary["source_category"] = "CSSCI"
         return summary
 
     async def search_expression(self, expression: str, *, limit: int = 20) -> dict[str, Any]:
@@ -96,7 +106,7 @@ class CnkiProfessionalSearchService:
 
     async def _run(self, batches: list[ExpressionBatch], limit: int) -> dict[str, Any]:
         async def execute(batch: ExpressionBatch) -> dict[str, Any]:
-            status, html, url = await self.executor(batch.expression)
+            status, html, url = await self.executor(batch)
             if status != SearchStatus.SUCCESS.value:
                 return {"index": batch.index, "status": status, "result_url": url}
             parsed = parse_public_result_page(html, query=batch.expression, limit=limit)
@@ -154,16 +164,74 @@ class CnkiProfessionalSearchService:
         }
 
 
+def build_group_plans(
+    topic: str,
+    group: str,
+    *,
+    catalog: Path = DEFAULT_CATALOG,
+    max_chars: int = DEFAULT_MAX_EXPRESSION_CHARS,
+    year_from: int | None = None,
+    year_to: int | None = None,
+) -> list[ExpressionBatch]:
+    if group == CHINESE_TOP_GROUP:
+        return build_batches(
+            topic,
+            journals_by_group(group, catalog),
+            year_from=year_from,
+            year_to=year_to,
+            max_chars=max_chars,
+        )
+    if group == CSSCI_GROUP:
+        return [
+            ExpressionBatch(
+                index=1,
+                total=1,
+                journals=(),
+                expression=build_topic_expression(
+                    topic, year_from=year_from, year_to=year_to
+                ),
+                source_category="CSSCI",
+            )
+        ]
+    raise ValueError(
+        f"CNKI 专业检索只覆盖中文层级 {SUPPORTED_GROUPS}，收到 {group!r}"
+    )
+
+
+def preview_plans(
+    topic: str,
+    group: str,
+    *,
+    catalog: Path = DEFAULT_CATALOG,
+    max_chars: int = DEFAULT_MAX_EXPRESSION_CHARS,
+    year_from: int | None = None,
+    year_to: int | None = None,
+) -> list[ExpressionBatch]:
+    return build_group_plans(
+        topic,
+        group,
+        catalog=catalog,
+        max_chars=max_chars,
+        year_from=year_from,
+        year_to=year_to,
+    )
+
+
 def preview_expressions(topic: str, group: str, *, catalog: Path = DEFAULT_CATALOG,
                         max_chars: int = DEFAULT_MAX_EXPRESSION_CHARS,
                         year_from: int | None = None,
                         year_to: int | None = None) -> list[str]:
     """不触网地预览将要提交的表达式，便于人工复核覆盖范围。"""
-    journals = journals_by_group(group, catalog)
     return [
         batch.expression
-        for batch in build_batches(topic, journals, year_from=year_from,
-                                   year_to=year_to, max_chars=max_chars)
+        for batch in preview_plans(
+            topic,
+            group,
+            catalog=catalog,
+            max_chars=max_chars,
+            year_from=year_from,
+            year_to=year_to,
+        )
     ]
 
 
@@ -173,6 +241,11 @@ __all__ = [
     "SUPPORTED_GROUPS",
     "BatchOutcome",
     "CnkiProfessionalSearchService",
+    "ExpressionBatch",
+    "ExpressionExecutor",
+    "build_group_plans",
     "build_expression",
+    "build_topic_expression",
+    "preview_plans",
     "preview_expressions",
 ]

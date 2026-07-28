@@ -4,6 +4,7 @@ import pytest
 
 from cnki_search import professional_service as service_module
 from cnki_search.models import SearchStatus
+from cnki_search.professional import ExpressionBatch
 from cnki_search.professional_service import CnkiProfessionalSearchService, preview_expressions
 
 
@@ -27,10 +28,10 @@ RESULT_TEMPLATE = """
 """
 
 
-def _executor(pages: list[tuple[str, str]], seen: list[str] | None = None):
-    async def execute(expression: str) -> tuple[str, str, str]:
+def _executor(pages: list[tuple[str, str]], seen: list[ExpressionBatch] | None = None):
+    async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
         if seen is not None:
-            seen.append(expression)
+            seen.append(plan)
         title, journal = pages.pop(0)
         return (SearchStatus.SUCCESS.value,
                 RESULT_TEMPLATE.format(title=title, journal=journal),
@@ -38,14 +39,32 @@ def _executor(pages: list[tuple[str, str]], seen: list[str] | None = None):
     return execute
 
 
+def test_chinese_top_plan_uses_exact_journals_without_facet() -> None:
+    plans = service_module.preview_plans("数字经济", service_module.CHINESE_TOP_GROUP)
+    assert len(plans) == 1
+    assert "LY='管理世界'" in plans[0].expression
+    assert plans[0].source_category is None
+    assert plans[0].page_size == 50
+
+
+def test_cssci_plan_uses_one_topic_expression_and_result_facet() -> None:
+    plans = service_module.preview_plans("数字化转型", service_module.CSSCI_GROUP)
+    assert len(plans) == 1
+    assert plans[0].expression == "SU %= '数字化转型'"
+    assert "LY=" not in plans[0].expression
+    assert plans[0].source_category == "CSSCI"
+    assert plans[0].page_size == 50
+
+
 def test_chinese_top_group_fits_one_batch_and_is_annotated_at_level_six() -> None:
-    seen: list[str] = []
+    seen: list[ExpressionBatch] = []
     service = CnkiProfessionalSearchService(
         _executor([("数字经济与全要素生产率", "管理世界")], seen))
     result = asyncio.run(service.search_group("数字经济", service_module.CHINESE_TOP_GROUP))
 
     assert len(seen) == 1, "13 本顶刊必须单批完成"
     assert result["journal_count"] == 13
+    assert seen[0].source_category is None
     assert result["batches_total"] == 1 and result["complete"] is True
     assert result["status"] == SearchStatus.SUCCESS.value
     record = result["records"][0]
@@ -78,12 +97,12 @@ def test_only_chinese_priority_groups_are_accepted() -> None:
             asyncio.run(service.search_group("主题", group))
 
 
-def test_cssci_group_is_split_into_multiple_batches_and_merged() -> None:
+def test_cssci_group_uses_one_facet_plan() -> None:
     pages = [("论文甲", "管理评论"), ("论文乙", "财经研究")]
-    seen: list[str] = []
+    seen: list[ExpressionBatch] = []
 
-    async def execute(expression: str) -> tuple[str, str, str]:
-        seen.append(expression)
+    async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
+        seen.append(plan)
         title, journal = pages[min(len(seen) - 1, len(pages) - 1)]
         return (SearchStatus.SUCCESS.value,
                 RESULT_TEMPLATE.format(title=title, journal=journal), "https://example.invalid/")
@@ -92,9 +111,12 @@ def test_cssci_group_is_split_into_multiple_batches_and_merged() -> None:
     service = CnkiProfessionalSearchService(execute, max_expression_chars=900)
     result = asyncio.run(service.search_group("数字化转型", service_module.CSSCI_GROUP))
 
-    assert result["journal_count"] == 661
-    assert result["batches_total"] > 1
+    assert result["journal_count"] is None
+    assert result["source_category"] == "CSSCI"
+    assert result["batches_total"] == 1
     assert len(seen) == result["batches_total"]
+    assert seen[0].source_category == "CSSCI"
+    assert "LY=" not in seen[0].expression
     assert all(record["priority_level"] == 9 for record in result["records"])
 
 
@@ -132,9 +154,9 @@ def test_result_always_exposes_the_human_attendance_flag() -> None:
 
 
 def test_custom_expression_runs_without_batching() -> None:
-    seen: list[str] = []
+    seen: list[ExpressionBatch] = []
     service = CnkiProfessionalSearchService(_executor([("某文", "经济研究")], seen))
     expression = "SU %= '碳中和' AND LY='经济研究' AND YE BETWEEN ('2020', '2026')"
     result = asyncio.run(service.search_expression(expression))
-    assert seen == [expression]
+    assert [plan.expression for plan in seen] == [expression]
     assert result["batches_total"] == 1 and result["expressions"] == [expression]
