@@ -29,7 +29,7 @@ async def run() -> None:
             await session.initialize()
             tools = await session.list_tools()
             names = [tool.name for tool in tools.tools]
-            assert names == ["cnki_search"]
+            assert names == ["cnki_search", "cnki_professional_search"]
             print({"tools": names})
 
 

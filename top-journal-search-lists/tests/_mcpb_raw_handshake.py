@@ -54,7 +54,7 @@ def main() -> None:
         send(process, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         tools = receive(process)
         names = [tool["name"] for tool in tools["result"]["tools"]]
-        assert names == ["cnki_search"]
+        assert names == ["cnki_search", "cnki_professional_search"]
         print(
             json.dumps(
                 {

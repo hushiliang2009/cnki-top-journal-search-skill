@@ -18,9 +18,12 @@ class FakeService:
         )
 
 
-def test_mcp_exposes_exact_public_tool() -> None:
+def test_mcp_exposes_exact_tool_set() -> None:
+    """两个工具，一个不多一个不少。旧能力（登录/下载/导出）不得以任何形式回来。"""
     server = CnkiMcpServer(service=FakeService())
-    assert server.tool_names() == REQUIRED_TOOLS == ["cnki_search"]
+    assert server.tool_names() == REQUIRED_TOOLS == [
+        "cnki_search", "cnki_professional_search",
+    ]
 
 
 def test_public_signature_is_query_and_limit_only() -> None:

@@ -35,12 +35,17 @@ def test_cnki_runtime_contract(skill_root: Path) -> None:
 WEBVPN_MODULES = {"webvpn.py", "professional.py", "professional_service.py"}
 
 
+#: 两种模式共用的注册入口。它必须能命名 WebVPN 模式（工具描述、启用用的环境
+#: 变量），但旧能力令牌对它同样禁止。
+SHARED_ENTRY_MODULES = {"mcp_server.py"}
+
+
 def _public_mode_sources(skill_root: Path) -> list[Path]:
     return [
         path
         for directory in ("scripts/cnki_search", "mcpb/src/cnki_search")
         for path in (skill_root / directory).glob("*.py")
-        if path.name not in WEBVPN_MODULES
+        if path.name not in WEBVPN_MODULES | SHARED_ENTRY_MODULES
     ]
 
 
@@ -66,6 +71,18 @@ def test_package_exposes_public_home_and_no_legacy_capabilities(skill_root: Path
         assert token not in combined, f"公开匿名模式的模块不得引入 {token}"
     bundled_names = {path.name for path in (skill_root / "mcpb/src/cnki_search").glob("*.py")}
     assert not bundled_names & LEGACY_MODULES
+
+
+def test_shared_entry_may_name_webvpn_but_not_revive_legacy_capabilities(
+    skill_root: Path,
+) -> None:
+    """注册入口可以命名 WebVPN 模式，但旧能力令牌对它同样禁止。"""
+    for directory in ("scripts/cnki_search", "mcpb/src/cnki_search"):
+        for name in SHARED_ENTRY_MODULES:
+            content = (skill_root / directory / name).read_text(encoding="utf-8").casefold()
+            for token in ("advsearch", "brief/grid", "senquery",
+                          "access_confirmed", "detail_url", "download_url"):
+                assert token not in content, f"{directory}/{name} 不得引入 {token}"
 
 
 def test_webvpn_modules_are_isolated_and_self_documented(skill_root: Path) -> None:
