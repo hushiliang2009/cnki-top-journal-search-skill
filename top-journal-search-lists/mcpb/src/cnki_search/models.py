@@ -7,6 +7,10 @@ from enum import StrEnum
 from typing import Any
 
 
+#: 知网结果页「显示」下拉的最大档位，实测选项为 10/20/50，没有更大的档。
+#: 50 是站点上限，不是我们自选的数字。
+MAX_RESULTS_PER_PAGE = 50
+
 MAX_TITLE_LENGTH = 500
 MAX_JOURNAL_LENGTH = 300
 MAX_AUTHOR_LENGTH = 120
@@ -42,8 +46,8 @@ class SearchRequest:
         normalized = " ".join(unicodedata.normalize("NFKC", self.query).split())
         if not normalized:
             raise ValueError("主题检索词不能为空")
-        if not 1 <= self.limit <= 20:
-            raise ValueError("返回数量必须为 1 到 20")
+        if not 1 <= self.limit <= MAX_RESULTS_PER_PAGE:
+            raise ValueError(f"返回数量必须为 1 到 {MAX_RESULTS_PER_PAGE}")
         object.__setattr__(self, "query", normalized)
 
 

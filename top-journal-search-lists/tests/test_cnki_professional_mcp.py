@@ -103,19 +103,22 @@ def test_session_is_created_once_and_reused() -> None:
     assert created == 1 and len(service.calls) == 2
 
 
-def test_limit_bounds_stay_at_twenty_until_page_size_is_confirmed() -> None:
-    """P3（每页可否设为 50）未确认前不得声称支持 50。
+def test_limit_matches_the_measured_page_size_ceiling() -> None:
+    """上限 50 来自实测：结果页「显示」下拉档位为 10/20/50，选 50 确实返回 50 行。
 
-    声称 50 却只返回 20，调用方会误以为结果被截断，进而重复检索——既浪费
-    限流预算，也可能把「就这么多文献」的错误结论写进综述。
+    不能凭空往上写——声称支持的条数大于站点实际返回，调用方会误以为结果被
+    截断而重复检索，既浪费限流预算，也可能把"就这么多文献"的错误结论写进综述。
     """
     import inspect
 
-    assert mcp_server.MAX_LIMIT == 20
+    # 两种模式的上限不同，且都必须反映各自真正能拿到的条数
+    assert mcp_server.MAX_LIMIT == 20                  # 公开模式不切档位
+    assert mcp_server.MAX_PROFESSIONAL_LIMIT == 50     # 专业检索主动切到 50
     mcp = CnkiMcpServer().build_fastmcp(RecordingMcp)
-    for name in ("cnki_search", "cnki_professional_search"):
+    expected = {"cnki_search": 20, "cnki_professional_search": 50}
+    for name, default in expected.items():
         parameters = inspect.signature(mcp.tools[name]["fn"]).parameters
-        assert parameters["limit"].default == 20, name
+        assert parameters["limit"].default == default, name
 
 
 def test_shutdown_still_rejects_professional_calls() -> None:

@@ -141,7 +141,7 @@ def _run_layout_contract(layout_root: Path) -> dict[str, object]:
         from cnki_search.session import CNKI_HOME_URL
 
         invalid_limits = []
-        for limit in (0, 21):
+        for limit in (0, 51):
             try:
                 SearchRequest("topic", limit)
             except ValueError:
@@ -177,7 +177,7 @@ def test_skill_and_mcpb_layouts_independently_meet_runtime_contract(skill_root: 
         state = _run_layout_contract(layout_root)
         assert state["home_url"] == "https://www.cnki.net/", layout_name
         assert state["normalized_query"] == "topic phrase", layout_name
-        assert state["invalid_limits"] == [0, 21], layout_name
+        assert state["invalid_limits"] == [0, 51], layout_name
         assert state["catalog_exists"] is True, layout_name
 
 

@@ -716,7 +716,9 @@ def test_readme_documents_installer_runtime_and_platform_boundaries():
     readme = (skill_root / "README.md").read_text(encoding="utf-8")
 
     required_text = (
-        "`limit` 最大为 20",
+        # 两种模式上限不同，README 必须分别写明各自真正能拿到的条数
+        "公开检索最大 20",
+        "专业检索最大 50",
         "Claude Desktop（Linux beta）",
         "官方 Linux 版 ChatGPT Desktop",
         "WSL 中的安装属于 Linux 侧安装",

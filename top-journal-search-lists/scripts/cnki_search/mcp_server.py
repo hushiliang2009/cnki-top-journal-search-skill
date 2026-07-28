@@ -8,14 +8,19 @@ from typing import Annotated, Any
 from pydantic import Field
 
 from . import __version__
+from .models import MAX_RESULTS_PER_PAGE
 from .professional_service import CHINESE_TOP_GROUP, SUPPORTED_GROUPS
 from .service import CnkiPublicSearchService
 
 REQUIRED_TOOLS = ["cnki_search", "cnki_professional_search"]
 MIN_LIMIT = 1
-#: P3（知网检索设置里的「分组最大显示条数」能否设为 50）尚未确认。
-#: 在确认之前保持 20——声称支持 50 却只返回 20 会让调用方以为结果被截断。
+#: 公开匿名模式只读结果页默认呈现的一页，从不去点「显示」档位控件，因此实际
+#: 永远只有 20 行。把上限写成 50 会让调用方以为结果被截断——上限必须反映
+#: 该模式真正能拿到的条数。
 MAX_LIMIT = 20
+#: 专业检索模式会主动把档位切到 50（2026-07-28 实机验证：切换后确实渲染 50 行）。
+#: 50 是站点档位上限，没有更大的选项。
+MAX_PROFESSIONAL_LIMIT = MAX_RESULTS_PER_PAGE
 
 #: WebVPN 人工值守模式必须显式启用：设置本环境变量为所在机构 WebVPN 改写后的
 #: 知网首页地址。未设置时工具返回配置错误而不是擅自拉起浏览器——该模式会打开
@@ -67,7 +72,8 @@ class CnkiMcpServer:
                 self._tasks.discard(task)
 
     async def cnki_professional_search(
-        self, topic: str, group: str = CHINESE_TOP_GROUP, limit: int = MAX_LIMIT,
+        self, topic: str, group: str = CHINESE_TOP_GROUP,
+        limit: int = MAX_PROFESSIONAL_LIMIT,
         year_from: int | None = None, year_to: int | None = None,
     ) -> dict[str, Any]:
         if self._shutdown:
@@ -135,7 +141,7 @@ class CnkiMcpServer:
         async def cnki_professional_search(
             topic: Annotated[str, Field(min_length=1, pattern=r".*\S.*")],
             group: Annotated[str, Field(pattern=r"^(chinese_top_journals|cssci)$")] = CHINESE_TOP_GROUP,
-            limit: Annotated[int, Field(ge=MIN_LIMIT, le=MAX_LIMIT)] = MAX_LIMIT,
+            limit: Annotated[int, Field(ge=MIN_LIMIT, le=MAX_PROFESSIONAL_LIMIT)] = MAX_PROFESSIONAL_LIMIT,
             year_from: int | None = None,
             year_to: int | None = None,
         ) -> dict[str, Any]:
@@ -145,7 +151,7 @@ class CnkiMcpServer:
             name="cnki_professional_search",
             description=(
                 "经机构 WebVPN 以专业检索按期刊清单定向检索中文期刊论文，"
-                "只覆盖中文顶尖期刊（13 本）与 CSSCI 来源期刊（661 本）。"
+                "只覆盖中文顶尖期刊（13 本）与 CSSCI（含扩展版）。"
                 "需要本人登录并全程保持浏览器窗口打开，中途可能需人工完成安全验证；"
                 "不可用于定时任务。未设置环境变量 CNKI_WEBVPN_HOME 时返回配置错误。"
             ),

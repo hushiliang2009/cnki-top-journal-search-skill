@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from .browser import BrowserUnavailableError, await_maybe
-from .models import SearchStatus
+from .models import MAX_RESULTS_PER_PAGE, SearchStatus
 from .professional import ExpressionBatch
 
 #: 实测：连续 4 次快速请求即触发安全验证，冷却约 75 秒后恢复。30 秒是据此取的
@@ -95,6 +95,18 @@ SOURCE_CATEGORY_SELECTOR = "input[type=checkbox][value='{value}']"
 TOTAL_COUNT_JS = (
     r"""() => (document.body.innerText.match(/共找到\s*([\d,]+)\s*条结果/) || [])[1] || null"""
 )
+#: 每页条数是自定义下拉，不是原生 <select>；列表默认 display:none，需先点开。
+#: 实测档位仅 10/20/50。
+PAGE_SIZE_CLICK_JS = """(want) => {
+  const root = document.querySelector('div.page-show-count');
+  if (!root) return false;
+  const item = root.querySelector(`li[data-val="${want}"]`);
+  if (!item) return false;
+  const trigger = root.querySelector('.sort-default');
+  if (trigger) trigger.click();
+  (item.querySelector('a') || item).click();
+  return true;
+}"""
 #: 安全验证组件**始终存在于 DOM 中**，未触发时被停在 top:-1000430px 的离屏位置，
 #: 且 display:block、visibility:visible、offsetParent 非空。因此判断它是否真的
 #: 出现，必须检查元素矩形是否落在视口内；用文本出现与否或 offsetParent 判断，
@@ -517,6 +529,32 @@ class ProfessionalSearchPage:
                                 await await_maybe(item.is_enabled()):
                             return item
         return None
+
+    async def set_page_size(self, size: int = MAX_RESULTS_PER_PAGE, *,
+                            timeout_seconds: float = 20.0) -> int:
+        """把结果页每页条数切到指定档位，返回实际渲染的行数。
+
+        档位是自定义下拉（``div.page-show-count`` 内的 ``li[data-val]``），列表
+        默认 ``display:none``，因此先点开再选。实测档位只有 10/20/50。
+
+        不设置就只有 20 行——若上层按 50 取数却没切档，就会把"只有 20 条"当成
+        检索结果本身，而不是分页设置的产物。
+        """
+        before = await await_maybe(self.page.locator(RESULT_TABLE_SELECTOR + " tbody tr").count())
+        picked = await await_maybe(self.page.evaluate(PAGE_SIZE_CLICK_JS, str(size)))
+        if not picked:
+            raise WebVpnNavigationError(
+                f"结果页没有每页 {size} 条的档位；实测可选 10/20/50"
+            )
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1)
+            rows = await await_maybe(
+                self.page.locator(RESULT_TABLE_SELECTOR + " tbody tr").count())
+            if rows and rows != before:
+                return rows
+        return await await_maybe(
+            self.page.locator(RESULT_TABLE_SELECTOR + " tbody tr").count())
 
     async def total_results(self) -> str | None:
         with contextlib.suppress(Exception):
