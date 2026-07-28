@@ -151,7 +151,6 @@ class WebVpnConfig:
     """
 
     home_url: str
-    profile_dir: Path
     login_timeout_seconds: float = DEFAULT_LOGIN_TIMEOUT_SECONDS
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
 
@@ -321,7 +320,7 @@ def _summary(results: list[dict[str, Any]], batches: Sequence[ExpressionBatch],
 
 
 class WebVpnSession:
-    """有头浏览器 + 持久化 profile，用于承载人工登录并复用同一进程完成检索。
+    """有头浏览器的非持久化会话，用于承载人工登录并在同一进程完成检索。
 
     刻意不导出 ``storage_state``：票据跨进程无效，落盘明文认证 cookie 只会平白
     多出一处凭据泄露面。
@@ -331,14 +330,17 @@ class WebVpnSession:
         self.config = config
         self._context_factory = context_factory
         self._playwright: Any = None
+        self.browser: Any = None
         self.context: Any = None
         self.page: Any = None
 
     async def __aenter__(self) -> "WebVpnSession":
         if self._context_factory is None:
             self._playwright = await _start_playwright()
-            self._context_factory = _PersistentContextFactory(self._playwright, self.config)
-        self.context = await await_maybe(self._context_factory.launch())
+            self._context_factory = _EphemeralContextFactory(self._playwright)
+        else:
+            self._playwright = getattr(self._context_factory, "playwright", None)
+        self.browser, self.context = await await_maybe(self._context_factory.launch())
         pages = getattr(self.context, "pages", None) or []
         self.page = pages[0] if pages else await await_maybe(self.context.new_page())
         await await_maybe(self.page.goto(self.config.home_url, wait_until="domcontentloaded"))
@@ -372,14 +374,19 @@ class WebVpnSession:
         if callable(is_closed) and is_closed():
             raise WebVpnWindowClosed("浏览器窗口已关闭，WebVPN 会话结束，请重新登录")
 
-    async def __aexit__(self, *_exc: object) -> None:
-        for resource, method in ((self.context, "close"), (self._playwright, "stop")):
+    async def close(self) -> None:
+        for resource, method in (
+            (self.context, "close"),
+            (self.browser, "close"),
+            (self._playwright, "stop"),
+        ):
             if resource is not None:
-                try:
+                with contextlib.suppress(Exception):
                     await await_maybe(getattr(resource, method)())
-                except Exception:
-                    pass
-        self.context = self.page = self._playwright = None
+        self.page = self.context = self.browser = self._playwright = None
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await asyncio.shield(self.close())
 
 
 async def wait_for_professional_page(
@@ -607,21 +614,51 @@ class ProfessionalSearchPage:
                 return SearchStatus.CHALLENGE_DETECTED
         return SearchStatus.PAGE_CONTRACT_CHANGED
 
+    async def wait_for_outcome(
+        self,
+        timeout_seconds: float = 30,
+        *,
+        poll_seconds: float = 0.5,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        now: Callable[[], float] = time.monotonic,
+    ) -> SearchStatus:
+        """等待结果页完成渲染，临时结构未就绪不立即判为契约变化。"""
+        deadline = now() + timeout_seconds
+        while True:
+            status = await self.classify_outcome()
+            if status is not SearchStatus.PAGE_CONTRACT_CHANGED:
+                return status
+            if now() >= deadline:
+                return status
+            await sleep(poll_seconds)
 
-class _PersistentContextFactory:
-    def __init__(self, playwright: Any, config: WebVpnConfig) -> None:
+    async def execute_plan(self, plan: ExpressionBatch) -> tuple[str, str, str]:
+        await self.fill_expression(plan.expression)
+        await self.submit()
+        status = await self.wait_for_outcome()
+        if status is SearchStatus.SUCCESS:
+            if plan.source_category is not None:
+                await self.apply_source_category(plan.source_category)
+            await self.set_page_size(plan.page_size)
+            status = await self.wait_for_outcome()
+        html = await await_maybe(self.page.content()) if status is SearchStatus.SUCCESS else ""
+        return status.value, html, str(getattr(self.page, "url", ""))
+
+
+class _EphemeralContextFactory:
+    def __init__(self, playwright: Any) -> None:
         self.playwright = playwright
-        self.config = config
 
-    async def launch(self) -> Any:
-        self.config.profile_dir.mkdir(parents=True, exist_ok=True)
+    async def launch(self) -> tuple[Any, Any]:
         try:
-            return await await_maybe(self.playwright.chromium.launch_persistent_context(
-                str(self.config.profile_dir),
-                headless=False,          # 人工登录与滑动验证都需要可见窗口
+            browser = await await_maybe(
+                self.playwright.chromium.launch(headless=False)
+            )
+            context = await await_maybe(browser.new_context(
                 locale="zh-CN",
                 accept_downloads=False,
             ))
+            return browser, context
         except Exception as exc:
             raise BrowserUnavailableError(
                 "无法启动有头浏览器：WebVPN 模式需要图形界面完成人工认证"

@@ -126,7 +126,7 @@ def test_webvpn_modules_are_isolated_and_self_documented(skill_root: Path) -> No
                           "stealth", "navigator.webdriver"):
             assert forbidden not in module.casefold(), f"webvpn.py 不得使用检测规避手段 {forbidden}"
         # 票据跨进程无效，落盘只会平白多一处凭据泄露面。同样只禁实际调用。
-        for forbidden in ("storage_state=", ".storage_state("):
+        for forbidden in ("launch_persistent_context", "storage_state=", ".storage_state("):
             assert forbidden not in module, f"webvpn.py 不得持久化登录票据（{forbidden}）"
 
 

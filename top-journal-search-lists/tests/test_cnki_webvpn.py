@@ -27,11 +27,11 @@ def _challenge(batch) -> dict:
 
 # ── 配置校验 ────────────────────────────────────────────────────────────────
 
-def test_config_requires_https_entry_and_positive_timers(tmp_path: Path) -> None:
+def test_config_requires_https_entry_and_positive_timers() -> None:
     with pytest.raises(ValueError):
-        webvpn.WebVpnConfig("http://webvpn.example.edu.cn/", tmp_path)
+        webvpn.WebVpnConfig("http://webvpn.example.edu.cn/")
     with pytest.raises(ValueError):
-        webvpn.WebVpnConfig("https://webvpn.example.edu.cn/", tmp_path, login_timeout_seconds=0)
+        webvpn.WebVpnConfig("https://webvpn.example.edu.cn/", login_timeout_seconds=0)
 
 
 # ── 批次调度 ────────────────────────────────────────────────────────────────
@@ -266,6 +266,9 @@ class FakePage:
     async def title(self) -> str:
         return self.titles.pop(0) if len(self.titles) > 1 else self.titles[0]
 
+    async def close(self) -> None:
+        self.closed = True
+
     def is_closed(self) -> bool:
         return self.closed
 
@@ -279,24 +282,64 @@ class FakeContext:
         self.closed = True
 
 
-class FakeFactory:
+class FakeBrowser:
     def __init__(self, context: FakeContext) -> None:
         self.context = context
+        self.closed = False
+        self.new_context_calls: list[dict] = []
 
-    async def launch(self) -> FakeContext:
+    async def new_context(self, **kwargs) -> FakeContext:
+        self.new_context_calls.append(kwargs)
         return self.context
 
+    async def close(self) -> None:
+        self.closed = True
 
-def _session(titles: list[str], tmp_path: Path):
+
+class FakeChromium:
+    def __init__(self, browser: FakeBrowser) -> None:
+        self.browser = browser
+        self.launch_calls: list[dict] = []
+
+    async def launch(self, **kwargs) -> FakeBrowser:
+        self.launch_calls.append(kwargs)
+        return self.browser
+
+
+class FakePlaywright:
+    def __init__(self, browser: FakeBrowser) -> None:
+        self.chromium = FakeChromium(browser)
+        self.stopped = False
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
+class FakeFactory:
+    def __init__(self, playwright: FakePlaywright) -> None:
+        self.playwright = playwright
+        self.launch_calls = 0
+
+    async def launch(self):
+        self.launch_calls += 1
+        return await webvpn._EphemeralContextFactory(self.playwright).launch()
+
+
+def _session(titles: list[str]):
     page = FakePage(titles)
     context = FakeContext(page)
-    config = webvpn.WebVpnConfig("https://webvpn.example.edu.cn/https/abc/", tmp_path,
+    browser = FakeBrowser(context)
+    playwright = FakePlaywright(browser)
+    factory = FakeFactory(playwright)
+    config = webvpn.WebVpnConfig("https://webvpn.example.edu.cn/https/abc/",
                                  login_timeout_seconds=30, poll_interval_seconds=1)
-    return webvpn.WebVpnSession(config, context_factory=FakeFactory(context)), page, context
+    session = webvpn.WebVpnSession(config, context_factory=factory)
+    return session, page, context, browser, playwright, factory
 
 
-def test_session_waits_until_the_signed_in_home_page_appears(tmp_path: Path) -> None:
-    session, page, context = _session(["统一身份认证平台", "统一身份认证平台", "中国知网"], tmp_path)
+def test_session_waits_until_the_signed_in_home_page_appears() -> None:
+    session, page, context, _browser, _playwright, _factory = _session(
+        ["统一身份认证平台", "统一身份认证平台", "中国知网"])
 
     async def scenario() -> None:
         async with session:
@@ -307,8 +350,9 @@ def test_session_waits_until_the_signed_in_home_page_appears(tmp_path: Path) -> 
     assert context.closed
 
 
-def test_session_times_out_when_login_never_completes(tmp_path: Path) -> None:
-    session, _page, _context = _session(["统一身份认证平台"], tmp_path)
+def test_session_times_out_when_login_never_completes() -> None:
+    session, _page, _context, _browser, _playwright, _factory = _session(
+        ["统一身份认证平台"])
 
     async def scenario() -> None:
         async with session:
@@ -318,9 +362,9 @@ def test_session_times_out_when_login_never_completes(tmp_path: Path) -> None:
         asyncio.run(scenario())
 
 
-def test_closing_the_window_is_reported_as_a_dedicated_error(tmp_path: Path) -> None:
+def test_closing_the_window_is_reported_as_a_dedicated_error() -> None:
     """关窗等同于登出，必须给出可行动的提示而不是崩溃。"""
-    session, page, _context = _session(["中国知网"], tmp_path)
+    session, page, _context, _browser, _playwright, _factory = _session(["中国知网"])
 
     async def scenario() -> None:
         async with session:
@@ -330,6 +374,25 @@ def test_closing_the_window_is_reported_as_a_dedicated_error(tmp_path: Path) -> 
 
     with pytest.raises(webvpn.WebVpnWindowClosed):
         asyncio.run(scenario())
+
+
+def test_session_uses_ephemeral_context_and_closes_every_resource() -> None:
+    session, _page, context, browser, playwright, factory = _session(["中国知网"])
+
+    async def scenario() -> None:
+        async with session:
+            assert factory.launch_calls == 1
+            assert playwright.chromium.launch_calls == [{"headless": False}]
+            assert browser.new_context_calls == [{
+                "locale": "zh-CN",
+                "accept_downloads": False,
+            }]
+        assert context.closed
+        assert browser.closed
+        assert playwright.stopped
+        await session.close()
+
+    asyncio.run(scenario())
 
 
 async def _instant(_delay: float) -> None:

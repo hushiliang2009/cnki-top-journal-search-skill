@@ -8,6 +8,8 @@ import asyncio
 import pytest
 
 from cnki_search import webvpn
+from cnki_search.models import SearchStatus
+from cnki_search.professional import ExpressionBatch
 
 
 class FakeLocator:
@@ -259,3 +261,114 @@ def test_selectors_match_the_observed_page_structure() -> None:
     assert webvpn.RESULT_TABLE_SELECTOR == "table.result-table-list"
     assert webvpn.ADV_SEARCH_LINK_TEXT == "高级检索"
     assert webvpn.PROFESSIONAL_TAB_TEXT == "专业检索"
+
+
+class PlanPage:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.url = "https://webvpn.example.edu.cn/result"
+
+    async def content(self) -> str:
+        self.events.append("content")
+        return "<table class='result-table-list'></table>"
+
+
+class PlanRecorder(webvpn.ProfessionalSearchPage):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(PlanPage(events))
+        self.events = events
+
+    async def fill_expression(self, expression: str) -> None:
+        assert expression == "SU %= '数字经济'"
+        self.events.append("fill")
+
+    async def submit(self) -> None:
+        self.events.append("submit")
+
+    async def wait_for_outcome(self, timeout_seconds: float = 30) -> SearchStatus:
+        self.events.append("classify")
+        return SearchStatus.SUCCESS
+
+    async def apply_source_category(self, name: str, *,
+                                    timeout_seconds: float = 20.0) -> str | None:
+        self.events.append(f"facet:{name}")
+        return "10"
+
+    async def set_page_size(self, size: int = 50, *,
+                            timeout_seconds: float = 20.0) -> int:
+        self.events.append(f"page_size:{size}")
+        return size
+
+
+def _plan(*, source_category: str | None) -> ExpressionBatch:
+    return ExpressionBatch(
+        index=1,
+        total=1,
+        journals=(),
+        expression="SU %= '数字经济'",
+        page_size=50,
+        source_category=source_category,
+    )
+
+
+def test_execute_plan_applies_post_result_options_before_final_render() -> None:
+    events: list[str] = []
+    driver = PlanRecorder(events)
+
+    status, html, url = asyncio.run(driver.execute_plan(_plan(source_category="CSSCI")))
+
+    assert (status, html, url) == (
+        "success",
+        "<table class='result-table-list'></table>",
+        "https://webvpn.example.edu.cn/result",
+    )
+    assert events == [
+        "fill", "submit", "classify",
+        "facet:CSSCI", "page_size:50", "classify", "content",
+    ]
+
+
+def test_execute_plan_omits_facet_for_chinese_top_plan() -> None:
+    events: list[str] = []
+    driver = PlanRecorder(events)
+
+    status, _html, _url = asyncio.run(driver.execute_plan(_plan(source_category=None)))
+
+    assert status == SearchStatus.SUCCESS.value
+    assert all(not event.startswith("facet:") for event in events)
+
+
+class DelayedResultLocator:
+    def __init__(self, page: "DelayedResultPage", selector: str) -> None:
+        self.page = page
+        self.selector = selector
+
+    async def count(self) -> int:
+        if self.selector == webvpn.RESULT_TABLE_SELECTOR:
+            self.page.result_polls += 1
+            return int(self.page.result_polls >= 3)
+        return 1
+
+    async def inner_text(self, *, timeout: int) -> str:
+        return ""
+
+
+class DelayedResultPage:
+    def __init__(self) -> None:
+        self.result_polls = 0
+
+    def locator(self, selector: str) -> DelayedResultLocator:
+        return DelayedResultLocator(self, selector)
+
+    async def evaluate(self, _script: str, _markers: list[str]) -> bool:
+        return False
+
+
+def test_wait_for_outcome_polls_through_temporary_contract_change() -> None:
+    page = DelayedResultPage()
+    driver = webvpn.ProfessionalSearchPage(page)
+
+    status = asyncio.run(driver.wait_for_outcome(timeout_seconds=1, poll_seconds=0))
+
+    assert status is SearchStatus.SUCCESS
+    assert page.result_polls == 3
