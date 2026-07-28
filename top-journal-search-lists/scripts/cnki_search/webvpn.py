@@ -44,6 +44,38 @@ DEFAULT_LOGIN_TIMEOUT_SECONDS = 600.0
 DEFAULT_POLL_INTERVAL_SECONDS = 3.0
 
 
+# ── 高级/专业检索页的真实结构（2026-07-28 实测） ──────────────────────────
+#: 高级检索页**不能深链**。直接访问 /kns8s/AdvSearch 会被判定为异常访问并跳转
+#: 安全验证页；从知网首页点「高级检索」链接则一切正常（在新标签页打开）。
+ADV_SEARCH_LINK_TEXT = "高级检索"
+PROFESSIONAL_TAB_TEXT = "专业检索"
+#: 非活动标签被 CSS 隐藏，Playwright 的可见性判定会认为它不可点，
+#: 因此标签切换只能用 JS 直接触发 click。
+PROFESSIONAL_TAB_CLICK_JS = """(label) => {
+  const text = (node) => (node.textContent || '').replace(/\\s+/g, '');
+  const hit = [...document.querySelectorAll('li,a,span,div')]
+    .filter((node) => node.children.length === 0 && text(node) === label)
+    .sort((a, b) => (b.offsetParent ? 1 : 0) - (a.offsetParent ? 1 : 0))[0];
+  if (!hit) return false;
+  hit.click();
+  return true;
+}"""
+#: 必须精确定位专业检索的表达式框。页面顶部另有一框式检索输入框，其长度上限
+#: 只有 100 字符；误填到那里会把表达式**静默截断成半截语法**再提交，站点直接
+#: 返回「访问禁止」，而且现象看起来像风控，极易误判。
+EXPRESSION_BOX_SELECTOR = "textarea.textarea-major.majorSearch"
+SEARCH_BUTTON_SELECTOR = "input.search-btn"
+RESULT_TABLE_SELECTOR = "table.result-table-list"
+
+
+class ExpressionTruncated(RuntimeError):
+    """输入框接受的字符数少于提交的表达式，继续提交会得到错误的检索范围。"""
+
+
+class WebVpnNavigationError(RuntimeError):
+    """页面结构与实测契约不符，重试无意义。"""
+
+
 class WebVpnLoginTimeout(RuntimeError):
     """在允许的时间内没有检测到已登录的知网首页。"""
 
@@ -291,6 +323,56 @@ class WebVpnSession:
                 except Exception:
                     pass
         self.context = self.page = self._playwright = None
+
+
+class ProfessionalSearchPage:
+    """驱动「高级检索 → 专业检索」页面提交一条表达式。
+
+    每一步的定位方式都来自实测，不是猜测；偏离任何一条都会以难以归因的方式失败。
+    """
+
+    def __init__(self, page: Any) -> None:
+        self.page = page
+
+    async def open_from_home(self, context: Any) -> Any:
+        """从知网首页点进高级检索。**不要改成直接 goto 高级检索地址。**"""
+        before = set(getattr(context, "pages", []) or [])
+        link = self.page.get_by_role("link", name=ADV_SEARCH_LINK_TEXT)
+        if await await_maybe(link.count()) < 1:
+            raise WebVpnNavigationError("知网首页未找到「高级检索」入口")
+        await await_maybe(link.first.click())
+        await asyncio.sleep(3)
+        fresh = [item for item in (getattr(context, "pages", []) or []) if item not in before]
+        self.page = fresh[0] if fresh else self.page      # 通常在新标签页打开
+        return self.page
+
+    async def switch_to_professional(self) -> None:
+        switched = await await_maybe(
+            self.page.evaluate(PROFESSIONAL_TAB_CLICK_JS, PROFESSIONAL_TAB_TEXT)
+        )
+        if not switched:
+            raise WebVpnNavigationError("高级检索页未找到「专业检索」标签")
+        await asyncio.sleep(2)
+
+    async def fill_expression(self, expression: str) -> None:
+        box = self.page.locator(EXPRESSION_BOX_SELECTOR)
+        if await await_maybe(box.count()) != 1:
+            raise WebVpnNavigationError("未找到专业检索表达式输入框")
+        await await_maybe(box.fill(""))
+        await await_maybe(box.fill(expression))
+        accepted = await await_maybe(box.input_value())
+        if len(accepted or "") != len(expression):
+            # 半截表达式照样能提交，返回的却是完全不同的检索范围。宁可中止。
+            raise ExpressionTruncated(
+                f"表达式被截断：提交 {len(expression)} 字符，输入框只接受 "
+                f"{len(accepted or '')} 字符"
+            )
+
+    async def submit(self) -> None:
+        button = self.page.locator(SEARCH_BUTTON_SELECTOR)
+        if await await_maybe(button.count()) < 1:
+            raise WebVpnNavigationError("专业检索页未找到检索按钮")
+        await await_maybe(button.first.click())
 
 
 class _PersistentContextFactory:
