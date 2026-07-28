@@ -78,6 +78,23 @@ SEARCH_BUTTON_SELECTOR = SEARCH_BUTTON_SELECTORS[0]
 RESULT_TABLE_SELECTOR = "table.result-table-list"
 #: 「抱歉，暂无数据，请稍后重试。」——服务端临时拒绝的措辞。
 NO_DATA_MARKERS = ("暂无数据", "请稍后重试")
+#: 结果页左侧「来源类别」分面的取值。
+#:
+#: 它只出现在**结果页**，高级检索输入页上没有——曾据输入页错判为"来源类别
+#: 筛选不存在"，进而以为 CSSCI 只能靠枚举 661 本刊名。实际用分面更好：
+#: 一次请求即可，且 CSSCI 分面含来源期刊与扩展版，范围大于目录里的 674 本，
+#: 也不受刊名全半角变体的影响。
+SOURCE_CATEGORY_VALUES = {
+    "CSSCI": "P0209",
+    "北大核心": "P01",
+    "AMI": "P13",
+    "WJCI": "P12",
+    "CSCD": "P0210",
+}
+SOURCE_CATEGORY_SELECTOR = "input[type=checkbox][value='{value}']"
+TOTAL_COUNT_JS = (
+    r"""() => (document.body.innerText.match(/共找到\s*([\d,]+)\s*条结果/) || [])[1] || null"""
+)
 #: 安全验证组件**始终存在于 DOM 中**，未触发时被停在 top:-1000430px 的离屏位置，
 #: 且 display:block、visibility:visible、offsetParent 非空。因此判断它是否真的
 #: 出现，必须检查元素矩形是否落在视口内；用文本出现与否或 offsetParent 判断，
@@ -500,6 +517,38 @@ class ProfessionalSearchPage:
                                 await await_maybe(item.is_enabled()):
                             return item
         return None
+
+    async def total_results(self) -> str | None:
+        with contextlib.suppress(Exception):
+            return await await_maybe(self.page.evaluate(TOTAL_COUNT_JS))
+        return None
+
+    async def apply_source_category(self, name: str, *,
+                                    timeout_seconds: float = 20.0) -> str | None:
+        """在结果页勾选来源类别分面，返回筛选后的结果总数。
+
+        必须先完成一次检索——分面不在高级检索输入页上，只在结果页出现。
+        """
+        value = SOURCE_CATEGORY_VALUES.get(name)
+        if value is None:
+            raise ValueError(
+                f"未知的来源类别 {name!r}，可选：{sorted(SOURCE_CATEGORY_VALUES)}"
+            )
+        box = self.page.locator(SOURCE_CATEGORY_SELECTOR.format(value=value))
+        if await await_maybe(box.count()) < 1:
+            raise WebVpnNavigationError(
+                f"结果页未找到「{name}」来源类别分面；需先完成一次检索"
+            )
+        before = await self.total_results()
+        await await_maybe(box.first.check())
+        # 分面是异步刷新，等总数变化而不是固定 sleep
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1)
+            current = await self.total_results()
+            if current and current != before:
+                return current
+        return await self.total_results()
 
     async def classify_outcome(self) -> SearchStatus:
         """判定提交后的页面状态。顺序很重要：先看结果，再看拒绝，最后才看验证码。"""

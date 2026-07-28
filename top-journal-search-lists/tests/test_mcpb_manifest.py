@@ -48,6 +48,7 @@ TEST_RELATIVE = (
     "tests/test_cnki_search.py",
     "tests/test_cnki_service.py",
     "tests/test_cnki_session.py",
+    "tests/test_cnki_source_category.py",
     "tests/test_cnki_webvpn.py",
     "tests/test_cnki_webvpn_outcome.py",
     "tests/test_cnki_webvpn_page.py",
