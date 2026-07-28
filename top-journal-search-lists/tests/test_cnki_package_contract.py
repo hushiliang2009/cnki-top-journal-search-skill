@@ -73,6 +73,35 @@ def test_package_exposes_public_home_and_no_legacy_capabilities(skill_root: Path
     assert not bundled_names & LEGACY_MODULES
 
 
+def test_release_manifest_covers_every_runtime_module(skill_root: Path) -> None:
+    """新增模块必须同时登记进发布清单。
+
+    漏登记时源码树里一切正常、测试全绿，只有安装到目标机器后才会
+    ModuleNotFoundError——本守卫把这个反馈提前到本地。
+    """
+    import build_release
+
+    source_modules = {path.name for path in (skill_root / "scripts/cnki_search").glob("*.py")}
+    missing = source_modules - set(build_release.CNKI_MODULES)
+    assert not missing, f"以下模块未登记进 build_release.CNKI_MODULES：{sorted(missing)}"
+    stale = set(build_release.CNKI_MODULES) - source_modules
+    assert not stale, f"发布清单登记了不存在的模块：{sorted(stale)}"
+
+
+#: 只在仓库检出下有意义、不随发布包分发的测试。
+#: test_release_baseline.py 校验仓库根的 .gitignore 与 CI 工作流，发布包里没有这些文件。
+REPO_ONLY_TESTS = {"tests/test_release_baseline.py"}
+
+
+def test_release_manifest_covers_every_test_module(skill_root: Path) -> None:
+    """测试文件同理：漏登记会让发布包的自检覆盖面悄悄缩水。"""
+    import build_release
+
+    source_tests = {f"tests/{path.name}" for path in (skill_root / "tests").glob("test_*.py")}
+    missing = source_tests - set(build_release.TEST_ALLOWLIST) - REPO_ONLY_TESTS
+    assert not missing, f"以下测试未登记进 build_release.TEST_ALLOWLIST：{sorted(missing)}"
+
+
 def test_shared_entry_may_name_webvpn_but_not_revive_legacy_capabilities(
     skill_root: Path,
 ) -> None:
