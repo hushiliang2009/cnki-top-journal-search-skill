@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -64,8 +65,35 @@ PROFESSIONAL_TAB_CLICK_JS = """(label) => {
 #: 只有 100 字符；误填到那里会把表达式**静默截断成半截语法**再提交，站点直接
 #: 返回「访问禁止」，而且现象看起来像风控，极易误判。
 EXPRESSION_BOX_SELECTOR = "textarea.textarea-major.majorSearch"
-SEARCH_BUTTON_SELECTOR = "input.search-btn"
+#: 高级检索页的提交按钮是 input.btn-search（实测 161×34 可见）。
+#: 页面上同时存在 input.search-btn，但那是知网首页按钮的类名，在这里尺寸为
+#: 0×0 且不可点——按 class 取 .first 会拿到它，点击必然超时 30 秒。
+#: 因此按候选顺序逐个挑"真正可见可点"的，而不是认定某一个。
+SEARCH_BUTTON_SELECTORS = (
+    "input.btn-search",
+    "input.search-btn",
+    "input[type=button][value='检索']",
+)
+SEARCH_BUTTON_SELECTOR = SEARCH_BUTTON_SELECTORS[0]
 RESULT_TABLE_SELECTOR = "table.result-table-list"
+#: 「抱歉，暂无数据，请稍后重试。」——服务端临时拒绝的措辞。
+NO_DATA_MARKERS = ("暂无数据", "请稍后重试")
+#: 安全验证组件**始终存在于 DOM 中**，未触发时被停在 top:-1000430px 的离屏位置，
+#: 且 display:block、visibility:visible、offsetParent 非空。因此判断它是否真的
+#: 出现，必须检查元素矩形是否落在视口内；用文本出现与否或 offsetParent 判断，
+#: 会把每一次"无结果"都误报成安全验证，把排查引向完全错误的方向。
+CAPTCHA_TEXT_MARKERS = ("拖动下方拼图", "请完成安全验证")
+CAPTCHA_VIEWPORT_JS = """(markers) => {
+  const inViewport = (node) => {
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
+           rect.top < window.innerHeight && rect.left < window.innerWidth;
+  };
+  return [...document.querySelectorAll('div,span')]
+    .filter((node) => markers.some((marker) =>
+      (node.textContent || '').replace(/\\s+/g, '').includes(marker)))
+    .some(inViewport);
+}"""
 
 
 class ExpressionTruncated(RuntimeError):
@@ -325,6 +353,38 @@ class WebVpnSession:
         self.context = self.page = self._playwright = None
 
 
+async def wait_for_professional_page(
+    context: Any, *, timeout_seconds: float = 900.0, poll_seconds: float = 2.0,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    now: Callable[[], float] = time.monotonic,
+) -> Any:
+    """等待使用者手工导航到专业检索页，返回该页面。
+
+    这是人工值守模式的交接点，也是比自动导航更稳的做法：站点在「首页 →
+    高级检索 → 专业检索」这条路径上会开中转标签页、异步渲染标签、并对
+    深链施加风控，程序化走这条路既脆弱又容易招来安全验证；而使用者本人
+    点几下是可靠的。程序从"表达式框已经可见"这一刻起接管。
+
+    判据是表达式框可见，而不是标题或地址——只有它可见才说明确实停在
+    专业检索标签上，高级检索标签下它是隐藏的。
+    """
+    deadline = now() + timeout_seconds
+    while now() < deadline:
+        for page in list(getattr(context, "pages", []) or []):
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                continue
+            with contextlib.suppress(Exception):
+                box = page.locator(EXPRESSION_BOX_SELECTOR)
+                if await await_maybe(box.count()) and await await_maybe(box.first.is_visible()):
+                    return page
+        await sleep(poll_seconds)
+    raise WebVpnLoginTimeout(
+        f"{timeout_seconds:.0f} 秒内未检测到已打开的专业检索页面"
+        "（需停在「高级检索 → 专业检索」标签，且表达式框可见）"
+    )
+
+
 class ProfessionalSearchPage:
     """驱动「高级检索 → 专业检索」页面提交一条表达式。
 
@@ -334,25 +394,74 @@ class ProfessionalSearchPage:
     def __init__(self, page: Any) -> None:
         self.page = page
 
-    async def open_from_home(self, context: Any) -> Any:
-        """从知网首页点进高级检索。**不要改成直接 goto 高级检索地址。**"""
-        before = set(getattr(context, "pages", []) or [])
+    async def open_from_home(self, context: Any, *, timeout_seconds: float = 20.0) -> Any:
+        """从知网首页点进高级检索。**不要改成直接 goto 高级检索地址。**
+
+        高级检索通常在新标签页打开，且新页面需要时间加载。固定 sleep 是在赌
+        网络速度：慢一点就会在 DOM 尚未就绪时去找标签，报出"未找到专业检索"
+        这种指向完全错误的错误。这里改为轮询等待新标签页出现并完成加载。
+        """
+        origin = self.page
         link = self.page.get_by_role("link", name=ADV_SEARCH_LINK_TEXT)
         if await await_maybe(link.count()) < 1:
             raise WebVpnNavigationError("知网首页未找到「高级检索」入口")
         await await_maybe(link.first.click())
-        await asyncio.sleep(3)
-        fresh = [item for item in (getattr(context, "pages", []) or []) if item not in before]
-        self.page = fresh[0] if fresh else self.page      # 通常在新标签页打开
-        return self.page
 
-    async def switch_to_professional(self) -> None:
-        switched = await await_maybe(
-            self.page.evaluate(PROFESSIONAL_TAB_CLICK_JS, PROFESSIONAL_TAB_TEXT)
-        )
-        if not switched:
-            raise WebVpnNavigationError("高级检索页未找到「专业检索」标签")
-        await asyncio.sleep(2)
+        # 不能认"第一个新出现的标签页"：站点会短暂开一个中转标签页再关掉，
+        # 抓到它就会让驱动指向一个已关闭的页面，后续报错还指向完全错误的原因。
+        # 判据改为"仍存活、且确实呈现出高级检索内容"。
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            found = await self._locate_advanced_search_page(context, origin)
+            if found is not None:
+                self.page = found
+                return self.page
+            if time.monotonic() >= deadline:
+                raise WebVpnNavigationError(
+                    "点击「高级检索」后未出现可用的高级检索页面；"
+                    "站点可能改版，或中转标签页被关闭"
+                )
+            await asyncio.sleep(1)
+
+    async def _locate_advanced_search_page(self, context: Any, origin: Any) -> Any | None:
+        candidates = list(getattr(context, "pages", []) or [])
+        if origin not in candidates:
+            candidates.append(origin)          # 同页跳转时 origin 仍是目标
+        for page in candidates:
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                continue                       # 跳过已关闭的中转页
+            with contextlib.suppress(Exception):
+                if await await_maybe(page.locator(EXPRESSION_BOX_SELECTOR).count()):
+                    return page                # 表达式框存在即已在高级检索页
+                title = await await_maybe(page.title())
+                if ADV_SEARCH_LINK_TEXT in (title or ""):
+                    return page
+        return None
+
+    async def switch_to_professional(self, *, timeout_seconds: float = 20.0) -> None:
+        """切到「专业检索」标签。
+
+        非活动标签被 CSS 隐藏，只能用 JS 触发 click；页面为前端渲染，标签可能
+        晚于 domcontentloaded 才出现，因此轮询而不是一次定成败。
+        """
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            switched = await await_maybe(
+                self.page.evaluate(PROFESSIONAL_TAB_CLICK_JS, PROFESSIONAL_TAB_TEXT)
+            )
+            if switched:
+                break
+            if time.monotonic() >= deadline:
+                raise WebVpnNavigationError("高级检索页未找到「专业检索」标签")
+            await asyncio.sleep(1)
+        # 切换后表达式框才会变为可见，等它真正出现再返回
+        box_deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < box_deadline:
+            await asyncio.sleep(1)
+            with contextlib.suppress(Exception):
+                if await await_maybe(self.page.locator(EXPRESSION_BOX_SELECTOR).count()):
+                    return
 
     async def fill_expression(self, expression: str) -> None:
         box = self.page.locator(EXPRESSION_BOX_SELECTOR)
@@ -369,10 +478,47 @@ class ProfessionalSearchPage:
             )
 
     async def submit(self) -> None:
-        button = self.page.locator(SEARCH_BUTTON_SELECTOR)
-        if await await_maybe(button.count()) < 1:
-            raise WebVpnNavigationError("专业检索页未找到检索按钮")
-        await await_maybe(button.first.click())
+        button = await self._visible_search_button()
+        if button is None:
+            raise WebVpnNavigationError("专业检索页未找到可见的检索按钮")
+        await await_maybe(button.click())
+
+    async def _visible_search_button(self) -> Any | None:
+        """在候选里挑第一个真正可见可点的按钮。
+
+        隐藏的同名按钮点不动，Playwright 会重试到超时才报错，而错误信息只说
+        "元素不可见"，不会提示"你选错了按钮"。
+        """
+        for selector in SEARCH_BUTTON_SELECTORS:
+            locator = self.page.locator(selector)
+            with contextlib.suppress(Exception):
+                total = await await_maybe(locator.count())
+                for index in range(min(total, 8)):
+                    item = locator.nth(index)
+                    with contextlib.suppress(Exception):
+                        if await await_maybe(item.is_visible()) and \
+                                await await_maybe(item.is_enabled()):
+                            return item
+        return None
+
+    async def classify_outcome(self) -> SearchStatus:
+        """判定提交后的页面状态。顺序很重要：先看结果，再看拒绝，最后才看验证码。"""
+        with contextlib.suppress(Exception):
+            if await await_maybe(self.page.locator(RESULT_TABLE_SELECTOR).count()):
+                return SearchStatus.SUCCESS
+        body = ""
+        with contextlib.suppress(Exception):
+            body = await await_maybe(self.page.locator("body").inner_text(timeout=8_000)) or ""
+        flattened = "".join(body.split())
+        if "未检索到相关文献" in flattened:
+            return SearchStatus.NO_RESULTS
+        if all(marker in flattened for marker in NO_DATA_MARKERS):
+            return SearchStatus.NO_DATA_RETRY_LATER
+        with contextlib.suppress(Exception):
+            if await await_maybe(self.page.evaluate(CAPTCHA_VIEWPORT_JS,
+                                                    list(CAPTCHA_TEXT_MARKERS))):
+                return SearchStatus.CHALLENGE_DETECTED
+        return SearchStatus.PAGE_CONTRACT_CHANGED
 
 
 class _PersistentContextFactory:

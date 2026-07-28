@@ -24,6 +24,10 @@ class SearchStatus(StrEnum):
     PAGE_CONTRACT_CHANGED = "page_contract_changed"
     CONFIGURATION_ERROR = "configuration_error"
     NETWORK_ERROR = "network_error"
+    #: 知网返回「抱歉，暂无数据，请稍后重试。」——服务端临时拒绝，既不是无结果，
+    #: 也不是安全验证。实测由过长的专业检索表达式触发，补救办法是缩小分批，
+    #: 与限流的"等一等再来"不是一回事，因此单列一档。
+    NO_DATA_RETRY_LATER = "no_data_retry_later"
 
 
 @dataclass(frozen=True, slots=True)

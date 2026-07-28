@@ -30,6 +30,9 @@ def test_search_statuses_match_public_contract() -> None:
         "success", "no_results", "partial", "rate_limited",
         "challenge_detected", "login_required", "forbidden",
         "page_contract_changed", "network_error", "configuration_error",
+        # 知网「暂无数据，请稍后重试」——服务端临时拒绝，与无结果、
+        # 安全验证都不同，补救办法是缩小分批
+        "no_data_retry_later",
     }
 
 

@@ -40,10 +40,12 @@ from cnki_search.webvpn import (
 FORBIDDEN_FIELD_TOKENS = ("url", "cookie", "token", "session", "profile", "home")
 
 #: 页面结构探测脚本。只读 DOM，不触发任何请求。
-STRUCTURE_PROBE_JS = r"""() => {
+STRUCTURE_PROBE_JS = r"""(selectors) => {
+  // 箭头函数没有 arguments 对象，选择器必须作为具名参数传入
+  const [boxSelector, buttonSelector, tableSelector] = selectors;
   const text = (node) => (node.textContent || '').replace(/\s+/g, '');
   const sourceCategories = ['SCI', 'EI', '北大核心', 'CSSCI', 'CSCD', 'AMI', 'SSCI'];
-  const box = document.querySelector(arguments[0] || 'textarea');
+  const box = document.querySelector(boxSelector);
   return {
     tabs: [...document.querySelectorAll('li,a,span')]
       .filter((node) => node.children.length === 0 &&
@@ -52,8 +54,8 @@ STRUCTURE_PROBE_JS = r"""() => {
     expression_box_found: Boolean(box),
     expression_box_visible: Boolean(box && box.offsetParent),
     expression_box_maxlength: box ? box.getAttribute('maxlength') : null,
-    search_button_count: document.querySelectorAll(arguments[1] || 'input').length,
-    result_table_count: document.querySelectorAll(arguments[2] || 'table').length,
+    search_button_count: document.querySelectorAll(buttonSelector).length,
+    result_table_count: document.querySelectorAll(tableSelector).length,
     source_category_filters: [...document.querySelectorAll('input[type=checkbox]')]
       .map((cb) => { const label = cb.closest('label') || cb.parentElement;
                      return label ? text(label).slice(0, 20) : ''; })
@@ -87,6 +89,36 @@ class ProbeResult:
     message: str = ""
 
 
+_TAB_SCAN_JS = r"""() => {
+  const text = (node) => (node.textContent || '').replace(/\s+/g, '');
+  return {
+    page_title: document.title,
+    mentions_professional: document.body ? document.body.innerText.includes('专业检索') : false,
+    leaf_matches: [...document.querySelectorAll('li,a,span,div')]
+      .filter((node) => node.children.length === 0 && text(node) === '专业检索')
+      .map((node) => ({tag: node.tagName, cls: String(node.className || ''),
+                       visible: Boolean(node.offsetParent)})),
+    tab_texts: [...document.querySelectorAll('li,a,span')]
+      .filter((node) => node.children.length === 0 &&
+        /^(高级检索|专业检索|作者发文检索|句子检索|一框式检索)$/.test(text(node)))
+      .map((node) => text(node)),
+  };
+}"""
+
+
+async def _diagnose_tabs(context: Any, current: Any) -> dict[str, Any]:
+    """列出全部标签页并逐个扫描「专业检索」，判断驱动是否停在了正确的页面。"""
+    tabs = []
+    for index, page in enumerate(getattr(context, "pages", []) or []):
+        entry: dict[str, Any] = {"index": index, "is_driver_page": page is current}
+        try:
+            entry.update(await page.evaluate(_TAB_SCAN_JS))
+        except Exception as exc:
+            entry["scan_error"] = f"{type(exc).__name__}: {exc}"
+        tabs.append(entry)
+    return {"tab_count": len(tabs), "tabs": tabs}
+
+
 def evaluate_contract(structure: Mapping[str, Any]) -> dict[str, Any]:
     """把原始探测结果折算成"代码中的契约是否仍成立"。"""
     return {
@@ -112,7 +144,16 @@ async def run_probe(config: WebVpnConfig, *, submit_topic: str | None = None,
 
         driver = driver_factory(session.page)
         await driver.open_from_home(session.context)
-        await driver.switch_to_professional()
+        try:
+            await driver.switch_to_professional()
+        except Exception as exc:
+            # 失败时把"当时到底停在哪个页面"记下来。缺了这个，
+            # "未找到专业检索标签"既可能是站点改版，也可能是驱动停错了页面。
+            diagnosis = await _diagnose_tabs(session.context, driver.page)
+            payload = {"navigation_error": str(exc), "diagnosis": diagnosis}
+            _assert_no_sensitive_fields(payload)
+            return ProbeResult(1, payload, {"contract_ok": False, "failed_checks": ["navigation"]},
+                               "未能进入专业检索标签；诊断信息见证据文件。")
 
         structure = await driver.page.evaluate(
             STRUCTURE_PROBE_JS, [EXPRESSION_BOX_SELECTOR, SEARCH_BUTTON_SELECTOR,
