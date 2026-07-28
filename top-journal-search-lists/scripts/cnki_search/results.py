@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date
 from html.parser import HTMLParser
 
-from .models import PaperRecord, is_verifiable_publication_year
+from .models import MAX_RESULTS_PER_PAGE, PaperRecord, is_verifiable_publication_year
 from .search import PageContractChanged
 
 
@@ -189,8 +189,8 @@ def _to_record(raw: _RawRow, *, query: str) -> PaperRecord:
 
 
 def parse_public_result_page(html: str, *, query: str, limit: int) -> ParsedResultPage:
-    if not 1 <= limit <= 20:
-        raise ValueError("返回数量必须为 1 到 20")
+    if not 1 <= limit <= MAX_RESULTS_PER_PAGE:
+        raise ValueError(f"返回数量必须为 1 到 {MAX_RESULTS_PER_PAGE}")
     parser = _PublicTableParser()
     parser.feed(html)
     if not parser.found_public_table and "题名" in html and "来源" in html:

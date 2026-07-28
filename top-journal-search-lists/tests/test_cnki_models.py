@@ -7,11 +7,12 @@ import pytest
 from cnki_search.models import PaperRecord, SearchOutcome, SearchRequest, SearchStatus
 
 
-def test_request_accepts_only_nonempty_theme_and_limit_1_to_20() -> None:
+def test_request_accepts_only_nonempty_theme_and_limit_within_page_size() -> None:
     assert SearchRequest("topic", 20).query == "topic"
     assert SearchRequest("  ＡＢＣ　topic  ").query == "ABC topic"
     assert SearchRequest("topic").limit == 20
-    for query, limit in (("", 20), ("   ", 20), ("topic", 0), ("topic", 21)):
+    assert SearchRequest("topic", 50).limit == 50      # 站点档位上限
+    for query, limit in (("", 20), ("   ", 20), ("topic", 0), ("topic", 51)):
         with pytest.raises(ValueError):
             SearchRequest(query, limit)
 
@@ -30,6 +31,9 @@ def test_search_statuses_match_public_contract() -> None:
         "success", "no_results", "partial", "rate_limited",
         "challenge_detected", "login_required", "forbidden",
         "page_contract_changed", "network_error", "configuration_error",
+        # 知网「暂无数据，请稍后重试」——服务端临时拒绝，与无结果、
+        # 安全验证都不同，补救办法是缩小分批
+        "no_data_retry_later",
     }
 
 
@@ -84,7 +88,7 @@ def test_service_rejects_invalid_arguments_instead_of_faking_page_contract_chang
 
     catalog = Path(__file__).resolve().parents[1] / "references" / "Academic_Journal_Master_Directory_20260715.md"
     service = CnkiPublicSearchService(catalog=catalog)
-    for query, limit in (("   ", 20), ("topic", 0), ("topic", 21)):
+    for query, limit in (("   ", 20), ("topic", 0), ("topic", 51)):
         with pytest.raises(ValueError):
             asyncio.run(service.search(query, limit))
 

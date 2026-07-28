@@ -18,15 +18,18 @@ class FakeService:
         )
 
 
-def test_mcp_exposes_exact_public_tool() -> None:
+def test_mcp_exposes_exact_tool_set() -> None:
+    """两个工具，一个不多一个不少。旧能力（登录/下载/导出）不得以任何形式回来。"""
     server = CnkiMcpServer(service=FakeService())
-    assert server.tool_names() == REQUIRED_TOOLS == ["cnki_search"]
+    assert server.tool_names() == REQUIRED_TOOLS == [
+        "cnki_search", "cnki_professional_search",
+    ]
 
 
 def test_public_signature_is_query_and_limit_only() -> None:
     parameters = inspect.signature(CnkiMcpServer.cnki_search).parameters
     assert list(parameters) == ["self", "query", "limit"]
-    assert parameters["limit"].default == 20
+    assert parameters["limit"].default == 20      # 公开模式只读默认那一页
 
 
 def test_removed_tools_are_not_attributes() -> None:
@@ -52,7 +55,12 @@ def test_public_tool_returns_service_outcome() -> None:
 
 
 def test_tool_schema_declares_machine_enforceable_limit_range() -> None:
-    """limit 的 1–20 此前只写在文档里，tools/list 的 schema 无任何约束。"""
+    """公开模式的 limit 上界是 20。
+
+    它从不去点结果页的「显示」档位控件，因此实际永远只有 20 行；把上界写成 50
+    会让调用方以为结果被截断。约束必须出现在 tools/list 的 schema 里，
+    只写在文档里等于没有。
+    """
     from mcp.server.fastmcp import FastMCP
 
     mcp = CnkiMcpServer(service=FakeService()).build_fastmcp(FastMCP)
@@ -124,7 +132,7 @@ def test_server_announces_product_version_not_sdk_version() -> None:
     from cnki_search import __version__
 
     mcp = CnkiMcpServer(service=FakeService()).build_fastmcp(FastMCP)
-    assert mcp._mcp_server.version == __version__ == "0.3.1"
+    assert mcp._mcp_server.version == __version__ == "0.4.0"
 
 
 def test_shutdown_does_not_block_on_queued_work() -> None:

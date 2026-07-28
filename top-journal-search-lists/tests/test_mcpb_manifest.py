@@ -17,29 +17,41 @@ CNKI_MODULES = (
     "install_config.py",
     "mcp_server.py",
     "models.py",
+    "professional.py",
+    "professional_service.py",
     "ranking.py",
     "rate_limit.py",
     "results.py",
     "search.py",
     "service.py",
     "session.py",
+    "webvpn.py",
 )
 TEST_RELATIVE = (
     "tests/_mcp_handshake.py",
     "tests/_mcpb_handshake.py",
+    "tests/_webvpn_probe.py",
     "tests/conftest.py",
+    "tests/test_catalog_groups.py",
     "tests/test_catalog_lookup.py",
     "tests/test_cnki_cache.py",
     "tests/test_cnki_async.py",
     "tests/test_cnki_mcp.py",
     "tests/test_cnki_models.py",
     "tests/test_cnki_package_contract.py",
+    "tests/test_cnki_professional.py",
+    "tests/test_cnki_professional_mcp.py",
+    "tests/test_cnki_professional_service.py",
     "tests/test_cnki_ranking.py",
     "tests/test_cnki_rate_limit.py",
     "tests/test_cnki_results.py",
     "tests/test_cnki_search.py",
     "tests/test_cnki_service.py",
     "tests/test_cnki_session.py",
+    "tests/test_cnki_source_category.py",
+    "tests/test_cnki_webvpn.py",
+    "tests/test_cnki_webvpn_outcome.py",
+    "tests/test_cnki_webvpn_page.py",
     "tests/test_installers.py",
     "tests/test_install_config_security.py",
     "tests/test_mcpb_manifest.py",
@@ -101,7 +113,7 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
     assert manifest["manifest_version"] == "0.4"
     assert manifest["name"] == "cnki-search"
     assert manifest["display_name"] == "CNKI Public Theme Search"
-    assert manifest["version"] == "0.3.1"
+    assert manifest["version"] == "0.4.0"
     assert manifest["description"] == (
         "Public CNKI theme search with master-journal classification; no login or downloads."
     )
@@ -125,7 +137,7 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
 
 def test_mcpb_pyproject_declares_public_runtime_dependencies(skill_root: Path) -> None:
     text = (skill_root / "mcpb/pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.3.1"' in text
+    assert 'version = "0.4.0"' in text
     assert 'requires-python = ">=3.11"' in text
     assert '"mcp>=1,<2"' in text
     assert '"playwright>=1.45,<2"' in text
@@ -137,8 +149,8 @@ def test_all_runtime_versions_and_release_allowlist_are_consistent(skill_root: P
         "scripts/cnki_search/__init__.py",
         "mcpb/src/cnki_search/__init__.py",
     ):
-        assert '__version__ = "0.3.1"' in (skill_root / relative).read_text(encoding="utf-8")
-    assert 'name = "cnki-search-mcp"\nversion = "0.3.1"' in (
+        assert '__version__ = "0.4.0"' in (skill_root / relative).read_text(encoding="utf-8")
+    assert 'name = "cnki-search-mcp"\nversion = "0.4.0"' in (
         skill_root / "mcpb/uv.lock"
     ).read_text(encoding="utf-8")
     assert ".mcpbignore" in _load_builder(skill_root).MCPB_ALLOWLIST
