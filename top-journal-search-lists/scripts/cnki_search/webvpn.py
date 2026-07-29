@@ -704,7 +704,8 @@ class ProfessionalSearchPage:
                 raise WebVpnNavigationError("知网首页未找到「高级检索」入口")
             click_task = asyncio.create_task(await_maybe(link.first.click()))
             try:
-                await asyncio.shield(click_task)
+                await asyncio.wait((click_task,))
+                click_task.result()
             except asyncio.CancelledError:
                 _clear_current_cancellation()
                 click_cleanup_deadline = (
