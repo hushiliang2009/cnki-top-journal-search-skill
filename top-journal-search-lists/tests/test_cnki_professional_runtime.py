@@ -337,6 +337,132 @@ def test_challenge_wait_has_a_hard_limit_when_evaluate_never_returns() -> None:
     asyncio.run(scenario())
 
 
+def test_challenge_wait_includes_slow_page_close_in_hard_limit() -> None:
+    from time import monotonic
+
+    from cnki_search.professional import ExpressionBatch
+    from cnki_search.professional_runtime import ProfessionalBatchExecutor
+
+    async def scenario() -> None:
+        class SlowClosePage:
+            async def evaluate(self, _script, _markers):
+                return False
+
+            async def close(self) -> None:
+                await asyncio.sleep(0.2)
+
+            def is_closed(self) -> bool:
+                return False
+
+        executor = ProfessionalBatchExecutor(
+            type("Session", (), {})(),
+            challenge_timeout_seconds=0.03,
+            challenge_poll_seconds=0,
+        )
+        executor.active_challenge_page = SlowClosePage()
+        started = monotonic()
+        result = await executor.wait_for_manual_challenge(
+            ExpressionBatch(1, 1, (), "SU %= '数字经济'")
+        )
+        elapsed = monotonic() - started
+
+        assert result is False
+        assert elapsed < 0.12
+
+    asyncio.run(scenario())
+
+
+def test_cancellation_during_challenge_close_is_propagated_after_cleanup() -> None:
+    from cnki_search.professional import ExpressionBatch
+    from cnki_search.professional_runtime import ProfessionalBatchExecutor
+
+    async def scenario() -> None:
+        close_started = asyncio.Event()
+
+        class Page:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def evaluate(self, _script, _markers):
+                return False
+
+            async def close(self) -> None:
+                close_started.set()
+                await asyncio.sleep(0.02)
+                self.closed = True
+
+            def is_closed(self) -> bool:
+                return self.closed
+
+        page = Page()
+        executor = ProfessionalBatchExecutor(
+            type("Session", (), {})(),
+            challenge_timeout_seconds=0.2,
+            challenge_poll_seconds=0,
+        )
+        executor.active_challenge_page = page
+        task = asyncio.create_task(
+            executor.wait_for_manual_challenge(
+                ExpressionBatch(1, 1, (), "SU %= '数字经济'")
+            )
+        )
+        await close_started.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert page.closed is True
+
+    asyncio.run(scenario())
+
+
+def test_challenge_close_and_client_cancel_same_turn_still_propagates() -> None:
+    from cnki_search.professional import ExpressionBatch
+    from cnki_search.professional_runtime import ProfessionalBatchExecutor
+
+    async def scenario() -> None:
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+
+        class Page:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def evaluate(self, _script, _markers):
+                return False
+
+            async def close(self) -> None:
+                close_started.set()
+                await release_close.wait()
+                self.closed = True
+
+            def is_closed(self) -> bool:
+                return self.closed
+
+        page = Page()
+        executor = ProfessionalBatchExecutor(
+            type("Session", (), {})(),
+            challenge_timeout_seconds=0.2,
+            challenge_poll_seconds=0,
+        )
+        executor.active_challenge_page = page
+        task = asyncio.create_task(
+            executor.wait_for_manual_challenge(
+                ExpressionBatch(1, 1, (), "SU %= '数字经济'")
+            )
+        )
+        await close_started.wait()
+        loop = asyncio.get_running_loop()
+        loop.call_soon(release_close.set)
+        loop.call_soon(task.cancel)
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert page.closed is True
+
+    asyncio.run(scenario())
+
+
 def test_environment_factory_requires_home_before_constructing_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -21,6 +21,7 @@ from .webvpn import (
     Throttle,
     WebVpnConfig,
     WebVpnSession,
+    _finish_cleanup_bounded,
 )
 
 
@@ -117,40 +118,68 @@ class ProfessionalBatchExecutor:
         page = self.active_challenge_page
         if page is None:
             return False
-        deadline = self._now() + self.challenge_timeout_seconds
+        logical_deadline = self._now() + self.challenge_timeout_seconds
+        loop = asyncio.get_running_loop()
+        overall_deadline = loop.time() + self.challenge_timeout_seconds
+        cleanup_reserve = min(
+            5.0,
+            self.challenge_timeout_seconds / 2,
+        )
+        observation_timeout = max(
+            self.challenge_timeout_seconds - cleanup_reserve,
+            0.0,
+        )
+        result = False
         try:
             try:
-                async with asyncio.timeout(
-                    self.challenge_timeout_seconds
-                ):
-                    while self._now() <= deadline:
-                        is_closed = getattr(page, "is_closed", None)
-                        if callable(is_closed) and is_closed():
-                            return False
-                        try:
-                            visible = await await_maybe(
-                                page.evaluate(
-                                    CAPTCHA_VIEWPORT_JS,
-                                    list(CAPTCHA_TEXT_MARKERS),
-                                )
-                            )
-                        except Exception:
-                            return False
-                        if not visible:
-                            return True
-                        remaining = deadline - self._now()
-                        if remaining <= 0:
-                            return False
-                        await self._sleep(
-                            min(self.challenge_poll_seconds, remaining)
-                        )
-                    return False
+                async with asyncio.timeout(observation_timeout):
+                    result = await self._observe_challenge(
+                        page,
+                        logical_deadline,
+                    )
             except TimeoutError:
-                return False
+                result = False
         finally:
             if self.active_challenge_page is page:
                 self.active_challenge_page = None
-            await self._close_page(page)
+            remaining = max(overall_deadline - loop.time(), 0.0)
+            closed, cancellation = await _finish_cleanup_bounded(
+                self._close_page(page),
+                min(remaining, cleanup_reserve),
+            )
+            if cancellation is not None:
+                raise cancellation
+            if not closed:
+                result = False
+        return result
+
+    async def _observe_challenge(
+        self,
+        page: Any,
+        deadline: float,
+    ) -> bool:
+        while self._now() <= deadline:
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                return False
+            try:
+                visible = await await_maybe(
+                    page.evaluate(
+                        CAPTCHA_VIEWPORT_JS,
+                        list(CAPTCHA_TEXT_MARKERS),
+                    )
+                )
+            except Exception:
+                return False
+            if not visible:
+                return True
+            remaining = deadline - self._now()
+            if remaining <= 0:
+                return False
+            await self._sleep(
+                min(self.challenge_poll_seconds, remaining)
+            )
+        return False
 
     @staticmethod
     async def _close_page(page: Any) -> None:

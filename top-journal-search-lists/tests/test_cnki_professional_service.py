@@ -159,6 +159,50 @@ def test_page_contract_status_stays_an_error_instead_of_becoming_no_results() ->
     assert result["complete"] is False
     assert result["stopped_at_batch"] == 1
     assert result["records"] == []
+    assert result["terminal_status"] == SearchStatus.PAGE_CONTRACT_CHANGED.value
+    assert result["terminal_detail"] == "知网页面结构已变化"
+
+
+def test_page_contract_after_valid_batch_returns_partial_with_stop_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batches = [
+        ExpressionBatch(1, 2, ("管理世界",), "SU %= '数字经济' AND LY='管理世界'"),
+        ExpressionBatch(2, 2, ("经济研究",), "SU %= '数字经济' AND LY='经济研究'"),
+    ]
+    monkeypatch.setattr(
+        service_module,
+        "build_group_plans",
+        lambda *_args, **_kwargs: batches,
+    )
+
+    async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
+        if plan.index == 1:
+            return (
+                SearchStatus.SUCCESS.value,
+                RESULT_TEMPLATE.format(
+                    title="数字经济与全要素生产率",
+                    journal="管理世界",
+                ),
+                "",
+            )
+        return (SearchStatus.PAGE_CONTRACT_CHANGED.value, "", "")
+
+    service = CnkiProfessionalSearchService(execute)
+    result = asyncio.run(
+        service.search_group("数字经济", service_module.CHINESE_TOP_GROUP)
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == SearchStatus.PARTIAL.value
+    assert result["complete"] is False
+    assert result["batches_completed"] == 1
+    assert result["stopped_at_batch"] == 2
+    assert [record["title"] for record in result["records"]] == [
+        "数字经济与全要素生产率"
+    ]
+    assert result["terminal_status"] == SearchStatus.PAGE_CONTRACT_CHANGED.value
+    assert result["terminal_detail"] == "知网页面结构已变化"
 
 
 def test_parser_contract_exception_becomes_structured_page_contract_error() -> None:
@@ -175,6 +219,8 @@ def test_parser_contract_exception_becomes_structured_page_contract_error() -> N
     assert result["status"] == SearchStatus.PAGE_CONTRACT_CHANGED.value
     assert result["complete"] is False
     assert "未解析出任何题录" in result["detail"]
+    assert result["terminal_status"] == SearchStatus.PAGE_CONTRACT_CHANGED.value
+    assert "未解析出任何题录" in result["terminal_detail"]
 
 
 def test_result_always_exposes_the_human_attendance_flag() -> None:

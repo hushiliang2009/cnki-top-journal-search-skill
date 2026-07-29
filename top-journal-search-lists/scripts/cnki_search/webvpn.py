@@ -39,6 +39,7 @@ MIN_REQUEST_INTERVAL_SECONDS = 30.0
 CHALLENGE_BACKOFF_SECONDS = 180.0
 #: 同一批次因风控最多重试几次；超过则如实上报未完成，交由使用者决定。
 MAX_CHALLENGE_RETRIES = 3
+PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 LOGIN_READY_TITLE = "中国知网"
 DEFAULT_LOGIN_TIMEOUT_SECONDS = 600.0
@@ -150,6 +151,62 @@ async def _finish_cleanup(cleanup: Awaitable[Any]) -> None:
         except asyncio.CancelledError:
             continue
     await task
+
+
+def _clear_current_cancellation() -> None:
+    task = asyncio.current_task()
+    if task is not None:
+        while task.cancelling():
+            task.uncancel()
+
+
+async def _wait_task_bounded(
+    task: asyncio.Task[Any],
+    timeout_seconds: float,
+    *,
+    cancel_on_timeout: bool,
+) -> tuple[bool, asyncio.CancelledError | None]:
+    """有界等待独立任务，并记录等待期间收到的客户端取消。"""
+    deadline = asyncio.get_running_loop().time() + max(timeout_seconds, 0.0)
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            if cancel_on_timeout:
+                task.cancel()
+            return False, cancellation
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+        except TimeoutError:
+            if cancel_on_timeout:
+                task.cancel()
+            return False, cancellation
+        except asyncio.CancelledError as exc:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                cancellation = cancellation or exc
+                _clear_current_cancellation()
+                continue
+            if task.done():
+                break
+            raise
+        except BaseException:
+            if task.done():
+                break
+            raise
+    return True, cancellation
+
+
+async def _finish_cleanup_bounded(
+    cleanup: Awaitable[Any],
+    timeout_seconds: float,
+) -> tuple[bool, asyncio.CancelledError | None]:
+    task = asyncio.ensure_future(cleanup)
+    return await _wait_task_bounded(
+        task,
+        timeout_seconds,
+        cancel_on_timeout=True,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,9 +536,53 @@ class ProfessionalSearchPage:
         retained_home = self.page
         baseline = list(getattr(context, "pages", []) or [])
         owned: list[Any] = []
+        popup_listener_pages: list[Any] = []
+
+        def own_popup(page: Any) -> None:
+            if all(page is not existing for existing in owned):
+                owned.append(page)
+            listen_for_popups(page)
+
+        def listen_for_popups(page: Any) -> bool:
+            on = getattr(page, "on", None)
+            if not callable(on):
+                return False
+            if any(page is existing for existing in popup_listener_pages):
+                return True
+            on("popup", own_popup)
+            popup_listener_pages.append(page)
+            return True
+
+        def stop_listening_for_popups() -> None:
+            for page in popup_listener_pages:
+                remove = getattr(page, "remove_listener", None)
+                if callable(remove):
+                    with contextlib.suppress(Exception):
+                        remove("popup", own_popup)
+            popup_listener_pages.clear()
+
         try:
             if preserve_home:
-                origin = await await_maybe(context.new_page())
+                creation_task = asyncio.create_task(
+                    await_maybe(context.new_page())
+                )
+                try:
+                    origin = await asyncio.shield(creation_task)
+                except asyncio.CancelledError:
+                    _clear_current_cancellation()
+                    completed, _repeat_cancel = await _wait_task_bounded(
+                        creation_task,
+                        PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
+                        cancel_on_timeout=False,
+                    )
+                    if completed and not creation_task.cancelled():
+                        with contextlib.suppress(BaseException):
+                            owned.append(creation_task.result())
+                    else:
+                        creation_task.add_done_callback(
+                            self._close_page_created_after_cancellation
+                        )
+                    raise
                 owned.append(origin)
                 home_url = str(getattr(retained_home, "url", "") or "")
                 if not home_url:
@@ -493,6 +594,7 @@ class ProfessionalSearchPage:
             else:
                 origin = retained_home
 
+            has_popup_boundary = listen_for_popups(origin)
             link = self.page.get_by_role("link", name=ADV_SEARCH_LINK_TEXT)
             if await await_maybe(link.count()) < 1:
                 raise WebVpnNavigationError("知网首页未找到「高级检索」入口")
@@ -502,19 +604,30 @@ class ProfessionalSearchPage:
             # 抓到它就会让驱动指向已关闭页面。只检查本次批次拥有的页面。
             deadline = time.monotonic() + timeout_seconds
             while True:
-                for page in list(getattr(context, "pages", []) or []):
-                    if (
-                        all(page is not existing for existing in baseline)
-                        and all(page is not existing for existing in owned)
-                    ):
-                        owned.append(page)
+                if not has_popup_boundary:
+                    for page in list(getattr(context, "pages", []) or []):
+                        if (
+                            all(page is not existing for existing in baseline)
+                            and all(page is not existing for existing in owned)
+                        ):
+                            owned.append(page)
                 candidates = [origin, *owned]
                 found = await self._locate_advanced_search_page(candidates)
                 if found is not None:
                     self.page = found
-                    await self._close_pages(
-                        page for page in owned if page is not found
+                    stop_listening_for_popups()
+                    completed, cancellation = await _finish_cleanup_bounded(
+                        self._close_pages(
+                            page for page in owned if page is not found
+                        ),
+                        PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
                     )
+                    if cancellation is not None:
+                        raise cancellation
+                    if not completed:
+                        raise WebVpnNavigationError(
+                            "批次页面清理超时，已停止本次检索"
+                        )
                     return self.page
                 if time.monotonic() >= deadline:
                     raise WebVpnNavigationError(
@@ -522,9 +635,22 @@ class ProfessionalSearchPage:
                         "站点可能改版，或中转标签页被关闭"
                     )
                 await asyncio.sleep(1)
-        except BaseException:
-            await _finish_cleanup(self._close_pages(owned))
+        except BaseException as exc:
+            stop_listening_for_popups()
+            initial_cancellation = (
+                exc if isinstance(exc, asyncio.CancelledError) else None
+            )
+            if initial_cancellation is not None:
+                _clear_current_cancellation()
+            _completed, cleanup_cancellation = await _finish_cleanup_bounded(
+                self._close_pages(owned),
+                PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
+            )
             self.page = retained_home
+            if cleanup_cancellation is not None:
+                raise cleanup_cancellation
+            if initial_cancellation is not None:
+                raise initial_cancellation
             raise
 
     async def _locate_advanced_search_page(
@@ -548,8 +674,25 @@ class ProfessionalSearchPage:
             is_closed = getattr(page, "is_closed", None)
             if callable(is_closed) and is_closed():
                 continue
-            with contextlib.suppress(Exception, asyncio.CancelledError):
+            with contextlib.suppress(Exception):
                 await await_maybe(page.close())
+
+    @staticmethod
+    def _close_page_created_after_cancellation(
+        creation_task: asyncio.Task[Any],
+    ) -> None:
+        if creation_task.cancelled():
+            return
+        try:
+            page = creation_task.result()
+        except BaseException:
+            return
+        asyncio.create_task(
+            _finish_cleanup_bounded(
+                ProfessionalSearchPage._close_pages([page]),
+                PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
+            )
+        )
 
     async def switch_to_professional(self, *, timeout_seconds: float = 20.0) -> None:
         """切到「专业检索」标签。

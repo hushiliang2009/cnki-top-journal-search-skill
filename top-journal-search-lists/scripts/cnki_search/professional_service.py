@@ -162,7 +162,11 @@ class CnkiProfessionalSearchService:
         )
         complete = schedule["complete"] and contract_changed is None
         if contract_changed is not None:
-            status = SearchStatus.PAGE_CONTRACT_CHANGED
+            status = (
+                SearchStatus.PARTIAL
+                if annotated
+                else SearchStatus.PAGE_CONTRACT_CHANGED
+            )
         elif not annotated:
             status = (
                 SearchStatus.NO_RESULTS if complete else SearchStatus.PARTIAL
@@ -170,7 +174,7 @@ class CnkiProfessionalSearchService:
         else:
             status = SearchStatus.SUCCESS if complete and not incomplete else SearchStatus.PARTIAL
         result = {
-            "ok": contract_changed is None,
+            "ok": status is SearchStatus.PARTIAL or contract_changed is None,
             "mode": "webvpn",
             "status": status.value,
             "complete": complete,
@@ -186,9 +190,15 @@ class CnkiProfessionalSearchService:
             "incomplete_records": [record.to_dict() for record in incomplete],
         }
         if contract_changed is not None:
-            result["detail"] = contract_changed.get(
-                "detail", "知网页面结构已变化"
+            terminal_detail = contract_changed.get(
+                "detail"
+            ) or "知网页面结构已变化"
+            result["terminal_status"] = (
+                SearchStatus.PAGE_CONTRACT_CHANGED.value
             )
+            result["terminal_detail"] = terminal_detail
+            if status is SearchStatus.PAGE_CONTRACT_CHANGED:
+                result["detail"] = terminal_detail
         return result
 
 
