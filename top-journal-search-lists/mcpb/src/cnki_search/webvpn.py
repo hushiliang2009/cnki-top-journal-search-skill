@@ -464,18 +464,29 @@ def _checkpoint_text(value: str) -> str | None:
         return None
     if "<" in normalized and ">" in normalized:
         return None
-    if normalized.startswith(("/", "\\\\", "~")):
+    if normalized.startswith(("/", "\\", "~")):
         return None
     if folded.startswith(("$home", "${home}", "%userprofile%")):
         return None
-    if (
-        len(normalized) >= 3
-        and normalized[0].isalpha()
-        and normalized[1] == ":"
-        and normalized[2] in {"\\", "/"}
-    ):
+    if _checkpoint_windows_drive_path(normalized):
         return None
+    file_scheme, separator, file_target = folded.partition(":")
+    if separator and "".join(file_scheme.split()) == "file":
+        file_target = file_target.lstrip()
+        if file_target.startswith(("/", "\\")) or _checkpoint_windows_drive_path(
+            file_target
+        ):
+            return None
     return normalized
+
+
+def _checkpoint_windows_drive_path(value: str) -> bool:
+    return (
+        len(value) >= 3
+        and value[0].isalpha()
+        and value[1] == ":"
+        and value[2] in {"\\", "/"}
+    )
 
 
 def _checkpoint_bibliographic_text(
@@ -585,7 +596,7 @@ def _checkpoint_record(
     if (
         not isinstance(result_rank, int)
         or isinstance(result_rank, bool)
-        or result_rank < 1
+        or result_rank < 0
     ):
         return None
     safe["result_rank"] = result_rank

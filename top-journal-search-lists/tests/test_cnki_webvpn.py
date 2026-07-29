@@ -1126,7 +1126,7 @@ def test_checkpoint_rejects_inconsistent_count_semantics(
         ("source_database", "Crossref"),
         ("citations", -1),
         ("downloads", -1),
-        ("result_rank", 0),
+        ("result_rank", -1),
     ],
 )
 def test_checkpoint_rejects_values_outside_record_field_contract(
@@ -1327,6 +1327,126 @@ def test_checkpoint_path_checks_normalize_nfkc_and_trim_first(
     )
 
     assert seen == [1]
+
+
+@pytest.mark.parametrize(
+    "unsafe_date",
+    [
+        "\\Windows\\System32\\config",
+        "\\Device\\HarddiskVolume1\\secret",
+        "\\??\\C:\\secret",
+        "  FiLe:/C:/secret  ",
+        "FILE://server/share",
+        "file:C:/secret",
+        "  ｆｉｌｅ：／Ｃ：／secret  ",
+        "  ｆ ｉ ｌ ｅ ： ／Ｃ：／secret  ",
+    ],
+    ids=[
+        "windows_root",
+        "nt_device",
+        "nt_namespace",
+        "file_single_slash_mixed_case_space",
+        "file_double_slash",
+        "file_no_slash",
+        "file_fullwidth",
+        "file_internal_space_fullwidth",
+    ],
+)
+def test_checkpoint_rejects_windows_namespace_and_file_uri_variants(
+    tmp_path: Path,
+    unsafe_date: str,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(1)
+    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    record = _record(batches[0])
+    record["publication_date"] = unsafe_date
+    state.write_text(
+        json.dumps(
+            {
+                "token": token,
+                "completed": {
+                    "1": {
+                        "status": SearchStatus.SUCCESS.value,
+                        "index": 1,
+                        "total_rows": 1,
+                        "excluded_non_journal_rows": 0,
+                        "records": [record],
+                        "incomplete_records": [],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    seen: list[int] = []
+
+    async def execute(batch):
+        seen.append(batch.index)
+        return _ok(batch)
+
+    asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    assert seen == [1]
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "路径符号 A\\B 的规范用法",
+        "File handling in empirical research",
+        "File: an empirical methods note",
+    ],
+)
+def test_checkpoint_allows_internal_backslash_and_ordinary_file_word(
+    tmp_path: Path,
+    title: str,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(2)
+    token = hashlib.sha256(
+        "\n".join(batch.expression for batch in batches).encode("utf-8")
+    ).hexdigest()
+    record = _record(batches[0], title=title)
+    state.write_text(
+        json.dumps(
+            {
+                "token": token,
+                "completed": {
+                    "1": {
+                        "status": SearchStatus.SUCCESS.value,
+                        "index": 1,
+                        "total_rows": 1,
+                        "excluded_non_journal_rows": 0,
+                        "records": [record],
+                        "incomplete_records": [],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    async def execute(batch):
+        return _challenge(batch)
+
+    summary = asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    assert summary["results"][0]["records"][0].title == title
 
 
 def test_checkpoint_preserves_normal_title_slash_and_saves_normalized_text(

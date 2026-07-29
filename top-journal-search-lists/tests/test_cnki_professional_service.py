@@ -1,4 +1,6 @@
 import asyncio
+import json
+from pathlib import Path
 
 import pytest
 
@@ -6,6 +8,7 @@ from cnki_search import professional_service as service_module
 from cnki_search.models import SearchStatus
 from cnki_search.professional import ExpressionBatch
 from cnki_search.professional_service import CnkiProfessionalSearchService, preview_expressions
+from cnki_search.webvpn import BatchCheckpoint
 
 
 RESULT_TEMPLATE = """
@@ -198,6 +201,76 @@ def test_limit_stops_before_submitting_remaining_batches(
     assert result["batches_completed"] == 1
     assert executor_calls == [1]
     assert "result_url" not in result
+
+
+def test_checkpoint_preserves_missing_seq_rank_and_limit_across_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batches = [
+        ExpressionBatch(index, 2, (), f"SU %= '主题{index}'")
+        for index in range(1, 3)
+    ]
+    monkeypatch.setattr(
+        service_module,
+        "build_group_plans",
+        lambda *_args, **_kwargs: batches,
+    )
+    state = tmp_path / "progress.json"
+    first_calls: list[int] = []
+
+    async def first_execute(batch: ExpressionBatch) -> tuple[str, str, str]:
+        first_calls.append(batch.index)
+        return (
+            SearchStatus.SUCCESS.value,
+            _result_page(
+                title="缺失序号的合法题录",
+                journal="管理世界",
+                authors=("张三",),
+            ),
+            "",
+        )
+
+    first = asyncio.run(
+        CnkiProfessionalSearchService(
+            first_execute,
+            checkpoint=BatchCheckpoint(state),
+        ).search_group(
+            "数字经济",
+            service_module.CHINESE_TOP_GROUP,
+            limit=1,
+        )
+    )
+
+    assert first_calls == [1]
+    assert first["limit_reached"] is True
+    assert first["terminal_status"] is None
+    assert first["records"][0]["result_rank"] == 0
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["completed"]["1"]["records"][0]["result_rank"] == 0
+
+    resumed_calls: list[int] = []
+
+    async def resumed_execute(batch: ExpressionBatch) -> tuple[str, str, str]:
+        resumed_calls.append(batch.index)
+        return (SearchStatus.NETWORK_ERROR.value, "", "")
+
+    resumed = asyncio.run(
+        CnkiProfessionalSearchService(
+            resumed_execute,
+            checkpoint=BatchCheckpoint(state),
+        ).search_group(
+            "数字经济",
+            service_module.CHINESE_TOP_GROUP,
+            limit=1,
+        )
+    )
+
+    assert resumed_calls == []
+    assert resumed["limit_reached"] is True
+    assert resumed["terminal_status"] is None
+    assert len(resumed["records"]) == 1
+    assert resumed["records"][0]["result_rank"] == 0
 
 
 def test_limit_counts_normalized_unique_formal_records(
