@@ -168,6 +168,20 @@ async def _wait_task_bounded(
 ) -> tuple[bool, asyncio.CancelledError | None]:
     """有界等待独立任务，并记录等待期间收到的客户端取消。"""
     deadline = asyncio.get_running_loop().time() + max(timeout_seconds, 0.0)
+    return await _wait_task_until(
+        task,
+        deadline,
+        cancel_on_timeout=cancel_on_timeout,
+    )
+
+
+async def _wait_task_until(
+    task: asyncio.Task[Any],
+    deadline: float,
+    *,
+    cancel_on_timeout: bool,
+) -> tuple[bool, asyncio.CancelledError | None]:
+    """在同一个单调时钟截止点前等待独立任务。"""
     cancellation: asyncio.CancelledError | None = None
     while not task.done():
         remaining = deadline - asyncio.get_running_loop().time()
@@ -205,6 +219,18 @@ async def _finish_cleanup_bounded(
     return await _wait_task_bounded(
         task,
         timeout_seconds,
+        cancel_on_timeout=True,
+    )
+
+
+async def _finish_cleanup_until(
+    cleanup: Awaitable[Any],
+    deadline: float,
+) -> tuple[bool, asyncio.CancelledError | None]:
+    task = asyncio.ensure_future(cleanup)
+    return await _wait_task_until(
+        task,
+        deadline,
         cancel_on_timeout=True,
     )
 
@@ -537,11 +563,42 @@ class ProfessionalSearchPage:
         baseline = list(getattr(context, "pages", []) or [])
         owned: list[Any] = []
         popup_listener_pages: list[Any] = []
+        popup_cleanup_deadline: float | None = None
+        popup_close_tasks: set[asyncio.Task[Any]] = set()
+        popup_closing_pages: list[Any] = []
+        click_cleanup_task: asyncio.Task[Any] | None = None
+        click_cleanup_deadline: float | None = None
+        has_popup_boundary = False
+
+        def schedule_popup_close(page: Any) -> None:
+            if popup_cleanup_deadline is None:
+                return
+            if asyncio.get_running_loop().time() >= popup_cleanup_deadline:
+                return
+            if any(page is closing for closing in popup_closing_pages):
+                return
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                return
+            popup_closing_pages.append(page)
+            close_task = asyncio.create_task(self._close_pages([page]))
+            popup_close_tasks.add(close_task)
+
+            def consume_close_result(task: asyncio.Task[Any]) -> None:
+                popup_close_tasks.discard(task)
+                for index, closing in enumerate(popup_closing_pages):
+                    if closing is page:
+                        popup_closing_pages.pop(index)
+                        break
+                self._consume_task_result(task)
+
+            close_task.add_done_callback(consume_close_result)
 
         def own_popup(page: Any) -> None:
             if all(page is not existing for existing in owned):
                 owned.append(page)
             listen_for_popups(page)
+            schedule_popup_close(page)
 
         def listen_for_popups(page: Any) -> bool:
             on = getattr(page, "on", None)
@@ -590,6 +647,23 @@ class ProfessionalSearchPage:
                 ):
                     return
 
+        async def close_cancelled_click_until(deadline: float) -> None:
+            nonlocal popup_cleanup_deadline
+            popup_cleanup_deadline = deadline
+            for page in list(owned):
+                schedule_popup_close(page)
+            try:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+            finally:
+                popup_cleanup_deadline = None
+                if click_cleanup_task is not None and not click_cleanup_task.done():
+                    click_cleanup_task.cancel()
+                for close_task in list(popup_close_tasks):
+                    if not close_task.done():
+                        close_task.cancel()
+
         try:
             if preserve_home:
                 creation_task = asyncio.create_task(
@@ -633,15 +707,13 @@ class ProfessionalSearchPage:
                 await asyncio.shield(click_task)
             except asyncio.CancelledError:
                 _clear_current_cancellation()
-                click_task.cancel()
-                completed, _repeat_cancel = await _wait_task_bounded(
-                    click_task,
-                    PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
-                    cancel_on_timeout=True,
+                click_cleanup_deadline = (
+                    asyncio.get_running_loop().time()
+                    + PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS
                 )
-                if not completed:
-                    click_task.add_done_callback(self._consume_task_result)
-                await asyncio.sleep(0)
+                click_cleanup_task = click_task
+                click_task.add_done_callback(self._consume_task_result)
+                click_task.cancel()
                 if not has_popup_boundary:
                     own_context_delta()
                 raise
@@ -683,12 +755,22 @@ class ProfessionalSearchPage:
             if initial_cancellation is not None:
                 _clear_current_cancellation()
             try:
-                _completed, cleanup_cancellation = (
-                    await _finish_cleanup_bounded(
-                        close_owned_pages_until_stable(),
-                        PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
+                if click_cleanup_deadline is None:
+                    _completed, cleanup_cancellation = (
+                        await _finish_cleanup_bounded(
+                            close_owned_pages_until_stable(),
+                            PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
+                        )
                     )
-                )
+                else:
+                    _completed, cleanup_cancellation = (
+                        await _finish_cleanup_until(
+                            close_cancelled_click_until(
+                                click_cleanup_deadline
+                            ),
+                            click_cleanup_deadline,
+                        )
+                    )
             finally:
                 stop_listening_for_popups()
             self.page = retained_home

@@ -490,6 +490,183 @@ def test_click_cancel_keeps_listener_until_queued_popup_is_owned() -> None:
     assert next_batch_popup.closed is False
 
 
+def test_click_cancel_closes_popup_arriving_within_remaining_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        webvpn,
+        "PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS",
+        0.10,
+    )
+    click_started = asyncio.Event()
+
+    class Page(FakePage):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self._popup_handlers = []
+
+        def on(self, event: str, callback) -> None:
+            assert event == "popup"
+            self._popup_handlers.append(callback)
+
+        def remove_listener(self, event: str, callback) -> None:
+            assert event == "popup"
+            self._popup_handlers.remove(callback)
+
+        def emit_popup(self, popup) -> None:
+            for callback in list(self._popup_handlers):
+                callback(popup)
+
+    home = Page(
+        counts={webvpn.EXPRESSION_BOX_SELECTOR: 0},
+        page_title="中国知网",
+    )
+    unrelated = Page(page_title="取消前已存在的其他页面")
+    batch_page = Page(
+        counts={webvpn.EXPRESSION_BOX_SELECTOR: 0},
+        page_title="中国知网",
+    )
+    popup = Page(page_title="延迟到达的高级检索页")
+    next_batch_popup = Page(page_title="下一批页面")
+    driver = webvpn.ProfessionalSearchPage(home)
+
+    class ClickLocator(FakeLocator):
+        async def click(self) -> None:
+            click_started.set()
+            await asyncio.Event().wait()
+
+    def batch_link(role: str, name: str) -> ClickLocator:
+        assert role == "link"
+        assert name == webvpn.ADV_SEARCH_LINK_TEXT
+        return ClickLocator(batch_page, "advanced-link")
+
+    batch_page.get_by_role = batch_link
+
+    class Context:
+        pages = [home, unrelated]
+
+        async def new_page(self) -> Page:
+            self.pages.append(batch_page)
+            return batch_page
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            driver.open_from_home(
+                Context(), timeout_seconds=3, preserve_home=True
+            )
+        )
+        await click_started.wait()
+        task.cancel()
+
+        async def deliver_late_popup() -> None:
+            await asyncio.sleep(0.03)
+            batch_page.emit_popup(popup)
+
+        delivery_task = asyncio.create_task(deliver_late_popup())
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=0.3)
+        await delivery_task
+
+        batch_page.emit_popup(next_batch_popup)
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+
+    assert batch_page.closed is True
+    assert popup.closed is True
+    assert home.closed is False
+    assert unrelated.closed is False
+    assert batch_page._popup_handlers == []
+    assert next_batch_popup.closed is False
+
+
+def test_click_cancel_uses_one_cleanup_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from time import monotonic
+
+    monkeypatch.setattr(
+        webvpn,
+        "PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS",
+        0.05,
+    )
+    click_started = asyncio.Event()
+    close_started = asyncio.Event()
+
+    class Page(FakePage):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self._popup_handlers = []
+
+        def on(self, event: str, callback) -> None:
+            assert event == "popup"
+            self._popup_handlers.append(callback)
+
+        def remove_listener(self, event: str, callback) -> None:
+            assert event == "popup"
+            self._popup_handlers.remove(callback)
+
+    home = Page(
+        counts={webvpn.EXPRESSION_BOX_SELECTOR: 0},
+        page_title="中国知网",
+    )
+    batch_page = Page(
+        counts={webvpn.EXPRESSION_BOX_SELECTOR: 0},
+        page_title="中国知网",
+    )
+    driver = webvpn.ProfessionalSearchPage(home)
+
+    class ClickLocator(FakeLocator):
+        async def click(self) -> None:
+            click_started.set()
+            while not close_started.is_set():
+                try:
+                    await close_started.wait()
+                except asyncio.CancelledError:
+                    continue
+
+    def batch_link(role: str, name: str) -> ClickLocator:
+        assert role == "link"
+        assert name == webvpn.ADV_SEARCH_LINK_TEXT
+        return ClickLocator(batch_page, "advanced-link")
+
+    batch_page.get_by_role = batch_link
+
+    async def close_batch_page() -> None:
+        close_started.set()
+        await asyncio.sleep(0.04)
+        batch_page.closed = True
+
+    batch_page.close = close_batch_page
+
+    class Context:
+        pages = [home]
+
+        async def new_page(self) -> Page:
+            self.pages.append(batch_page)
+            return batch_page
+
+    async def scenario() -> float:
+        task = asyncio.create_task(
+            driver.open_from_home(
+                Context(), timeout_seconds=3, preserve_home=True
+            )
+        )
+        await click_started.wait()
+        started = monotonic()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=0.3)
+        return monotonic() - started
+
+    elapsed = asyncio.run(scenario())
+
+    assert elapsed < 0.075
+    assert batch_page.closed is True
+    assert home.closed is False
+    assert batch_page._popup_handlers == []
+
+
 def test_no_usable_advanced_search_page_raises_with_actionable_message() -> None:
     home = _home_without_expression_box(page_title="中国知网")
     driver = webvpn.ProfessionalSearchPage(home)
