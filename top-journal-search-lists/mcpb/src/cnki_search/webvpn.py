@@ -26,6 +26,7 @@ import json
 import os
 import tempfile
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,7 +34,11 @@ from typing import Any
 
 from .browser import BrowserUnavailableError, await_maybe
 from .models import (
+    MAX_AUTHOR_LENGTH,
+    MAX_AUTHORS,
+    MAX_JOURNAL_LENGTH,
     MAX_RESULTS_PER_PAGE,
+    MAX_TITLE_LENGTH,
     SearchStatus,
     is_verifiable_publication_year,
 )
@@ -330,7 +335,11 @@ class BatchCheckpoint:
             payload = json.loads(self.state_file.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return
-        except (OSError, ValueError):
+        except OSError as exc:
+            raise CheckpointPersistenceError(
+                "无法安全读取专业检索断点"
+            ) from exc
+        except ValueError:
             self.save(token)
             return
         if not isinstance(payload, dict) or payload.get("token") != token:
@@ -398,7 +407,12 @@ class BatchCheckpoint:
 
     def clear(self) -> None:
         self.completed = {}
-        self.state_file.unlink(missing_ok=True)
+        try:
+            self.state_file.unlink(missing_ok=True)
+        except OSError as exc:
+            raise CheckpointPersistenceError(
+                "无法安全清除专业检索断点"
+            ) from exc
 
 
 BatchExecutor = Callable[[ExpressionBatch], Awaitable[dict[str, Any]]]
@@ -428,8 +442,13 @@ _CHECKPOINT_RECORD_FIELDS = (
 )
 
 
-def _checkpoint_text_is_safe(value: str) -> bool:
-    folded = value.casefold()
+def _checkpoint_text(value: str) -> str | None:
+    normalized = "".join(
+        character
+        for character in unicodedata.normalize("NFKC", value)
+        if unicodedata.category(character) not in {"Cc", "Cf"}
+    ).strip()
+    folded = normalized.casefold()
     if any(
         marker in folded
         for marker in (
@@ -442,17 +461,36 @@ def _checkpoint_text_is_safe(value: str) -> bool:
             "cookie",
         )
     ):
-        return False
-    if "<" in value and ">" in value:
-        return False
-    if value.startswith(("/", "\\\\")):
-        return False
-    return not (
-        len(value) >= 3
-        and value[0].isalpha()
-        and value[1] == ":"
-        and value[2] in {"\\", "/"}
-    )
+        return None
+    if "<" in normalized and ">" in normalized:
+        return None
+    if normalized.startswith(("/", "\\\\", "~")):
+        return None
+    if folded.startswith(("$home", "${home}", "%userprofile%")):
+        return None
+    if (
+        len(normalized) >= 3
+        and normalized[0].isalpha()
+        and normalized[1] == ":"
+        and normalized[2] in {"\\", "/"}
+    ):
+        return None
+    return normalized
+
+
+def _checkpoint_bibliographic_text(
+    value: str,
+    maximum: int,
+) -> str | None:
+    normalized = _checkpoint_text(value)
+    if normalized is None:
+        return None
+    cleaned = "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) not in {"Cc", "Cf"}
+    ).strip()[:maximum]
+    return _checkpoint_text(cleaned)
 
 
 def _string_sequence(value: Any) -> list[str] | None:
@@ -460,10 +498,16 @@ def _string_sequence(value: Any) -> list[str] | None:
         not isinstance(value, Sequence)
         or isinstance(value, (str, bytes, bytearray))
         or any(not isinstance(item, str) for item in value)
-        or any(not _checkpoint_text_is_safe(item) for item in value)
     ):
         return None
-    return list(value)
+    authors: list[str] = []
+    for item in value[:MAX_AUTHORS]:
+        cleaned = _checkpoint_bibliographic_text(item, MAX_AUTHOR_LENGTH)
+        if cleaned is None:
+            return None
+        if cleaned:
+            authors.append(cleaned)
+    return authors
 
 
 def _checkpoint_record(
@@ -486,17 +530,39 @@ def _checkpoint_record(
     )
     if any(not isinstance(source.get(name), str) for name in required_strings):
         return None
+    title = _checkpoint_bibliographic_text(
+        source["title"],
+        MAX_TITLE_LENGTH,
+    )
+    journal = _checkpoint_bibliographic_text(
+        source["journal_raw"],
+        MAX_JOURNAL_LENGTH,
+    )
+    publication_date = _checkpoint_text(source["publication_date"])
+    document_type = _checkpoint_text(source["document_type"])
+    source_database = _checkpoint_text(source["source_database"])
     if any(
-        not _checkpoint_text_is_safe(source[name])
-        for name in required_strings
+        value is None
+        for value in (
+            title,
+            journal,
+            publication_date,
+            document_type,
+            source_database,
+        )
     ):
+        return None
+    if document_type != "期刊" or source_database != "CNKI":
         return None
     authors = _string_sequence(source.get("authors"))
     if authors is None:
         return None
     safe: dict[str, Any] = {
-        name: source[name]
-        for name in required_strings
+        "title": title,
+        "journal_raw": journal,
+        "publication_date": publication_date,
+        "document_type": document_type,
+        "source_database": source_database,
     }
     safe["authors"] = authors
     for name in ("publication_year", "citations", "downloads"):
@@ -505,15 +571,22 @@ def _checkpoint_record(
             not isinstance(value, int) or isinstance(value, bool)
         ):
             return None
+        if name in {"citations", "downloads"} and value is not None and value < 0:
+            return None
         safe[name] = value
-    if formal and (
-        not safe["title"].strip()
-        or not safe["journal_raw"].strip()
-        or not is_verifiable_publication_year(safe["publication_year"])
-    ):
+    complete_bibliography = (
+        bool(safe["title"])
+        and bool(safe["journal_raw"])
+        and is_verifiable_publication_year(safe["publication_year"])
+    )
+    if formal != complete_bibliography:
         return None
     result_rank = source.get("result_rank")
-    if not isinstance(result_rank, int) or isinstance(result_rank, bool):
+    if (
+        not isinstance(result_rank, int)
+        or isinstance(result_rank, bool)
+        or result_rank < 1
+    ):
         return None
     safe["result_rank"] = result_rank
     for name in ("is_online_first",):
@@ -584,11 +657,21 @@ def _checkpoint_result(
         or isinstance(total_rows, bool)
         or not isinstance(excluded, int)
         or isinstance(excluded, bool)
+        or total_rows < 0
+        or excluded < 0
+        or excluded > total_rows
         or records is None
         or incomplete is None
     ):
         return None
-    if status == SearchStatus.NO_RESULTS.value and (records or incomplete):
+    if excluded + len(records) + len(incomplete) > total_rows:
+        return None
+    if status == SearchStatus.NO_RESULTS.value and (
+        total_rows != 0
+        or excluded != 0
+        or records
+        or incomplete
+    ):
         return None
     safe = {
         "status": status,
@@ -807,7 +890,22 @@ async def run_batches(
             )
 
     if checkpoint is not None:
-        checkpoint.clear()
+        try:
+            checkpoint.clear()
+        except CheckpointPersistenceError as exc:
+            return _summary(
+                [],
+                batches,
+                token,
+                None,
+                human_intervention_required,
+                stopped_at=batches[-1],
+                stopped_result={
+                    "status": SearchStatus.CONFIGURATION_ERROR.value,
+                    "detail": str(exc),
+                },
+                terminal_status=SearchStatus.CONFIGURATION_ERROR.value,
+            )
     return _summary(results, batches, token, checkpoint, human_intervention_required)
 
 

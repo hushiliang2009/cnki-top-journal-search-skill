@@ -335,6 +335,8 @@ def test_checkpoint_contains_no_expression_url_html_cookie_or_path(
         return {
             "status": SearchStatus.SUCCESS.value,
             "index": batch.index,
+            "total_rows": 1,
+            "excluded_non_journal_rows": 0,
             "records": [_record(batch)],
             "incomplete_records": [],
             "result_url": "https://webvpn.example.edu.cn/result",
@@ -385,6 +387,8 @@ def test_checkpoint_records_are_restored_as_paper_records(tmp_path: Path) -> Non
         return {
             "status": SearchStatus.SUCCESS.value,
             "index": batch.index,
+            "total_rows": 1,
+            "excluded_non_journal_rows": 0,
             "records": [_record(batch)],
             "incomplete_records": [],
         }
@@ -433,6 +437,8 @@ def test_checkpoint_resave_sanitizes_loaded_completed_payload(tmp_path: Path) ->
                     "1": {
                         "status": SearchStatus.SUCCESS.value,
                         "index": 1,
+                        "total_rows": 1,
+                        "excluded_non_journal_rows": 0,
                         "records": [_record(batches[0])],
                         "result_url": "https://example.invalid/result",
                         "cookie": "ticket=secret",
@@ -474,6 +480,8 @@ def test_loaded_checkpoint_is_sanitized_before_immediate_limit_return(
                     "1": {
                         "status": SearchStatus.SUCCESS.value,
                         "index": 1,
+                        "total_rows": 1,
+                        "excluded_non_journal_rows": 0,
                         "records": [_record(batches[0])],
                         "expression": batches[0].expression,
                         "result_url": "https://example.invalid/result",
@@ -575,6 +583,8 @@ def test_checkpoint_replace_failure_never_restores_sensitive_records(
                     "1": {
                         "status": SearchStatus.SUCCESS.value,
                         "index": 1,
+                        "total_rows": 1,
+                        "excluded_non_journal_rows": 0,
                         "records": [_record(batches[0])],
                         "expression": batches[0].expression,
                         "result_url": "https://example.invalid/result",
@@ -634,6 +644,8 @@ def test_checkpoint_save_failure_discards_already_restored_results(
                     "1": {
                         "status": SearchStatus.SUCCESS.value,
                         "index": 1,
+                        "total_rows": 1,
+                        "excluded_non_journal_rows": 0,
                         "records": [_record(batches[0])],
                         "incomplete_records": [],
                     }
@@ -840,6 +852,8 @@ def test_checkpoint_whitelist_drops_sensitive_auxiliary_fields(
                     "1": {
                         "status": SearchStatus.SUCCESS.value,
                         "index": 1,
+                        "total_rows": 1,
+                        "excluded_non_journal_rows": 0,
                         "records": [record],
                         "incomplete_records": [],
                         "detail": batches[0].expression,
@@ -893,6 +907,8 @@ def test_checkpoint_rejects_sensitive_text_hidden_in_allowed_record_field(
                     "1": {
                         "status": SearchStatus.SUCCESS.value,
                         "index": 1,
+                        "total_rows": 1,
+                        "excluded_non_journal_rows": 0,
                         "records": [record],
                         "incomplete_records": [],
                     }
@@ -917,6 +933,446 @@ def test_checkpoint_rejects_sensitive_text_hidden_in_allowed_record_field(
     )
 
     assert seen == [1]
+
+
+def test_checkpoint_read_error_fails_closed_without_network_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "progress.json"
+    state.write_text("{}", encoding="utf-8")
+    batches = _batches(1)
+    executor_calls: list[int] = []
+    original_read_text = Path.read_text
+
+    def fail_state_read(path: Path, *args, **kwargs):
+        if path == state:
+            raise OSError("read denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_state_read)
+
+    async def execute(batch):
+        executor_calls.append(batch.index)
+        return _ok(batch)
+
+    summary = asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    assert executor_calls == []
+    assert summary["results"] == []
+    assert summary["batches_completed"] == 0
+    assert summary["limit_reached"] is False
+    assert summary["terminal_status"] == SearchStatus.CONFIGURATION_ERROR.value
+
+
+def test_checkpoint_clear_error_fails_closed_instead_of_leaking_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(1)
+    executor_calls: list[int] = []
+    original_unlink = Path.unlink
+
+    def fail_state_unlink(path: Path, *args, **kwargs):
+        if path == state:
+            raise OSError("unlink denied")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_state_unlink)
+
+    async def execute(batch):
+        executor_calls.append(batch.index)
+        return _ok(batch)
+
+    summary = asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    assert executor_calls == [1]
+    assert summary["results"] == []
+    assert summary["batches_completed"] == 0
+    assert summary["limit_reached"] is False
+    assert summary["terminal_status"] == SearchStatus.CONFIGURATION_ERROR.value
+
+
+@pytest.mark.parametrize("field", ["title", "journal_raw"])
+def test_checkpoint_rejects_formal_record_blank_after_control_cleanup(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(1)
+    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    record = _record(batches[0])
+    record[field] = "\u200b\x00"
+    state.write_text(
+        json.dumps(
+            {
+                "token": token,
+                "completed": {
+                    "1": {
+                        "status": SearchStatus.SUCCESS.value,
+                        "index": 1,
+                        "total_rows": 1,
+                        "excluded_non_journal_rows": 0,
+                        "records": [record],
+                        "incomplete_records": [],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    seen: list[int] = []
+
+    async def execute(batch):
+        seen.append(batch.index)
+        return _ok(batch)
+
+    asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    assert seen == [1]
+
+
+@pytest.mark.parametrize(
+    ("total_rows", "excluded", "records", "incomplete"),
+    [
+        (True, 0, [], []),
+        (0, True, [], []),
+        (-1, 0, [], []),
+        (1, 2, [], []),
+        (1, 0, ["formal"], ["incomplete"]),
+    ],
+    ids=[
+        "bool_total",
+        "bool_excluded",
+        "negative_total",
+        "excluded_gt_total",
+        "row_count_underflow",
+    ],
+)
+def test_checkpoint_rejects_inconsistent_count_semantics(
+    tmp_path: Path,
+    total_rows,
+    excluded,
+    records,
+    incomplete,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(1)
+    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    formal = _record(batches[0])
+    incomplete_record = _record(batches[0], title="")
+    payload_records = [formal] if records else []
+    payload_incomplete = [incomplete_record] if incomplete else []
+    state.write_text(
+        json.dumps(
+            {
+                "token": token,
+                "completed": {
+                    "1": {
+                        "status": SearchStatus.SUCCESS.value,
+                        "index": 1,
+                        "total_rows": total_rows,
+                        "excluded_non_journal_rows": excluded,
+                        "records": payload_records,
+                        "incomplete_records": payload_incomplete,
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    seen: list[int] = []
+
+    async def execute(batch):
+        seen.append(batch.index)
+        return _ok(batch)
+
+    asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    assert seen == [1]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("document_type", "报纸"),
+        ("source_database", "Crossref"),
+        ("citations", -1),
+        ("downloads", -1),
+        ("result_rank", 0),
+    ],
+)
+def test_checkpoint_rejects_values_outside_record_field_contract(
+    tmp_path: Path,
+    field: str,
+    value,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(1)
+    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    record = _record(batches[0])
+    record[field] = value
+    state.write_text(
+        json.dumps(
+            {
+                "token": token,
+                "completed": {
+                    "1": {
+                        "status": SearchStatus.SUCCESS.value,
+                        "index": 1,
+                        "total_rows": 1,
+                        "excluded_non_journal_rows": 0,
+                        "records": [record],
+                        "incomplete_records": [],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    seen: list[int] = []
+
+    async def execute(batch):
+        seen.append(batch.index)
+        return _ok(batch)
+
+    asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    assert seen == [1]
+
+
+def test_checkpoint_count_lower_bound_allows_formal_rows_omitted_by_limit(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(2)
+    token = hashlib.sha256(
+        "\n".join(batch.expression for batch in batches).encode("utf-8")
+    ).hexdigest()
+    state.write_text(
+        json.dumps(
+            {
+                "token": token,
+                "completed": {
+                    "1": {
+                        "status": SearchStatus.SUCCESS.value,
+                        "index": 1,
+                        "total_rows": 8,
+                        "excluded_non_journal_rows": 2,
+                        "records": [_record(batches[0])],
+                        "incomplete_records": [],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    seen: list[int] = []
+
+    async def execute(batch):
+        seen.append(batch.index)
+        return _challenge(batch)
+
+    summary = asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    assert seen == [2]
+    assert summary["results"][0]["total_rows"] == 8
+    assert len(summary["results"][0]["records"]) == 1
+
+
+def test_checkpoint_rejects_formal_record_hidden_in_incomplete_records(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(1)
+    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    state.write_text(
+        json.dumps(
+            {
+                "token": token,
+                "completed": {
+                    "1": {
+                        "status": SearchStatus.SUCCESS.value,
+                        "index": 1,
+                        "total_rows": 1,
+                        "excluded_non_journal_rows": 0,
+                        "records": [],
+                        "incomplete_records": [_record(batches[0])],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    seen: list[int] = []
+
+    async def execute(batch):
+        seen.append(batch.index)
+        return _ok(batch)
+
+    asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    assert seen == [1]
+
+
+@pytest.mark.parametrize(
+    "unsafe_date",
+    [
+        "  Ｃ：＼Users＼secret  ",
+        "  ＼＼server＼share  ",
+        "  ／etc/passwd  ",
+        "  ～／secret  ",
+        "  ｈｔｔｐｓ：／／example.invalid  ",
+        "\u200bＣ：＼Users＼secret",
+        "ｈｔ\u200bｔｐｓ：／／example.invalid",
+    ],
+    ids=[
+        "windows_drive",
+        "unc",
+        "posix_absolute",
+        "home",
+        "url",
+        "zero_width_windows_drive",
+        "zero_width_url",
+    ],
+)
+def test_checkpoint_path_checks_normalize_nfkc_and_trim_first(
+    tmp_path: Path,
+    unsafe_date: str,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(1)
+    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    record = _record(batches[0])
+    record["publication_date"] = unsafe_date
+    state.write_text(
+        json.dumps(
+            {
+                "token": token,
+                "completed": {
+                    "1": {
+                        "status": SearchStatus.SUCCESS.value,
+                        "index": 1,
+                        "total_rows": 1,
+                        "excluded_non_journal_rows": 0,
+                        "records": [record],
+                        "incomplete_records": [],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    seen: list[int] = []
+
+    async def execute(batch):
+        seen.append(batch.index)
+        return _ok(batch)
+
+    asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    assert seen == [1]
+
+
+def test_checkpoint_preserves_normal_title_slash_and_saves_normalized_text(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(2)
+    token = hashlib.sha256(
+        "\n".join(batch.expression for batch in batches).encode("utf-8")
+    ).hexdigest()
+    record = _record(batches[0], title="Ａ投入／产出分析")
+    state.write_text(
+        json.dumps(
+            {
+                "token": token,
+                "completed": {
+                    "1": {
+                        "status": SearchStatus.SUCCESS.value,
+                        "index": 1,
+                        "total_rows": 1,
+                        "excluded_non_journal_rows": 0,
+                        "records": [record],
+                        "incomplete_records": [],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    async def execute(batch):
+        return _challenge(batch)
+
+    summary = asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    assert summary["results"][0]["records"][0].title == "A投入/产出分析"
+    text = state.read_text(encoding="utf-8")
+    assert "A投入/产出分析" in text
+    assert "Ａ投入／产出分析" not in text
 
 
 @pytest.mark.parametrize(
