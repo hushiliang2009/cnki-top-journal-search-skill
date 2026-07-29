@@ -459,6 +459,106 @@ def test_checkpoint_resave_sanitizes_loaded_completed_payload(tmp_path: Path) ->
         assert forbidden.casefold() not in text.casefold()
 
 
+def test_loaded_checkpoint_is_sanitized_before_immediate_limit_return(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(1)
+    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    state.write_text(
+        json.dumps(
+            {
+                "token": token,
+                "completed": {
+                    "1": {
+                        "status": SearchStatus.SUCCESS.value,
+                        "index": 1,
+                        "records": [_record(batches[0])],
+                        "expression": batches[0].expression,
+                        "result_url": "https://example.invalid/result",
+                        "html": "<table>secret</table>",
+                        "cookie": "ticket=secret",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    executor_calls: list[int] = []
+
+    async def execute(batch):
+        executor_calls.append(batch.index)
+        return _ok(batch)
+
+    summary = asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+            should_stop=lambda results: bool(results[0]["records"]),
+        )
+    )
+
+    assert executor_calls == []
+    assert set(summary["results"][0]) == {
+        "status",
+        "index",
+        "total_rows",
+        "excluded_non_journal_rows",
+        "records",
+        "incomplete_records",
+    }
+    text = state.read_text(encoding="utf-8")
+    for forbidden in ("SU %=", "https://", "<table", "cookie"):
+        assert forbidden.casefold() not in text.casefold()
+
+
+@pytest.mark.parametrize(
+    "existing_file",
+    ["missing", "corrupt", "token_mismatch"],
+)
+def test_checkpoint_load_always_discards_in_memory_state_before_new_query(
+    tmp_path: Path,
+    existing_file: str,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(1)
+    checkpoint = webvpn.BatchCheckpoint(state)
+    checkpoint.completed = {
+        1: {
+            "status": SearchStatus.SUCCESS.value,
+            "index": 1,
+            "records": [_record(batches[0])],
+        }
+    }
+    if existing_file == "corrupt":
+        state.write_text("{not-json", encoding="utf-8")
+    elif existing_file == "token_mismatch":
+        state.write_text(
+            json.dumps(
+                {
+                    "token": "0" * 64,
+                    "completed": checkpoint.completed,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    seen: list[int] = []
+
+    async def execute(batch):
+        seen.append(batch.index)
+        return _ok(batch)
+
+    summary = asyncio.run(
+        webvpn.run_batches(batches, execute, checkpoint=checkpoint)
+    )
+
+    assert seen == [1]
+    assert summary["batches_completed"] == 1
+
+
 def test_checkpoint_is_cleared_after_a_complete_run(tmp_path: Path) -> None:
     state = tmp_path / "progress.json"
     checkpoint = webvpn.BatchCheckpoint(state)

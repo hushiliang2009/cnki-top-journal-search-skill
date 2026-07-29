@@ -281,6 +281,110 @@ def test_duplicate_keeps_more_complete_record(
     assert result["records"][0]["downloads"] == 12
 
 
+def test_disjoint_authors_keep_same_title_journal_year_as_distinct_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batches = [
+        ExpressionBatch(index, 3, (), f"SU %= '主题{index}'")
+        for index in range(1, 4)
+    ]
+    monkeypatch.setattr(
+        service_module,
+        "build_group_plans",
+        lambda *_args, **_kwargs: batches,
+    )
+    executor_calls: list[int] = []
+
+    async def execute(batch: ExpressionBatch) -> tuple[str, str, str]:
+        executor_calls.append(batch.index)
+        if batch.index == 1:
+            html = (
+                _result_page(
+                    title="同名论文",
+                    journal="管理世界",
+                    authors=("张三",),
+                )
+                + _result_page(
+                    title="同名论文",
+                    journal="管理世界",
+                    authors=("李四",),
+                )
+            )
+        else:
+            html = _result_page(
+                title=f"后续论文{batch.index}",
+                journal="经济研究",
+                authors=("王五",),
+            )
+        return (SearchStatus.SUCCESS.value, html, "")
+
+    result = asyncio.run(
+        CnkiProfessionalSearchService(execute).search_group(
+            "数字经济",
+            service_module.CHINESE_TOP_GROUP,
+            limit=2,
+        )
+    )
+
+    assert executor_calls == [1]
+    assert result["limit_reached"] is True
+    assert len(result["records"]) == 2
+    assert {tuple(record["authors"]) for record in result["records"]} == {
+        ("张三",),
+        ("李四",),
+    }
+
+
+@pytest.mark.parametrize(
+    ("first_authors", "second_authors"),
+    [
+        (
+            ("Zhang San", "李四"),
+            ("李四", "ＺＨＡＮＧ　Ｓａｎ"),
+        ),
+        (
+            ("张三", "李四"),
+            ("李四", "王五"),
+        ),
+    ],
+    ids=["normalized_order", "partial_overlap"],
+)
+def test_overlapping_authors_merge_candidate_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+    first_authors: tuple[str, ...],
+    second_authors: tuple[str, ...],
+) -> None:
+    batches = [
+        ExpressionBatch(index, 2, (), f"SU %= '主题{index}'")
+        for index in range(1, 3)
+    ]
+    monkeypatch.setattr(
+        service_module,
+        "build_group_plans",
+        lambda *_args, **_kwargs: batches,
+    )
+
+    async def execute(batch: ExpressionBatch) -> tuple[str, str, str]:
+        authors = first_authors if batch.index == 1 else second_authors
+        html = _result_page(
+            title="Same Study",
+            journal="Journal A",
+            authors=authors,
+            citations=9 if batch.index == 2 else None,
+        )
+        return (SearchStatus.SUCCESS.value, html, "")
+
+    result = asyncio.run(
+        CnkiProfessionalSearchService(execute).search_group(
+            "数字经济",
+            service_module.CHINESE_TOP_GROUP,
+        )
+    )
+
+    assert len(result["records"]) == 1
+    assert result["records"][0]["citations"] == 9
+
+
 def test_challenge_without_handler_reports_partial_and_flags_human_intervention() -> None:
     async def execute(_batch: ExpressionBatch) -> tuple[str, str, str]:
         return (SearchStatus.CHALLENGE_DETECTED.value, "", "https://kns.cnki.net/verify/home")

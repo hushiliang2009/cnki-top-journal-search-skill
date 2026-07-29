@@ -14,7 +14,8 @@
 """
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import unicodedata
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -129,11 +130,11 @@ class CnkiProfessionalSearchService:
             }
 
         def reached_limit(results: list[dict[str, Any]]) -> bool:
-            unique = {
-                _record_key(record)
+            unique = _merge_candidate_records(
+                record
                 for item in results
                 for record in item.get("records", ())
-            }
+            )
             return len(unique) >= limit
 
         schedule = await run_batches(batches, execute, on_challenge=self.on_challenge,
@@ -142,26 +143,16 @@ class CnkiProfessionalSearchService:
         return self._merge(schedule, batches)
 
     def _merge(self, schedule: dict[str, Any], batches: list[ExpressionBatch]) -> dict[str, Any]:
-        records: list[PaperRecord] = []
+        collected: list[PaperRecord] = []
         incomplete: list[PaperRecord] = []
         total_rows = excluded = 0
-        positions: dict[tuple[str, str, int | None], int] = {}
         for item in schedule["results"]:
             total_rows += item.get("total_rows", 0)
             excluded += item.get("excluded_non_journal_rows", 0)
-            for record in item.get("records", ()):
-                key = _record_key(record)
-                position = positions.get(key)
-                if position is None:
-                    positions[key] = len(records)
-                    records.append(record)
-                elif (
-                    _record_completeness_score(record)
-                    > _record_completeness_score(records[position])
-                ):
-                    records[position] = record
+            collected.extend(item.get("records", ()))
             incomplete.extend(item.get("incomplete_records", ()))
 
+        records = _merge_candidate_records(collected)
         annotated = annotate_and_sort_records(records, catalog=self.catalog)
         stopped_result = schedule.get("stopped_result")
         terminal_status = schedule["terminal_status"]
@@ -232,6 +223,26 @@ def _record_key(record: PaperRecord) -> tuple[str, str, int | None]:
     )
 
 
+def _normalized_authors(record: PaperRecord) -> set[str]:
+    return {
+        "".join(unicodedata.normalize("NFKC", author).split()).casefold()
+        for author in record.authors
+        if author.strip()
+    }
+
+
+def _same_record_identity(left: PaperRecord, right: PaperRecord) -> bool:
+    if _record_key(left) != _record_key(right):
+        return False
+    left_authors = _normalized_authors(left)
+    right_authors = _normalized_authors(right)
+    return (
+        not left_authors
+        or not right_authors
+        or not left_authors.isdisjoint(right_authors)
+    )
+
+
 def _record_completeness_score(record: PaperRecord) -> int:
     return sum(
         (
@@ -244,6 +255,29 @@ def _record_completeness_score(record: PaperRecord) -> int:
             record.downloads is not None,
         )
     )
+
+
+def _merge_candidate_records(
+    records: Iterable[PaperRecord],
+) -> list[PaperRecord]:
+    merged: list[PaperRecord] = []
+    for record in records:
+        position = next(
+            (
+                index
+                for index, existing in enumerate(merged)
+                if _same_record_identity(existing, record)
+            ),
+            None,
+        )
+        if position is None:
+            merged.append(record)
+        elif (
+            _record_completeness_score(record)
+            > _record_completeness_score(merged[position])
+        ):
+            merged[position] = record
+    return merged
 
 
 def build_group_plans(

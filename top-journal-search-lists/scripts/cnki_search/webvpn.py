@@ -315,13 +315,27 @@ class BatchCheckpoint:
     completed: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     def load(self, token: str) -> None:
+        self.completed = {}
         try:
             payload = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
         except (OSError, ValueError):
+            self.save(token)
             return
-        if payload.get("token") != token:      # 检索条件变了，旧断点作废
+        if not isinstance(payload, dict) or payload.get("token") != token:
+            self.save(token)
             return
-        self.completed = {int(key): value for key, value in payload.get("completed", {}).items()}
+        saved = payload.get("completed", {})
+        if isinstance(saved, dict):
+            for key, value in saved.items():
+                try:
+                    index = int(key)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(value, dict):
+                    self.completed[index] = _checkpoint_result(value, index)
+        self.save(token)
 
     def save(self, token: str) -> None:
         try:
@@ -414,7 +428,14 @@ def _restore_checkpoint_result(
 ) -> dict[str, Any]:
     from .models import PaperRecord
 
-    restored = dict(result)
+    restored: dict[str, Any] = {
+        "status": result.get("status"),
+        "index": result.get("index", batch.index),
+        "total_rows": result.get("total_rows", 0),
+        "excluded_non_journal_rows": result.get(
+            "excluded_non_journal_rows", 0
+        ),
+    }
     for name in ("records", "incomplete_records"):
         records: list[PaperRecord] = []
         for saved in result.get(name, ()):
@@ -431,7 +452,10 @@ def _restore_checkpoint_result(
             except (TypeError, ValueError):
                 continue
         restored[name] = tuple(records)
-    return restored
+    return {
+        name: restored[name]
+        for name in _CHECKPOINT_RESULT_FIELDS
+    }
 
 
 async def run_batches(
