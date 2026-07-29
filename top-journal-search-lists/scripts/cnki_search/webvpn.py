@@ -32,7 +32,11 @@ from pathlib import Path
 from typing import Any
 
 from .browser import BrowserUnavailableError, await_maybe
-from .models import MAX_RESULTS_PER_PAGE, SearchStatus
+from .models import (
+    MAX_RESULTS_PER_PAGE,
+    SearchStatus,
+    is_verifiable_publication_year,
+)
 from .professional import ExpressionBatch
 
 #: 实测：连续 4 次快速请求即触发安全验证，冷却约 75 秒后恢复。30 秒是据此取的
@@ -340,7 +344,11 @@ class BatchCheckpoint:
                 except (TypeError, ValueError):
                     continue
                 if isinstance(value, dict):
-                    safe = _checkpoint_result(value, index)
+                    safe = _checkpoint_result(
+                        value,
+                        index,
+                        from_payload=True,
+                    )
                     if safe is not None:
                         self.completed[index] = safe
         self.save(token)
@@ -417,16 +425,34 @@ _CHECKPOINT_RECORD_FIELDS = (
     "is_online_first",
     "result_rank",
     "source_database",
-    "journal_matched_title",
-    "journal_match_status",
-    "journal_match_method",
-    "priority_level",
-    "priority_group",
-    "source_catalogs",
-    "subject_categories",
-    "ncs_internal_rank",
-    "manual_review_required",
 )
+
+
+def _checkpoint_text_is_safe(value: str) -> bool:
+    folded = value.casefold()
+    if any(
+        marker in folded
+        for marker in (
+            "su %=",
+            "ly=",
+            "ye between",
+            "http://",
+            "https://",
+            "://",
+            "cookie",
+        )
+    ):
+        return False
+    if "<" in value and ">" in value:
+        return False
+    if value.startswith(("/", "\\\\")):
+        return False
+    return not (
+        len(value) >= 3
+        and value[0].isalpha()
+        and value[1] == ":"
+        and value[2] in {"\\", "/"}
+    )
 
 
 def _string_sequence(value: Any) -> list[str] | None:
@@ -434,12 +460,17 @@ def _string_sequence(value: Any) -> list[str] | None:
         not isinstance(value, Sequence)
         or isinstance(value, (str, bytes, bytearray))
         or any(not isinstance(item, str) for item in value)
+        or any(not _checkpoint_text_is_safe(item) for item in value)
     ):
         return None
     return list(value)
 
 
-def _checkpoint_record(record: Any) -> dict[str, Any] | None:
+def _checkpoint_record(
+    record: Any,
+    *,
+    formal: bool,
+) -> dict[str, Any] | None:
     if hasattr(record, "to_dict"):
         source = record.to_dict()
     elif isinstance(record, Mapping):
@@ -455,6 +486,11 @@ def _checkpoint_record(record: Any) -> dict[str, Any] | None:
     )
     if any(not isinstance(source.get(name), str) for name in required_strings):
         return None
+    if any(
+        not _checkpoint_text_is_safe(source[name])
+        for name in required_strings
+    ):
+        return None
     authors = _string_sequence(source.get("authors"))
     if authors is None:
         return None
@@ -463,48 +499,28 @@ def _checkpoint_record(record: Any) -> dict[str, Any] | None:
         for name in required_strings
     }
     safe["authors"] = authors
-    for name in (
-        "publication_year",
-        "citations",
-        "downloads",
-        "priority_level",
-        "ncs_internal_rank",
-    ):
+    for name in ("publication_year", "citations", "downloads"):
         value = source.get(name)
         if value is not None and (
             not isinstance(value, int) or isinstance(value, bool)
         ):
             return None
         safe[name] = value
+    if formal and (
+        not safe["title"].strip()
+        or not safe["journal_raw"].strip()
+        or not is_verifiable_publication_year(safe["publication_year"])
+    ):
+        return None
     result_rank = source.get("result_rank")
     if not isinstance(result_rank, int) or isinstance(result_rank, bool):
         return None
     safe["result_rank"] = result_rank
-    for name in ("is_online_first", "manual_review_required"):
+    for name in ("is_online_first",):
         value = source.get(name)
-        if name == "manual_review_required" and value is None:
-            value = True
         if not isinstance(value, bool):
             return None
         safe[name] = value
-    for name in (
-        "journal_matched_title",
-        "journal_match_method",
-        "priority_group",
-    ):
-        value = source.get(name)
-        if value is not None and not isinstance(value, str):
-            return None
-        safe[name] = value
-    match_status = source.get("journal_match_status", "unmatched")
-    if not isinstance(match_status, str):
-        return None
-    safe["journal_match_status"] = match_status
-    for name in ("source_catalogs", "subject_categories"):
-        values = _string_sequence(source.get(name, ()))
-        if values is None:
-            return None
-        safe[name] = values
     return {
         name: safe[name]
         for name in _CHECKPOINT_RECORD_FIELDS
@@ -512,15 +528,21 @@ def _checkpoint_record(record: Any) -> dict[str, Any] | None:
     }
 
 
-def _checkpoint_records(value: Any) -> list[dict[str, Any]] | None:
+def _checkpoint_records(
+    value: Any,
+    *,
+    formal: bool,
+    require_list: bool,
+) -> list[dict[str, Any]] | None:
     if (
         not isinstance(value, Sequence)
         or isinstance(value, (str, bytes, bytearray))
+        or (require_list and not isinstance(value, list))
     ):
         return None
     records: list[dict[str, Any]] = []
     for record in value:
-        safe = _checkpoint_record(record)
+        safe = _checkpoint_record(record, formal=formal)
         if safe is None:
             return None
         records.append(safe)
@@ -530,14 +552,34 @@ def _checkpoint_records(value: Any) -> list[dict[str, Any]] | None:
 def _checkpoint_result(
     result: dict[str, Any],
     index: int,
+    *,
+    from_payload: bool = False,
 ) -> dict[str, Any] | None:
     status = result.get("status")
     total_rows = result.get("total_rows", 0)
     excluded = result.get("excluded_non_journal_rows", 0)
-    records = _checkpoint_records(result.get("records", ()))
-    incomplete = _checkpoint_records(result.get("incomplete_records", ()))
+    records_value = result.get("records") if from_payload else result.get(
+        "records", ()
+    )
+    incomplete_value = result.get(
+        "incomplete_records",
+        [] if from_payload else (),
+    )
+    records = _checkpoint_records(
+        records_value,
+        formal=True,
+        require_list=from_payload,
+    )
+    incomplete = _checkpoint_records(
+        incomplete_value,
+        formal=False,
+        require_list=from_payload,
+    )
     if (
-        not isinstance(status, str)
+        status not in {
+            SearchStatus.SUCCESS.value,
+            SearchStatus.NO_RESULTS.value,
+        }
         or not isinstance(total_rows, int)
         or isinstance(total_rows, bool)
         or not isinstance(excluded, int)
@@ -545,6 +587,8 @@ def _checkpoint_result(
         or records is None
         or incomplete is None
     ):
+        return None
+    if status == SearchStatus.NO_RESULTS.value and (records or incomplete):
         return None
     safe = {
         "status": status,
@@ -719,7 +763,7 @@ async def run_batches(
             if safe is None:
                 checkpoint.completed = {}
                 return _summary(
-                    results,
+                    [],
                     batches,
                     token,
                     None,
@@ -736,7 +780,7 @@ async def run_batches(
                 checkpoint.save(token)
             except CheckpointPersistenceError as exc:
                 return _summary(
-                    results,
+                    [],
                     batches,
                     token,
                     None,
@@ -778,6 +822,8 @@ def _summary(results: list[dict[str, Any]], batches: Sequence[ExpressionBatch],
         try:
             checkpoint.save(token)
         except CheckpointPersistenceError as exc:
+            results = []
+            limit_reached = False
             terminal_status = SearchStatus.CONFIGURATION_ERROR.value
             stopped_result = {
                 "status": terminal_status,
