@@ -288,6 +288,8 @@ def test_webvpn_e2e_helper_prints_only_the_sanitized_summary(
                     "journal_raw": "管理世界",
                     "publication_year": 2025,
                     "priority_level": 6,
+                    "authors": ["张三", "李四"],
+                    "unknown_safe_field": "must-not-be-emitted",
                 }],
             }
 
@@ -330,51 +332,285 @@ def test_webvpn_e2e_helper_prints_only_the_sanitized_summary(
             "journal_raw": "管理世界",
             "publication_year": 2025,
             "priority_level": 6,
+            "authors": ["张三", "李四"],
         }],
     }
 
 
-@pytest.mark.parametrize(
-    "unsafe_result",
-    [
-        {
-            "status": "success",
-            "records": [{"title": "题名", "result_url": "https://example.invalid"}],
-        },
-        {
-            "status": "success",
-            "records": [{"title": "题名", "diagnostic": r"C:\Users\person\Cookie"}],
-        },
-    ],
-)
-def test_webvpn_e2e_helper_rejects_sensitive_keys_and_absolute_paths(
-    skill_root: Path,
+def _install_e2e_runtime(
+    helper: Any,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    unsafe_result: dict[str, object],
-) -> None:
-    helper = _load_helper_module(skill_root, "_webvpn_e2e")
-
+    *,
+    result: object = None,
+    error: BaseException | None = None,
+) -> Any:
     class Runtime:
-        async def search_group(self, *_args: object, **_kwargs: object) -> dict[str, object]:
-            return unsafe_result
+        closed = False
+
+        async def search_group(self, *_args: object, **_kwargs: object) -> object:
+            if error is not None:
+                raise error
+            return result
 
         async def aclose(self) -> None:
-            pass
+            self.closed = True
+
+    runtime = Runtime()
 
     async def build_runtime() -> Runtime:
-        return Runtime()
+        return runtime
 
     monkeypatch.setattr(
         helper, "build_professional_runtime_from_env", build_runtime
     )
-    with pytest.raises(ValueError, match="敏感|绝对路径"):
-        helper.main([
-            "--topic", "数字化转型",
-            "--group", "chinese_top_journals",
-            "--limit", "5",
-        ])
-    assert capsys.readouterr().out == ""
+    return runtime
+
+
+@pytest.mark.parametrize(
+    "unsafe_key",
+    [
+        "storageState-KEYSECRET",
+        "storage-state-KEYSECRET",
+        "storage_state_KEYSECRET",
+        "ＳＴＯＲＡＧＥ＿ＳＴＡＴＥ＿ＫＥＹＳＥＣＲＥＴ",
+        "cookieKEYSECRET",
+        "token-KEYSECRET",
+        "profile_KEYSECRET",
+        "browser.context.KEYSECRET",
+        "local-path-KEYSECRET",
+    ],
+)
+def test_webvpn_e2e_helper_normalizes_sensitive_keys_without_echoing_them(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    unsafe_key: str,
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    runtime = _install_e2e_runtime(
+        helper,
+        monkeypatch,
+        result={
+            "status": "success",
+            "batches_completed": 1,
+            "batches_total": 1,
+            "records": [{"title": "题名", unsafe_key: "VALUESECRET"}],
+        },
+    )
+
+    exit_code = helper.main([
+        "--topic", "数字化转型",
+        "--group", "chinese_top_journals",
+        "--limit", "5",
+    ])
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert exit_code != 0
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+    }
+    assert runtime.closed is True
+    for secret in (unsafe_key, "KEYSECRET", "VALUESECRET"):
+        assert secret not in combined
+
+
+@pytest.mark.parametrize(
+    "unsafe_value",
+    [
+        Path(r"C:\Users\person\Cookie"),
+        b"BYTESECRET",
+        object(),
+    ],
+)
+def test_webvpn_e2e_helper_rejects_non_json_values_with_fixed_error(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    unsafe_value: object,
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    runtime = _install_e2e_runtime(
+        helper,
+        monkeypatch,
+        result={
+            "status": "success",
+            "batches_completed": 1,
+            "batches_total": 1,
+            "records": [],
+            "unknown": unsafe_value,
+        },
+    )
+
+    exit_code = helper.main([
+        "--topic", "数字化转型",
+        "--group", "chinese_top_journals",
+    ])
+
+    captured = capsys.readouterr()
+    assert exit_code != 0
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+    }
+    assert runtime.closed is True
+
+
+@pytest.mark.parametrize(
+    "malformed_result",
+    [
+        {
+            "status": {"nested": "STATUSSECRET"},
+            "batches_completed": 1,
+            "batches_total": 1,
+            "records": [],
+        },
+        {
+            "status": "success",
+            "batches_completed": ["COUNTSECRET"],
+            "batches_total": 1,
+            "records": [],
+        },
+        {
+            "status": "success",
+            "batches_completed": 1,
+            "batches_total": 1,
+            "records": [{
+                "title": {"nested": "TITLESECRET"},
+                "journal_raw": "管理世界",
+                "publication_year": 2025,
+                "priority_level": 6,
+            }],
+        },
+        {
+            "status": "success",
+            "batches_completed": 1,
+            "batches_total": 1,
+            "records": [{
+                "title": "题名",
+                "journal_raw": "管理世界",
+                "publication_year": 2025,
+                "priority_level": 6,
+                "authors": ["张三", {"nested": "AUTHORSECRET"}],
+            }],
+        },
+    ],
+)
+def test_webvpn_e2e_helper_rejects_nested_summary_scalars_and_invalid_authors(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    malformed_result: dict[str, object],
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    runtime = _install_e2e_runtime(
+        helper, monkeypatch, result=malformed_result
+    )
+
+    exit_code = helper.main([
+        "--topic", "数字化转型",
+        "--group", "chinese_top_journals",
+    ])
+
+    captured = capsys.readouterr()
+    assert exit_code != 0
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+    }
+    assert runtime.closed is True
+    for secret in (
+        "STATUSSECRET", "COUNTSECRET", "TITLESECRET", "AUTHORSECRET"
+    ):
+        assert secret not in captured.err
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError(r"RUNTIMESECRET C:\Users\person\Cookie"),
+        asyncio.CancelledError("CANCELSECRET"),
+        KeyboardInterrupt("KEYBOARDSECRET"),
+        SystemExit(0),
+    ],
+)
+def test_webvpn_e2e_cli_returns_fixed_error_and_closes_runtime_on_base_exceptions(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error: BaseException,
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    runtime = _install_e2e_runtime(
+        helper, monkeypatch, error=error
+    )
+
+    exit_code = helper.main([
+        "--topic", "数字化转型",
+        "--group", "chinese_top_journals",
+    ])
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert exit_code != 0
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+    }
+    assert runtime.closed is True
+    for secret in (
+        "RUNTIMESECRET", "CANCELSECRET", "KEYBOARDSECRET",
+        r"C:\Users\person\Cookie", "Traceback",
+    ):
+        assert secret not in combined
+
+
+def test_webvpn_e2e_subprocess_missing_home_has_only_fixed_safe_error(
+    skill_root: Path,
+    tmp_path: Path,
+) -> None:
+    helper = skill_root / "tests" / "_webvpn_e2e.py"
+    environment = dict(os.environ)
+    environment.pop("CNKI_WEBVPN_HOME", None)
+    environment["HOME"] = str(tmp_path / "isolated-home")
+    environment["USERPROFILE"] = str(tmp_path / "isolated-home")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(helper),
+            "--topic",
+            "数字化转型",
+            "--group",
+            "chinese_top_journals",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+        check=False,
+    )
+
+    combined = completed.stdout + completed.stderr
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert json.loads(completed.stderr) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+    }
+    for forbidden in (
+        "Traceback",
+        str(skill_root),
+        str(Path(sys.executable)),
+        "CNKI_WEBVPN_HOME",
+    ):
+        assert forbidden not in combined
 
 
 _SMOKE_RESULT_HTML = """
