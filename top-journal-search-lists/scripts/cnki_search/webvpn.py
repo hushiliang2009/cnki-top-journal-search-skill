@@ -561,6 +561,35 @@ class ProfessionalSearchPage:
                         remove("popup", own_popup)
             popup_listener_pages.clear()
 
+        def own_context_delta() -> None:
+            for page in list(getattr(context, "pages", []) or []):
+                if (
+                    all(page is not existing for existing in baseline)
+                    and all(page is not existing for existing in owned)
+                ):
+                    owned.append(page)
+
+        async def close_owned_pages_until_stable() -> None:
+            while True:
+                pending = [
+                    page
+                    for page in owned
+                    if not (
+                        callable(getattr(page, "is_closed", None))
+                        and page.is_closed()
+                    )
+                ]
+                if pending:
+                    await self._close_pages(pending)
+                    continue
+                await asyncio.sleep(0)
+                if all(
+                    callable(getattr(page, "is_closed", None))
+                    and page.is_closed()
+                    for page in owned
+                ):
+                    return
+
         try:
             if preserve_home:
                 creation_task = asyncio.create_task(
@@ -573,7 +602,7 @@ class ProfessionalSearchPage:
                     completed, _repeat_cancel = await _wait_task_bounded(
                         creation_task,
                         PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
-                        cancel_on_timeout=False,
+                        cancel_on_timeout=True,
                     )
                     if completed and not creation_task.cancelled():
                         with contextlib.suppress(BaseException):
@@ -582,6 +611,7 @@ class ProfessionalSearchPage:
                         creation_task.add_done_callback(
                             self._close_page_created_after_cancellation
                         )
+                    own_context_delta()
                     raise
                 owned.append(origin)
                 home_url = str(getattr(retained_home, "url", "") or "")
@@ -598,19 +628,30 @@ class ProfessionalSearchPage:
             link = self.page.get_by_role("link", name=ADV_SEARCH_LINK_TEXT)
             if await await_maybe(link.count()) < 1:
                 raise WebVpnNavigationError("知网首页未找到「高级检索」入口")
-            await await_maybe(link.first.click())
+            click_task = asyncio.create_task(await_maybe(link.first.click()))
+            try:
+                await asyncio.shield(click_task)
+            except asyncio.CancelledError:
+                _clear_current_cancellation()
+                click_task.cancel()
+                completed, _repeat_cancel = await _wait_task_bounded(
+                    click_task,
+                    PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
+                    cancel_on_timeout=True,
+                )
+                if not completed:
+                    click_task.add_done_callback(self._consume_task_result)
+                await asyncio.sleep(0)
+                if not has_popup_boundary:
+                    own_context_delta()
+                raise
 
             # 不能认"第一个新出现的标签页"：站点会短暂开一个中转标签页再关掉，
             # 抓到它就会让驱动指向已关闭页面。只检查本次批次拥有的页面。
             deadline = time.monotonic() + timeout_seconds
             while True:
                 if not has_popup_boundary:
-                    for page in list(getattr(context, "pages", []) or []):
-                        if (
-                            all(page is not existing for existing in baseline)
-                            and all(page is not existing for existing in owned)
-                        ):
-                            owned.append(page)
+                    own_context_delta()
                 candidates = [origin, *owned]
                 found = await self._locate_advanced_search_page(candidates)
                 if found is not None:
@@ -636,16 +677,20 @@ class ProfessionalSearchPage:
                     )
                 await asyncio.sleep(1)
         except BaseException as exc:
-            stop_listening_for_popups()
             initial_cancellation = (
                 exc if isinstance(exc, asyncio.CancelledError) else None
             )
             if initial_cancellation is not None:
                 _clear_current_cancellation()
-            _completed, cleanup_cancellation = await _finish_cleanup_bounded(
-                self._close_pages(owned),
-                PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
-            )
+            try:
+                _completed, cleanup_cancellation = (
+                    await _finish_cleanup_bounded(
+                        close_owned_pages_until_stable(),
+                        PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
+                    )
+                )
+            finally:
+                stop_listening_for_popups()
             self.page = retained_home
             if cleanup_cancellation is not None:
                 raise cleanup_cancellation
@@ -687,12 +732,20 @@ class ProfessionalSearchPage:
             page = creation_task.result()
         except BaseException:
             return
-        asyncio.create_task(
+        cleanup_task = asyncio.create_task(
             _finish_cleanup_bounded(
                 ProfessionalSearchPage._close_pages([page]),
                 PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
             )
         )
+        cleanup_task.add_done_callback(
+            ProfessionalSearchPage._consume_task_result
+        )
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Task[Any]) -> None:
+        with contextlib.suppress(BaseException):
+            task.result()
 
     async def switch_to_professional(self, *, timeout_seconds: float = 20.0) -> None:
         """切到「专业检索」标签。

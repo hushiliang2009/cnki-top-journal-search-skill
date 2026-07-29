@@ -323,14 +323,16 @@ def test_challenge_wait_has_a_hard_limit_when_evaluate_never_returns() -> None:
         page = HangingPage()
         executor = ProfessionalBatchExecutor(
             type("Session", (), {})(),
-            challenge_timeout_seconds=0.03,
+            # 给 Windows 全量回归的调度留出关闭窗口；上一个慢速求值测试仍以
+            # 0.03 秒预算区分旧实现的 0.2 秒等待。
+            challenge_timeout_seconds=0.2,
             challenge_poll_seconds=0,
         )
         executor.active_challenge_page = page
         plan = ExpressionBatch(1, 1, (), "SU %= '数字经济'")
 
         assert await asyncio.wait_for(
-            executor.wait_for_manual_challenge(plan), timeout=0.15
+            executor.wait_for_manual_challenge(plan), timeout=0.5
         ) is False
         assert page.closed is True
 
