@@ -283,9 +283,15 @@ def test_challenge_wait_has_a_hard_limit_when_evaluate_is_slow() -> None:
                 return self.closed
 
         page = SlowPage()
+        # 本用例断言"观察被硬性打断，且页面仍被关闭"，因此清理预算必须真的够用。
+        # 清理预算是 challenge_timeout_seconds / 2：取 0.03 时只有约 15 毫秒，
+        # 已低于 Windows 事件循环定时器约 15.6 毫秒的粒度，关闭协程可能来不及
+        # 被调度就超时，测试随机变红（Windows CI 三次里失败两次）。
+        # 取 0.3 使预算变为 150 毫秒，远高于时钟粒度；同时观察窗口 150 毫秒仍
+        # 小于 evaluate 的 200 毫秒，硬性打断这一被测性质不受影响。
         executor = ProfessionalBatchExecutor(
             type("Session", (), {})(),
-            challenge_timeout_seconds=0.03,
+            challenge_timeout_seconds=0.3,
             challenge_poll_seconds=0,
         )
         executor.active_challenge_page = page
@@ -296,7 +302,7 @@ def test_challenge_wait_has_a_hard_limit_when_evaluate_is_slow() -> None:
         elapsed = monotonic() - started
 
         assert result is False
-        assert elapsed < 0.12
+        assert elapsed < 0.5
         assert page.closed is True
 
     asyncio.run(scenario())
