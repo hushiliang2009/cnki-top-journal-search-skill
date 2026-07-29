@@ -23,8 +23,10 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import os
+import tempfile
 import time
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -141,6 +143,10 @@ class WebVpnLoginTimeout(RuntimeError):
 
 class WebVpnWindowClosed(RuntimeError):
     """浏览器窗口被关闭，会话无法继续。关窗等同于登出。"""
+
+
+class CheckpointPersistenceError(RuntimeError):
+    """断点无法安全地原子持久化。"""
 
 
 async def _finish_cleanup(cleanup: Awaitable[Any]) -> None:
@@ -334,23 +340,53 @@ class BatchCheckpoint:
                 except (TypeError, ValueError):
                     continue
                 if isinstance(value, dict):
-                    self.completed[index] = _checkpoint_result(value, index)
+                    safe = _checkpoint_result(value, index)
+                    if safe is not None:
+                        self.completed[index] = safe
         self.save(token)
 
     def save(self, token: str) -> None:
+        temporary: Path | None = None
         try:
-            self.completed = {
-                int(index): _checkpoint_result(value, int(index))
-                for index, value in self.completed.items()
-                if isinstance(value, dict)
-            }
-            self.state_file.parent.mkdir(parents=True, exist_ok=True)
-            self.state_file.write_text(
-                json.dumps({"token": token, "completed": self.completed}, ensure_ascii=False),
-                encoding="utf-8",
+            safe_completed: dict[int, dict[str, Any]] = {}
+            for key, value in self.completed.items():
+                if not isinstance(value, dict):
+                    continue
+                index = int(key)
+                safe = _checkpoint_result(value, index)
+                if safe is not None:
+                    safe_completed[index] = safe
+            payload = json.dumps(
+                {"token": token, "completed": safe_completed},
+                ensure_ascii=False,
             )
-        except OSError:
-            pass
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.state_file.parent,
+                prefix=f".{self.state_file.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.state_file)
+            temporary = None
+            self.completed = safe_completed
+        except (OSError, TypeError, ValueError) as exc:
+            self.completed = {}
+            raise CheckpointPersistenceError(
+                "无法安全写入专业检索断点"
+            ) from exc
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def clear(self) -> None:
         self.completed = {}
@@ -393,31 +429,130 @@ _CHECKPOINT_RECORD_FIELDS = (
 )
 
 
-def _checkpoint_record(record: Any) -> dict[str, Any]:
-    source = record.to_dict() if hasattr(record, "to_dict") else dict(record)
-    return {
+def _string_sequence(value: Any) -> list[str] | None:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes, bytearray))
+        or any(not isinstance(item, str) for item in value)
+    ):
+        return None
+    return list(value)
+
+
+def _checkpoint_record(record: Any) -> dict[str, Any] | None:
+    if hasattr(record, "to_dict"):
+        source = record.to_dict()
+    elif isinstance(record, Mapping):
+        source = dict(record)
+    else:
+        return None
+    required_strings = (
+        "title",
+        "journal_raw",
+        "publication_date",
+        "document_type",
+        "source_database",
+    )
+    if any(not isinstance(source.get(name), str) for name in required_strings):
+        return None
+    authors = _string_sequence(source.get("authors"))
+    if authors is None:
+        return None
+    safe: dict[str, Any] = {
         name: source[name]
+        for name in required_strings
+    }
+    safe["authors"] = authors
+    for name in (
+        "publication_year",
+        "citations",
+        "downloads",
+        "priority_level",
+        "ncs_internal_rank",
+    ):
+        value = source.get(name)
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool)
+        ):
+            return None
+        safe[name] = value
+    result_rank = source.get("result_rank")
+    if not isinstance(result_rank, int) or isinstance(result_rank, bool):
+        return None
+    safe["result_rank"] = result_rank
+    for name in ("is_online_first", "manual_review_required"):
+        value = source.get(name)
+        if name == "manual_review_required" and value is None:
+            value = True
+        if not isinstance(value, bool):
+            return None
+        safe[name] = value
+    for name in (
+        "journal_matched_title",
+        "journal_match_method",
+        "priority_group",
+    ):
+        value = source.get(name)
+        if value is not None and not isinstance(value, str):
+            return None
+        safe[name] = value
+    match_status = source.get("journal_match_status", "unmatched")
+    if not isinstance(match_status, str):
+        return None
+    safe["journal_match_status"] = match_status
+    for name in ("source_catalogs", "subject_categories"):
+        values = _string_sequence(source.get(name, ()))
+        if values is None:
+            return None
+        safe[name] = values
+    return {
+        name: safe[name]
         for name in _CHECKPOINT_RECORD_FIELDS
-        if name in source
+        if name in safe
     }
 
 
-def _checkpoint_result(result: dict[str, Any], index: int) -> dict[str, Any]:
+def _checkpoint_records(value: Any) -> list[dict[str, Any]] | None:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes, bytearray))
+    ):
+        return None
+    records: list[dict[str, Any]] = []
+    for record in value:
+        safe = _checkpoint_record(record)
+        if safe is None:
+            return None
+        records.append(safe)
+    return records
+
+
+def _checkpoint_result(
+    result: dict[str, Any],
+    index: int,
+) -> dict[str, Any] | None:
+    status = result.get("status")
+    total_rows = result.get("total_rows", 0)
+    excluded = result.get("excluded_non_journal_rows", 0)
+    records = _checkpoint_records(result.get("records", ()))
+    incomplete = _checkpoint_records(result.get("incomplete_records", ()))
+    if (
+        not isinstance(status, str)
+        or not isinstance(total_rows, int)
+        or isinstance(total_rows, bool)
+        or not isinstance(excluded, int)
+        or isinstance(excluded, bool)
+        or records is None
+        or incomplete is None
+    ):
+        return None
     safe = {
-        "status": result.get("status"),
+        "status": status,
         "index": index,
-        "total_rows": result.get("total_rows", 0),
-        "excluded_non_journal_rows": result.get(
-            "excluded_non_journal_rows", 0
-        ),
-        "records": [
-            _checkpoint_record(record)
-            for record in result.get("records", ())
-        ],
-        "incomplete_records": [
-            _checkpoint_record(record)
-            for record in result.get("incomplete_records", ())
-        ],
+        "total_rows": total_rows,
+        "excluded_non_journal_rows": excluded,
+        "records": records,
+        "incomplete_records": incomplete,
     }
     return {name: safe[name] for name in _CHECKPOINT_RESULT_FIELDS}
 
@@ -479,7 +614,22 @@ async def run_batches(
         "\n".join(batch.expression for batch in batches).encode("utf-8")
     ).hexdigest()
     if checkpoint is not None:
-        checkpoint.load(token)
+        try:
+            checkpoint.load(token)
+        except CheckpointPersistenceError as exc:
+            return _summary(
+                [],
+                batches,
+                token,
+                None,
+                False,
+                stopped_at=batches[0],
+                stopped_result={
+                    "status": SearchStatus.CONFIGURATION_ERROR.value,
+                    "detail": str(exc),
+                },
+                terminal_status=SearchStatus.CONFIGURATION_ERROR.value,
+            )
 
     results: list[dict[str, Any]] = []
     human_intervention_required = False
@@ -562,11 +712,42 @@ async def run_batches(
 
         results.append(result)
         if checkpoint is not None:
-            checkpoint.completed[batch.index] = _checkpoint_result(
+            safe = _checkpoint_result(
                 result,
                 batch.index,
             )
-            checkpoint.save(token)
+            if safe is None:
+                checkpoint.completed = {}
+                return _summary(
+                    results,
+                    batches,
+                    token,
+                    None,
+                    human_intervention_required,
+                    stopped_at=batch,
+                    stopped_result={
+                        "status": SearchStatus.CONFIGURATION_ERROR.value,
+                        "detail": "批次结果无法安全写入专业检索断点",
+                    },
+                    terminal_status=SearchStatus.CONFIGURATION_ERROR.value,
+                )
+            checkpoint.completed[batch.index] = safe
+            try:
+                checkpoint.save(token)
+            except CheckpointPersistenceError as exc:
+                return _summary(
+                    results,
+                    batches,
+                    token,
+                    None,
+                    human_intervention_required,
+                    stopped_at=batch,
+                    stopped_result={
+                        "status": SearchStatus.CONFIGURATION_ERROR.value,
+                        "detail": str(exc),
+                    },
+                    terminal_status=SearchStatus.CONFIGURATION_ERROR.value,
+                )
         if (
             status == SearchStatus.SUCCESS.value
             and should_stop is not None
@@ -594,7 +775,14 @@ def _summary(results: list[dict[str, Any]], batches: Sequence[ExpressionBatch],
              limit_reached: bool = False,
              terminal_status: str | None = None) -> dict[str, Any]:
     if stopped_at is not None and checkpoint is not None:
-        checkpoint.save(token)
+        try:
+            checkpoint.save(token)
+        except CheckpointPersistenceError as exc:
+            terminal_status = SearchStatus.CONFIGURATION_ERROR.value
+            stopped_result = {
+                "status": terminal_status,
+                "detail": str(exc),
+            }
     public_stopped_result = None
     if stopped_result is not None:
         public_stopped_result = {

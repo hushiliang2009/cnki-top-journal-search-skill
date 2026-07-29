@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -557,6 +558,130 @@ def test_checkpoint_load_always_discards_in_memory_state_before_new_query(
 
     assert seen == [1]
     assert summary["batches_completed"] == 1
+
+
+def test_checkpoint_replace_failure_never_restores_sensitive_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(1)
+    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    state.write_text(
+        json.dumps(
+            {
+                "token": token,
+                "completed": {
+                    "1": {
+                        "status": SearchStatus.SUCCESS.value,
+                        "index": 1,
+                        "records": [_record(batches[0])],
+                        "expression": batches[0].expression,
+                        "result_url": "https://example.invalid/result",
+                        "html": "<table>secret</table>",
+                        "cookie": "ticket=secret",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    checkpoint = webvpn.BatchCheckpoint(state)
+    executor_calls: list[int] = []
+
+    def fail_replace(_source, _destination) -> None:
+        raise OSError("replace denied")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+
+    async def execute(batch):
+        executor_calls.append(batch.index)
+        return _ok(batch)
+
+    summary = asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=checkpoint,
+            should_stop=lambda results: bool(results[0]["records"]),
+        )
+    )
+
+    assert executor_calls == []
+    assert checkpoint.completed == {}
+    assert summary["complete"] is False
+    assert summary["limit_reached"] is False
+    assert summary["terminal_status"] == SearchStatus.CONFIGURATION_ERROR.value
+    assert summary["results"] == []
+    assert not list(tmp_path.glob(f".{state.name}.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "malformed_completed",
+    [
+        None,
+        {"1": {"status": SearchStatus.SUCCESS.value, "records": None}},
+        {"1": {"status": SearchStatus.SUCCESS.value, "records": [7]}},
+        {
+            "1": {
+                "status": SearchStatus.SUCCESS.value,
+                "records": [
+                    {
+                        "title": "畸形作者题录",
+                        "authors": "张三",
+                        "journal_raw": "管理世界",
+                        "publication_date": "2025-03-11",
+                        "publication_year": 2025,
+                        "document_type": "期刊",
+                        "citations": None,
+                        "downloads": None,
+                        "is_online_first": False,
+                        "result_rank": 1,
+                        "source_database": "CNKI",
+                    }
+                ],
+            }
+        },
+    ],
+    ids=[
+        "completed_not_dict",
+        "records_null",
+        "record_not_dict",
+        "authors_string",
+    ],
+)
+def test_malformed_checkpoint_entries_are_discarded_without_crashing(
+    tmp_path: Path,
+    malformed_completed,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(1)
+    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    state.write_text(
+        json.dumps(
+            {"token": token, "completed": malformed_completed},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    seen: list[int] = []
+
+    async def execute(batch):
+        seen.append(batch.index)
+        return _ok(batch)
+
+    summary = asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    assert seen == [1]
+    assert summary["complete"] is True
+    assert summary["terminal_status"] is None
 
 
 def test_checkpoint_is_cleared_after_a_complete_run(tmp_path: Path) -> None:

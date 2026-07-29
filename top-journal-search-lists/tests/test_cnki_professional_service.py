@@ -385,6 +385,89 @@ def test_overlapping_authors_merge_candidate_duplicates(
     assert result["records"][0]["citations"] == 9
 
 
+@pytest.mark.parametrize(
+    "author_order",
+    [
+        (("张三",), (), ("李四",)),
+        ((), ("李四",), ("张三",)),
+        (("李四",), ("张三",), ()),
+    ],
+    ids=["authored_missing_authored", "missing_authored_authored", "authored_authored_missing"],
+)
+def test_missing_authors_never_bridge_disjoint_author_components(
+    monkeypatch: pytest.MonkeyPatch,
+    author_order: tuple[tuple[str, ...], ...],
+) -> None:
+    batch = ExpressionBatch(1, 1, (), "SU %= '数字经济'")
+    monkeypatch.setattr(
+        service_module,
+        "build_group_plans",
+        lambda *_args, **_kwargs: [batch],
+    )
+
+    async def execute(_batch: ExpressionBatch) -> tuple[str, str, str]:
+        html = "".join(
+            _result_page(
+                title="同名论文",
+                journal="管理世界",
+                authors=authors,
+                citations=index,
+            )
+            for index, authors in enumerate(author_order, start=1)
+        )
+        return (SearchStatus.SUCCESS.value, html, "")
+
+    result = asyncio.run(
+        CnkiProfessionalSearchService(execute).search_group(
+            "数字经济",
+            service_module.CHINESE_TOP_GROUP,
+            limit=3,
+        )
+    )
+
+    assert result["limit_reached"] is True
+    assert len(result["records"]) == 3
+    assert {tuple(record["authors"]) for record in result["records"]} == {
+        ("张三",),
+        ("李四",),
+        (),
+    }
+
+
+def test_common_author_punctuation_normalizes_to_one_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batches = [
+        ExpressionBatch(index, 2, (), f"SU %= '主题{index}'")
+        for index in range(1, 3)
+    ]
+    monkeypatch.setattr(
+        service_module,
+        "build_group_plans",
+        lambda *_args, **_kwargs: batches,
+    )
+
+    async def execute(batch: ExpressionBatch) -> tuple[str, str, str]:
+        author = "Zhang San" if batch.index == 1 else "Ｚｈａｎｇ-San"
+        html = _result_page(
+            title="Same Study",
+            journal="Journal A",
+            authors=(author,),
+            citations=9 if batch.index == 2 else None,
+        )
+        return (SearchStatus.SUCCESS.value, html, "")
+
+    result = asyncio.run(
+        CnkiProfessionalSearchService(execute).search_group(
+            "数字经济",
+            service_module.CHINESE_TOP_GROUP,
+        )
+    )
+
+    assert len(result["records"]) == 1
+    assert result["records"][0]["citations"] == 9
+
+
 def test_challenge_without_handler_reports_partial_and_flags_human_intervention() -> None:
     async def execute(_batch: ExpressionBatch) -> tuple[str, str, str]:
         return (SearchStatus.CHALLENGE_DETECTED.value, "", "https://kns.cnki.net/verify/home")

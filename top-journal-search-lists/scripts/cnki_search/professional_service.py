@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import unicodedata
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -224,23 +224,25 @@ def _record_key(record: PaperRecord) -> tuple[str, str, int | None]:
 
 
 def _normalized_authors(record: PaperRecord) -> set[str]:
-    return {
-        "".join(unicodedata.normalize("NFKC", author).split()).casefold()
-        for author in record.authors
-        if author.strip()
-    }
-
-
-def _same_record_identity(left: PaperRecord, right: PaperRecord) -> bool:
-    if _record_key(left) != _record_key(right):
-        return False
-    left_authors = _normalized_authors(left)
-    right_authors = _normalized_authors(right)
-    return (
-        not left_authors
-        or not right_authors
-        or not left_authors.isdisjoint(right_authors)
-    )
+    authors = record.authors
+    if (
+        not isinstance(authors, Sequence)
+        or isinstance(authors, (str, bytes, bytearray))
+    ):
+        return set()
+    normalized: set[str] = set()
+    for author in authors:
+        if not isinstance(author, str):
+            continue
+        folded = unicodedata.normalize("NFKC", author).casefold()
+        identity = "".join(
+            character
+            for character in folded
+            if unicodedata.category(character)[0] in {"L", "N"}
+        )
+        if identity:
+            normalized.add(identity)
+    return normalized
 
 
 def _record_completeness_score(record: PaperRecord) -> int:
@@ -260,24 +262,73 @@ def _record_completeness_score(record: PaperRecord) -> int:
 def _merge_candidate_records(
     records: Iterable[PaperRecord],
 ) -> list[PaperRecord]:
-    merged: list[PaperRecord] = []
+    groups: dict[
+        tuple[str, str, int | None],
+        list[PaperRecord],
+    ] = {}
     for record in records:
-        position = next(
-            (
-                index
-                for index, existing in enumerate(merged)
-                if _same_record_identity(existing, record)
-            ),
-            None,
-        )
-        if position is None:
-            merged.append(record)
-        elif (
-            _record_completeness_score(record)
-            > _record_completeness_score(merged[position])
-        ):
-            merged[position] = record
+        groups.setdefault(_record_key(record), []).append(record)
+    merged: list[PaperRecord] = []
+    for group in groups.values():
+        merged.extend(_merge_record_group(group))
     return merged
+
+
+def _merge_record_group(records: list[PaperRecord]) -> list[PaperRecord]:
+    authored = [
+        (record, _normalized_authors(record))
+        for record in records
+        if _normalized_authors(record)
+    ]
+    missing = [
+        record
+        for record in records
+        if not _normalized_authors(record)
+    ]
+    parents = list(range(len(authored)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    for left in range(len(authored)):
+        for right in range(left + 1, len(authored)):
+            if not authored[left][1].isdisjoint(authored[right][1]):
+                union(left, right)
+
+    components: dict[int, list[PaperRecord]] = {}
+    for index, (record, _authors) in enumerate(authored):
+        components.setdefault(find(index), []).append(record)
+
+    if not components:
+        return [_best_record(missing)] if missing else []
+    if len(components) == 1:
+        only = next(iter(components.values()))
+        return [_best_record([*only, *missing])]
+
+    selected = [_best_record(component) for component in components.values()]
+    if missing:
+        selected.append(_best_record(missing))
+    return selected
+
+
+def _best_record(records: list[PaperRecord]) -> PaperRecord:
+    best = records[0]
+    for record in records[1:]:
+        if (
+            _record_completeness_score(record)
+            > _record_completeness_score(best)
+        ):
+            best = record
+    return best
 
 
 def build_group_plans(
