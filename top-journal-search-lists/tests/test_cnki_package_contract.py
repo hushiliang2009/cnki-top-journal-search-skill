@@ -32,7 +32,12 @@ def test_cnki_runtime_contract(skill_root: Path) -> None:
 
 #: 人工值守的 WebVPN 模式独占的模块。公开匿名模式的边界对它们不适用，
 #: 但它们各自的边界由 test_webvpn_modules_are_isolated_and_self_documented 单独把守。
-WEBVPN_MODULES = {"webvpn.py", "professional.py", "professional_service.py"}
+WEBVPN_MODULES = {
+    "webvpn.py",
+    "professional.py",
+    "professional_runtime.py",
+    "professional_service.py",
+}
 
 
 #: 两种模式共用的注册入口。它必须能命名 WebVPN 模式（工具描述、启用用的环境
@@ -126,7 +131,7 @@ def test_webvpn_modules_are_isolated_and_self_documented(skill_root: Path) -> No
                           "stealth", "navigator.webdriver"):
             assert forbidden not in module.casefold(), f"webvpn.py 不得使用检测规避手段 {forbidden}"
         # 票据跨进程无效，落盘只会平白多一处凭据泄露面。同样只禁实际调用。
-        for forbidden in ("storage_state=", ".storage_state("):
+        for forbidden in ("launch_persistent_context", "storage_state=", ".storage_state("):
             assert forbidden not in module, f"webvpn.py 不得持久化登录票据（{forbidden}）"
 
 
@@ -137,8 +142,11 @@ def _run_layout_contract(layout_root: Path) -> dict[str, object]:
         from pathlib import Path
 
         import catalog_lookup
+        from cnki_search.mcp_server import CnkiMcpServer
         from cnki_search.models import SearchRequest
+        from cnki_search.professional_runtime import build_professional_runtime_from_env
         from cnki_search.session import CNKI_HOME_URL
+        from mcp.server.fastmcp import FastMCP
 
         invalid_limits = []
         for limit in (0, 51):
@@ -147,11 +155,18 @@ def _run_layout_contract(layout_root: Path) -> dict[str, object]:
             except ValueError:
                 invalid_limits.append(limit)
         request = SearchRequest("  topic   phrase  ", 1)
+        mcp = CnkiMcpServer().build_fastmcp(FastMCP)
+        schemas = {
+            tool.name: tool.parameters
+            for tool in mcp._tool_manager.list_tools()
+        }
         print(json.dumps({
             "home_url": CNKI_HOME_URL,
             "normalized_query": request.query,
             "invalid_limits": invalid_limits,
             "catalog_exists": Path(catalog_lookup.DEFAULT_CATALOG).is_file(),
+            "professional_runtime_callable": callable(build_professional_runtime_from_env),
+            "schemas": schemas,
         }))
         """
     )
@@ -170,15 +185,23 @@ def _run_layout_contract(layout_root: Path) -> dict[str, object]:
 
 
 def test_skill_and_mcpb_layouts_independently_meet_runtime_contract(skill_root: Path) -> None:
+    states = {}
     for layout_name, layout_root in {
         "skill": skill_root / "scripts",
         "mcpb": skill_root / "mcpb/src",
     }.items():
         state = _run_layout_contract(layout_root)
+        states[layout_name] = state
         assert state["home_url"] == "https://www.cnki.net/", layout_name
         assert state["normalized_query"] == "topic phrase", layout_name
         assert state["invalid_limits"] == [0, 51], layout_name
         assert state["catalog_exists"] is True, layout_name
+        assert state["professional_runtime_callable"] is True, layout_name
+        assert set(state["schemas"]) == {"cnki_search", "cnki_professional_search"}
+        professional = state["schemas"]["cnki_professional_search"]["properties"]
+        assert professional["group"]["default"] == "chinese_top_journals", layout_name
+        assert professional["limit"]["maximum"] == 50, layout_name
+    assert states["skill"]["schemas"] == states["mcpb"]["schemas"]
 
 
 def test_helper_scripts_reference_only_existing_runtime_symbols(skill_root: Path) -> None:
@@ -212,6 +235,627 @@ def _load_helper_module(skill_root: Path, name: str) -> Any:
         sys.modules.pop(name, None)
         raise
     return module
+
+
+def test_webvpn_probe_uses_current_ephemeral_config_contract(
+    skill_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_helper_module(skill_root, "_webvpn_probe")
+    captured: list[Any] = []
+
+    async def fake_run_probe(config: Any, *, submit_topic: str | None = None) -> Any:
+        captured.append((config, submit_topic))
+        return probe.ProbeResult(0, {}, {"contract_ok": True})
+
+    monkeypatch.setattr(probe, "run_probe", fake_run_probe)
+    output = tmp_path / "webvpn-probe.json"
+
+    exit_code = probe.main([
+        "--home", "https://webvpn.example.edu.cn/https/abc/",
+        "--output", str(output),
+    ])
+
+    assert exit_code == 0
+    assert captured == [(
+        probe.WebVpnConfig("https://webvpn.example.edu.cn/https/abc/"),
+        None,
+    )]
+    assert output.is_file()
+
+
+def _emit_native_and_child_output(stage: str) -> None:
+    os.write(1, f"{stage}_FD_STDOUT_SECRET\n".encode())
+    os.write(2, f"{stage}_FD_STDERR_SECRET\n".encode())
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os;"
+                f"os.write(1,b'{stage}_CHILD_STDOUT_SECRET\\n');"
+                f"os.write(2,b'{stage}_CHILD_STDERR_SECRET\\n')"
+            ),
+        ],
+        check=True,
+    )
+
+
+def test_webvpn_e2e_helper_prints_only_the_sanitized_summary(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    calls: list[tuple[object, ...]] = []
+
+    class Runtime:
+        closed = False
+
+        async def search_group(
+            self, topic: str, group: str, *, limit: int,
+            year_from: int | None, year_to: int | None,
+        ) -> dict[str, object]:
+            print("SEARCH_STDOUT_SECRET")
+            print("SEARCH_STDERR_SECRET", file=sys.stderr)
+            _emit_native_and_child_output("SEARCH")
+            calls.append((topic, group, limit, year_from, year_to))
+            return {
+                "status": "success",
+                "batches_completed": 1,
+                "batches_total": 1,
+                "records": [{
+                    "title": "数字化转型与企业创新",
+                    "journal_raw": "管理世界",
+                    "publication_year": 2025,
+                    "priority_level": 6,
+                    "authors": ["张三", "李四"],
+                    "unknown_safe_field": "must-not-be-emitted",
+                }],
+            }
+
+        async def aclose(self) -> None:
+            print("CLOSE_STDOUT_SECRET")
+            print("CLOSE_STDERR_SECRET", file=sys.stderr)
+            _emit_native_and_child_output("CLOSE")
+            self.closed = True
+
+    runtime = Runtime()
+
+    async def build_runtime() -> Runtime:
+        print("BUILD_STDOUT_SECRET")
+        print("BUILD_STDERR_SECRET", file=sys.stderr)
+        _emit_native_and_child_output("BUILD")
+        return runtime
+
+    monkeypatch.setenv(
+        "CNKI_WEBVPN_HOME", "https://webvpn.example.edu.cn/https/abc/"
+    )
+    monkeypatch.setattr(
+        helper, "build_professional_runtime_from_env", build_runtime
+    )
+    original_stdout = helper.sys.stdout
+    original_stderr = helper.sys.stderr
+
+    exit_code = helper.main([
+        "--topic", "数字化转型",
+        "--group", "chinese_top_journals",
+        "--limit", "5",
+        "--year-from", "2020",
+        "--year-to", "2025",
+    ])
+
+    assert exit_code == 0
+    assert calls == [
+        ("数字化转型", "chinese_top_journals", 5, 2020, 2025)
+    ]
+    assert runtime.closed is True
+    assert helper.sys.stdout is original_stdout
+    assert helper.sys.stderr is original_stderr
+    captured = capfd.readouterr()
+    assert captured.err == ""
+    assert len(captured.out.splitlines()) == 1
+    assert json.loads(captured.out) == {
+        "status": "success",
+        "group": "chinese_top_journals",
+        "record_count": 1,
+        "batches_completed": 1,
+        "batches_total": 1,
+        "sample": [{
+            "title": "数字化转型与企业创新",
+            "journal_raw": "管理世界",
+            "publication_year": 2025,
+            "priority_level": 6,
+            "authors": ["张三", "李四"],
+        }],
+    }
+
+
+def _install_e2e_runtime(
+    helper: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    result: object = None,
+    error: BaseException | None = None,
+) -> Any:
+    class Runtime:
+        closed = False
+
+        async def search_group(self, *_args: object, **_kwargs: object) -> object:
+            if error is not None:
+                raise error
+            return result
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    runtime = Runtime()
+
+    async def build_runtime() -> Runtime:
+        return runtime
+
+    monkeypatch.setattr(
+        helper, "build_professional_runtime_from_env", build_runtime
+    )
+    return runtime
+
+
+@pytest.mark.parametrize("failure_stage", ["build", "search", "close"])
+def test_webvpn_e2e_discards_runtime_output_on_every_failure_stage(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    failure_stage: str,
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+
+    class Runtime:
+        closed = False
+
+        async def search_group(
+            self, *_args: object, **_kwargs: object,
+        ) -> dict[str, object]:
+            print("SEARCH_STDOUT_SECRET")
+            print("SEARCH_STDERR_SECRET", file=sys.stderr)
+            _emit_native_and_child_output("SEARCH")
+            if failure_stage == "search":
+                raise RuntimeError("SEARCH_EXCEPTION_SECRET")
+            return {
+                "status": "success",
+                "batches_completed": 1,
+                "batches_total": 1,
+                "records": [],
+            }
+
+        async def aclose(self) -> None:
+            self.closed = True
+            print("CLOSE_STDOUT_SECRET")
+            print("CLOSE_STDERR_SECRET", file=sys.stderr)
+            _emit_native_and_child_output("CLOSE")
+            if failure_stage == "close":
+                raise RuntimeError("CLOSE_EXCEPTION_SECRET")
+
+    runtime = Runtime()
+
+    async def build_runtime() -> Runtime:
+        print("BUILD_STDOUT_SECRET")
+        print("BUILD_STDERR_SECRET", file=sys.stderr)
+        _emit_native_and_child_output("BUILD")
+        if failure_stage == "build":
+            raise RuntimeError("BUILD_EXCEPTION_SECRET")
+        return runtime
+
+    monkeypatch.setattr(
+        helper, "build_professional_runtime_from_env", build_runtime
+    )
+
+    exit_code = helper.main([
+        "--topic", "数字化转型",
+        "--group", "chinese_top_journals",
+    ])
+
+    captured = capfd.readouterr()
+    combined = captured.out + captured.err
+    assert exit_code != 0
+    assert captured.out == ""
+    assert len(captured.err.splitlines()) == 1
+    assert json.loads(captured.err) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+    }
+    if failure_stage != "build":
+        assert runtime.closed is True
+    for secret in (
+        "BUILD_STDOUT_SECRET",
+        "BUILD_STDERR_SECRET",
+        "BUILD_EXCEPTION_SECRET",
+        "SEARCH_STDOUT_SECRET",
+        "SEARCH_STDERR_SECRET",
+        "SEARCH_EXCEPTION_SECRET",
+        "CLOSE_STDOUT_SECRET",
+        "CLOSE_STDERR_SECRET",
+        "CLOSE_EXCEPTION_SECRET",
+    ):
+        assert secret not in combined
+
+
+@pytest.mark.parametrize("failure_mode", ["dup", "second_dup2"])
+def test_webvpn_e2e_output_isolation_failures_are_closed_and_restore_fds(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    failure_mode: str,
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    runtime = _install_e2e_runtime(
+        helper,
+        monkeypatch,
+        result={
+            "status": "success",
+            "batches_completed": 1,
+            "batches_total": 1,
+            "records": [],
+        },
+    )
+
+    class OsProxy:
+        def __getattr__(self, name: str) -> object:
+            return getattr(os, name)
+
+    os_proxy = OsProxy()
+    if failure_mode == "dup":
+        def fail_dup(_fd: int) -> int:
+            raise OSError("DUP_EXCEPTION_SECRET")
+
+        os_proxy.dup = fail_dup  # type: ignore[attr-defined]
+    else:
+        real_dup2 = os.dup2
+        dup2_calls = 0
+
+        def fail_second_dup2(source: int, target: int) -> None:
+            nonlocal dup2_calls
+            dup2_calls += 1
+            if dup2_calls == 2:
+                raise OSError("DUP2_EXCEPTION_SECRET")
+            real_dup2(source, target)
+
+        os_proxy.dup2 = fail_second_dup2  # type: ignore[attr-defined]
+    monkeypatch.setattr(helper, "os", os_proxy, raising=False)
+    original_stdout = helper.sys.stdout
+    original_stderr = helper.sys.stderr
+
+    exit_code = helper.main([
+        "--topic", "数字化转型",
+        "--group", "chinese_top_journals",
+    ])
+
+    captured = capfd.readouterr()
+    assert exit_code != 0
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+    }
+    assert "SECRET" not in captured.err
+    assert runtime.closed is False
+    assert helper.sys.stdout is original_stdout
+    assert helper.sys.stderr is original_stderr
+
+    os.write(1, b"RESTORED_STDOUT_MARKER\n")
+    os.write(2, b"RESTORED_STDERR_MARKER\n")
+    restored = capfd.readouterr()
+    assert restored.out == "RESTORED_STDOUT_MARKER\n"
+    assert restored.err == "RESTORED_STDERR_MARKER\n"
+
+
+def test_webvpn_e2e_missing_fileno_fails_closed(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    _install_e2e_runtime(
+        helper,
+        monkeypatch,
+        result={
+            "status": "success",
+            "batches_completed": 1,
+            "batches_total": 1,
+            "records": [],
+        },
+    )
+
+    class StreamWithoutFileno:
+        def write(self, _text: str) -> int:
+            return 0
+
+        def flush(self) -> None:
+            pass
+
+    with monkeypatch.context() as patch:
+        stream_without_fileno = StreamWithoutFileno()
+        patch.setattr(helper.sys, "stdout", stream_without_fileno)
+        exit_code = helper.main([
+            "--topic", "数字化转型",
+            "--group", "chinese_top_journals",
+        ])
+        assert helper.sys.stdout is stream_without_fileno
+
+    captured = capfd.readouterr()
+    assert exit_code != 0
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+    }
+
+
+@pytest.mark.parametrize(
+    "unsafe_key",
+    [
+        "storageState-KEYSECRET",
+        "storage-state-KEYSECRET",
+        "storage_state_KEYSECRET",
+        "ＳＴＯＲＡＧＥ＿ＳＴＡＴＥ＿ＫＥＹＳＥＣＲＥＴ",
+        "cookieKEYSECRET",
+        "token-KEYSECRET",
+        "profile_KEYSECRET",
+        "browser.context.KEYSECRET",
+        "local-path-KEYSECRET",
+        "c00kie-KEYSECRET",
+        "cοοkie-KEYSECRET",
+        "stor4ageState-KEYSECRET",
+        "passw0rd-KEYSECRET",
+        "credentia1-KEYSECRET",
+        "unknown2-KEYSECRET",
+        "结果键-KEYSECRET",
+    ],
+)
+def test_webvpn_e2e_helper_normalizes_sensitive_keys_without_echoing_them(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    unsafe_key: str,
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    runtime = _install_e2e_runtime(
+        helper,
+        monkeypatch,
+        result={
+            "status": "success",
+            "batches_completed": 1,
+            "batches_total": 1,
+            "records": [{
+                "title": "题名",
+                "journal_raw": "管理世界",
+                "publication_year": 2025,
+                "priority_level": 6,
+                unsafe_key: "VALUESECRET",
+            }],
+        },
+    )
+
+    exit_code = helper.main([
+        "--topic", "数字化转型",
+        "--group", "chinese_top_journals",
+        "--limit", "5",
+    ])
+
+    captured = capfd.readouterr()
+    combined = captured.out + captured.err
+    assert exit_code != 0
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+    }
+    assert runtime.closed is True
+    for secret in (unsafe_key, "KEYSECRET", "VALUESECRET"):
+        assert secret not in combined
+
+
+@pytest.mark.parametrize(
+    "unsafe_value",
+    [
+        Path(r"C:\Users\person\Cookie"),
+        b"BYTESECRET",
+        object(),
+    ],
+)
+def test_webvpn_e2e_helper_rejects_non_json_values_with_fixed_error(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    unsafe_value: object,
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    runtime = _install_e2e_runtime(
+        helper,
+        monkeypatch,
+        result={
+            "status": "success",
+            "batches_completed": 1,
+            "batches_total": 1,
+            "records": [],
+            "unknown": unsafe_value,
+        },
+    )
+
+    exit_code = helper.main([
+        "--topic", "数字化转型",
+        "--group", "chinese_top_journals",
+    ])
+
+    captured = capfd.readouterr()
+    assert exit_code != 0
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+    }
+    assert runtime.closed is True
+
+
+@pytest.mark.parametrize(
+    "malformed_result",
+    [
+        {
+            "status": {"nested": "STATUSSECRET"},
+            "batches_completed": 1,
+            "batches_total": 1,
+            "records": [],
+        },
+        {
+            "status": "success",
+            "batches_completed": ["COUNTSECRET"],
+            "batches_total": 1,
+            "records": [],
+        },
+        {
+            "status": "success",
+            "batches_completed": 1,
+            "batches_total": 1,
+            "records": [{
+                "title": {"nested": "TITLESECRET"},
+                "journal_raw": "管理世界",
+                "publication_year": 2025,
+                "priority_level": 6,
+            }],
+        },
+        {
+            "status": "success",
+            "batches_completed": 1,
+            "batches_total": 1,
+            "records": [{
+                "title": "题名",
+                "journal_raw": "管理世界",
+                "publication_year": 2025,
+                "priority_level": 6,
+                "authors": ["张三", {"nested": "AUTHORSECRET"}],
+            }],
+        },
+    ],
+)
+def test_webvpn_e2e_helper_rejects_nested_summary_scalars_and_invalid_authors(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    malformed_result: dict[str, object],
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    runtime = _install_e2e_runtime(
+        helper, monkeypatch, result=malformed_result
+    )
+
+    exit_code = helper.main([
+        "--topic", "数字化转型",
+        "--group", "chinese_top_journals",
+    ])
+
+    captured = capfd.readouterr()
+    assert exit_code != 0
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+    }
+    assert runtime.closed is True
+    for secret in (
+        "STATUSSECRET", "COUNTSECRET", "TITLESECRET", "AUTHORSECRET"
+    ):
+        assert secret not in captured.err
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError(r"RUNTIMESECRET C:\Users\person\Cookie"),
+        asyncio.CancelledError("CANCELSECRET"),
+        KeyboardInterrupt("KEYBOARDSECRET"),
+        SystemExit(0),
+    ],
+)
+def test_webvpn_e2e_cli_returns_fixed_error_and_closes_runtime_on_base_exceptions(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    error: BaseException,
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    runtime = _install_e2e_runtime(
+        helper, monkeypatch, error=error
+    )
+    original_stdout = helper.sys.stdout
+    original_stderr = helper.sys.stderr
+
+    exit_code = helper.main([
+        "--topic", "数字化转型",
+        "--group", "chinese_top_journals",
+    ])
+
+    captured = capfd.readouterr()
+    combined = captured.out + captured.err
+    assert exit_code != 0
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+    }
+    assert runtime.closed is True
+    assert helper.sys.stdout is original_stdout
+    assert helper.sys.stderr is original_stderr
+    for secret in (
+        "RUNTIMESECRET", "CANCELSECRET", "KEYBOARDSECRET",
+        r"C:\Users\person\Cookie", "Traceback",
+    ):
+        assert secret not in combined
+    os.write(1, b"RESTORED_STDOUT_MARKER\n")
+    os.write(2, b"RESTORED_STDERR_MARKER\n")
+    restored = capfd.readouterr()
+    assert restored.out == "RESTORED_STDOUT_MARKER\n"
+    assert restored.err == "RESTORED_STDERR_MARKER\n"
+
+
+def test_webvpn_e2e_subprocess_missing_home_has_only_fixed_safe_error(
+    skill_root: Path,
+    tmp_path: Path,
+) -> None:
+    helper = skill_root / "tests" / "_webvpn_e2e.py"
+    environment = dict(os.environ)
+    environment.pop("CNKI_WEBVPN_HOME", None)
+    environment["HOME"] = str(tmp_path / "isolated-home")
+    environment["USERPROFILE"] = str(tmp_path / "isolated-home")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(helper),
+            "--topic",
+            "数字化转型",
+            "--group",
+            "chinese_top_journals",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+        check=False,
+    )
+
+    combined = completed.stdout + completed.stderr
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert json.loads(completed.stderr) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+    }
+    for forbidden in (
+        "Traceback",
+        str(skill_root),
+        str(Path(sys.executable)),
+        "CNKI_WEBVPN_HOME",
+    ):
+        assert forbidden not in combined
 
 
 _SMOKE_RESULT_HTML = """
@@ -346,6 +990,31 @@ def test_webvpn_documentation_states_its_constraints(skill_root: Path) -> None:
         # 底线不随模式改变：机构合法认证 ≠ 检测规避
         for statement in ("不伪造", "不轮换代理", "不自动破解"):
             assert statement in content, f"{relative} 缺少检测规避禁令：{statement}"
+
+
+def test_webvpn_documentation_matches_the_ephemeral_runtime_contract(
+    skill_root: Path,
+) -> None:
+    required = (
+        "CNKI_WEBVPN_HOME",
+        "CNKI_WEBVPN_PROFILE",
+        "非持久化",
+        "服务重启后需要重新登录",
+        "13 本",
+        "精确",
+        "来源类别",
+        "no_data_retry_later",
+        "不等于空结果",
+        "ai4scholar",
+        "不登录",
+        "不下载",
+        "人工值守",
+        "不可用于定时任务",
+    )
+    for relative in DOCUMENTATION_FILES:
+        content = (skill_root / relative).read_text(encoding="utf-8")
+        for statement in required:
+            assert statement in content, f"{relative} 缺少运行时约束：{statement}"
 
 
 def test_documentation_describes_only_ephemeral_memory_cache(skill_root: Path) -> None:

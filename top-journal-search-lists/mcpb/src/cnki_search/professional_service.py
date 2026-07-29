@@ -14,22 +14,25 @@
 """
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import unicodedata
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from catalog_lookup import DEFAULT_CATALOG, journals_by_group
 
-from .models import PaperRecord, SearchStatus
+from .models import PaperRecord, SearchStatus, is_verifiable_publication_year
 from .professional import (
     DEFAULT_MAX_EXPRESSION_CHARS,
     ExpressionBatch,
     build_batches,
     build_expression,
+    build_topic_expression,
 )
 from .ranking import annotate_and_sort_records
 from .results import parse_public_result_page
+from .search import PageContractChanged
 from .webvpn import BatchCheckpoint, Throttle, run_batches
 
 #: 中文顶尖期刊（13 本）——本模式的核心收益，单条表达式即可覆盖。
@@ -50,13 +53,12 @@ class BatchOutcome:
     incomplete_records: tuple[PaperRecord, ...] = ()
     total_rows: int = 0
     excluded_non_journal_rows: int = 0
-    result_url: str | None = None
     detail: str | None = None
 
 
-#: 页面驱动：接收一条表达式，返回 ``(status, html, url)``。
+#: 页面驱动：接收完整执行计划，返回 ``(status, html, url)``。
 #: 真实实现驱动浏览器；测试注入假实现即可完全离线。
-ExpressionExecutor = Callable[[str], Awaitable[tuple[str, str, str]]]
+ExpressionExecutor = Callable[[ExpressionBatch], Awaitable[tuple[str, str, str]]]
 
 
 class CnkiProfessionalSearchService:
@@ -81,12 +83,21 @@ class CnkiProfessionalSearchService:
             raise ValueError(
                 f"CNKI 专业检索只覆盖中文层级 {SUPPORTED_GROUPS}，收到 {group!r}"
             )
-        journals = journals_by_group(group, self.catalog)
-        batches = build_batches(topic, journals, year_from=year_from, year_to=year_to,
-                                max_chars=self.max_expression_chars)
+        batches = build_group_plans(
+            topic,
+            group,
+            catalog=self.catalog,
+            max_chars=self.max_expression_chars,
+            year_from=year_from,
+            year_to=year_to,
+        )
         summary = await self._run(batches, limit)
         summary["group"] = group
-        summary["journal_count"] = len(journals)
+        if group == CHINESE_TOP_GROUP:
+            summary["journal_count"] = 13
+        else:
+            summary["journal_count"] = None
+            summary["source_category"] = "CSSCI"
         return summary
 
     async def search_expression(self, expression: str, *, limit: int = 20) -> dict[str, Any]:
@@ -96,54 +107,88 @@ class CnkiProfessionalSearchService:
 
     async def _run(self, batches: list[ExpressionBatch], limit: int) -> dict[str, Any]:
         async def execute(batch: ExpressionBatch) -> dict[str, Any]:
-            status, html, url = await self.executor(batch.expression)
+            status, html, _url = await self.executor(batch)
             if status != SearchStatus.SUCCESS.value:
-                return {"index": batch.index, "status": status, "result_url": url}
-            parsed = parse_public_result_page(html, query=batch.expression, limit=limit)
+                return {"index": batch.index, "status": status}
+            try:
+                parsed = parse_public_result_page(
+                    html, query=batch.expression, limit=limit
+                )
+            except PageContractChanged as exc:
+                return {
+                    "index": batch.index,
+                    "status": SearchStatus.PAGE_CONTRACT_CHANGED.value,
+                    "detail": str(exc),
+                }
             return {
                 "index": batch.index,
                 "status": SearchStatus.SUCCESS.value,
-                "result_url": url,
                 "total_rows": parsed.total_rows,
                 "excluded_non_journal_rows": parsed.excluded_non_journal_rows,
                 "records": parsed.records,
                 "incomplete_records": parsed.incomplete_records,
             }
 
+        def reached_limit(results: list[dict[str, Any]]) -> bool:
+            unique = _merge_candidate_records(
+                record
+                for item in results
+                for record in item.get("records", ())
+            )
+            return len(unique) >= limit
+
         schedule = await run_batches(batches, execute, on_challenge=self.on_challenge,
-                                     checkpoint=self.checkpoint, throttle=self.throttle)
+                                     checkpoint=self.checkpoint, throttle=self.throttle,
+                                     should_stop=reached_limit)
         return self._merge(schedule, batches)
 
     def _merge(self, schedule: dict[str, Any], batches: list[ExpressionBatch]) -> dict[str, Any]:
-        records: list[PaperRecord] = []
+        collected: list[PaperRecord] = []
         incomplete: list[PaperRecord] = []
         total_rows = excluded = 0
-        seen: set[tuple[str, str, int | None]] = set()
         for item in schedule["results"]:
             total_rows += item.get("total_rows", 0)
             excluded += item.get("excluded_non_journal_rows", 0)
-            for record in item.get("records", ()):
-                key = (record.title, record.journal_raw, record.publication_year)
-                if key in seen:          # 同一篇论文可能落在相邻批次的边界上
-                    continue
-                seen.add(key)
-                records.append(record)
+            collected.extend(item.get("records", ()))
             incomplete.extend(item.get("incomplete_records", ()))
 
+        records = _merge_candidate_records(collected)
         annotated = annotate_and_sort_records(records, catalog=self.catalog)
-        complete = schedule["complete"]
-        if not annotated:
-            status = SearchStatus.NO_RESULTS if complete else SearchStatus.PARTIAL
+        stopped_result = schedule.get("stopped_result")
+        terminal_status = schedule["terminal_status"]
+        complete = schedule["complete"] and terminal_status is None
+        if terminal_status is not None:
+            status = (
+                SearchStatus.PARTIAL.value
+                if annotated
+                else terminal_status
+            )
+        elif not annotated:
+            status = (
+                SearchStatus.NO_RESULTS.value
+                if complete
+                else SearchStatus.PARTIAL.value
+            )
         else:
-            status = SearchStatus.SUCCESS if complete and not incomplete else SearchStatus.PARTIAL
-        return {
-            "ok": True,
+            status = (
+                SearchStatus.SUCCESS.value
+                if complete and not incomplete
+                else SearchStatus.PARTIAL.value
+            )
+        result = {
+            "ok": status in {
+                SearchStatus.SUCCESS.value,
+                SearchStatus.NO_RESULTS.value,
+                SearchStatus.PARTIAL.value,
+            },
             "mode": "webvpn",
-            "status": status.value,
+            "status": status,
             "complete": complete,
             "batches_completed": schedule["batches_completed"],
             "batches_total": schedule["batches_total"],
             "stopped_at_batch": schedule["stopped_at_batch"],
+            "limit_reached": schedule["limit_reached"],
+            "terminal_status": terminal_status,
             # 显式暴露：本模式必须有人值守，调用方不得据此安排无人值守任务
             "human_intervention_required": schedule["human_intervention_required"],
             "expressions": [batch.expression for batch in batches],
@@ -152,6 +197,191 @@ class CnkiProfessionalSearchService:
             "records": [record.to_dict() for record in annotated],
             "incomplete_records": [record.to_dict() for record in incomplete],
         }
+        if terminal_status is not None:
+            terminal_detail = (
+                stopped_result.get("detail")
+                if stopped_result is not None
+                else None
+            )
+            if (
+                not terminal_detail
+                and terminal_status == SearchStatus.PAGE_CONTRACT_CHANGED.value
+            ):
+                terminal_detail = "知网页面结构已变化"
+            if terminal_detail:
+                result["terminal_detail"] = terminal_detail
+            if status == terminal_status and terminal_detail:
+                result["detail"] = terminal_detail
+        return result
+
+
+def _record_key(record: PaperRecord) -> tuple[str, str, int | None]:
+    return (
+        " ".join(record.title.split()).casefold(),
+        " ".join(record.journal_raw.split()).casefold(),
+        record.publication_year,
+    )
+
+
+def _normalized_authors(record: PaperRecord) -> set[str]:
+    authors = record.authors
+    if (
+        not isinstance(authors, Sequence)
+        or isinstance(authors, (str, bytes, bytearray))
+    ):
+        return set()
+    normalized: set[str] = set()
+    for author in authors:
+        if not isinstance(author, str):
+            continue
+        folded = unicodedata.normalize("NFKC", author).casefold()
+        identity = "".join(
+            character
+            for character in folded
+            if unicodedata.category(character)[0] in {"L", "N"}
+        )
+        if identity:
+            normalized.add(identity)
+    return normalized
+
+
+def _record_completeness_score(record: PaperRecord) -> int:
+    return sum(
+        (
+            bool(record.title.strip()),
+            bool(record.journal_raw.strip()),
+            is_verifiable_publication_year(record.publication_year),
+            len(record.authors),
+            bool(record.publication_date.strip()),
+            record.citations is not None,
+            record.downloads is not None,
+        )
+    )
+
+
+def _merge_candidate_records(
+    records: Iterable[PaperRecord],
+) -> list[PaperRecord]:
+    groups: dict[
+        tuple[str, str, int | None],
+        list[PaperRecord],
+    ] = {}
+    for record in records:
+        groups.setdefault(_record_key(record), []).append(record)
+    merged: list[PaperRecord] = []
+    for group in groups.values():
+        merged.extend(_merge_record_group(group))
+    return merged
+
+
+def _merge_record_group(records: list[PaperRecord]) -> list[PaperRecord]:
+    authored = [
+        (record, _normalized_authors(record))
+        for record in records
+        if _normalized_authors(record)
+    ]
+    missing = [
+        record
+        for record in records
+        if not _normalized_authors(record)
+    ]
+    parents = list(range(len(authored)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    for left in range(len(authored)):
+        for right in range(left + 1, len(authored)):
+            if not authored[left][1].isdisjoint(authored[right][1]):
+                union(left, right)
+
+    components: dict[int, list[PaperRecord]] = {}
+    for index, (record, _authors) in enumerate(authored):
+        components.setdefault(find(index), []).append(record)
+
+    if not components:
+        return [_best_record(missing)] if missing else []
+    if len(components) == 1:
+        only = next(iter(components.values()))
+        return [_best_record([*only, *missing])]
+
+    selected = [_best_record(component) for component in components.values()]
+    if missing:
+        selected.append(_best_record(missing))
+    return selected
+
+
+def _best_record(records: list[PaperRecord]) -> PaperRecord:
+    best = records[0]
+    for record in records[1:]:
+        if (
+            _record_completeness_score(record)
+            > _record_completeness_score(best)
+        ):
+            best = record
+    return best
+
+
+def build_group_plans(
+    topic: str,
+    group: str,
+    *,
+    catalog: Path = DEFAULT_CATALOG,
+    max_chars: int = DEFAULT_MAX_EXPRESSION_CHARS,
+    year_from: int | None = None,
+    year_to: int | None = None,
+) -> list[ExpressionBatch]:
+    if group == CHINESE_TOP_GROUP:
+        return build_batches(
+            topic,
+            journals_by_group(group, catalog),
+            year_from=year_from,
+            year_to=year_to,
+            max_chars=max_chars,
+        )
+    if group == CSSCI_GROUP:
+        return [
+            ExpressionBatch(
+                index=1,
+                total=1,
+                journals=(),
+                expression=build_topic_expression(
+                    topic, year_from=year_from, year_to=year_to
+                ),
+                source_category="CSSCI",
+            )
+        ]
+    raise ValueError(
+        f"CNKI 专业检索只覆盖中文层级 {SUPPORTED_GROUPS}，收到 {group!r}"
+    )
+
+
+def preview_plans(
+    topic: str,
+    group: str,
+    *,
+    catalog: Path = DEFAULT_CATALOG,
+    max_chars: int = DEFAULT_MAX_EXPRESSION_CHARS,
+    year_from: int | None = None,
+    year_to: int | None = None,
+) -> list[ExpressionBatch]:
+    return build_group_plans(
+        topic,
+        group,
+        catalog=catalog,
+        max_chars=max_chars,
+        year_from=year_from,
+        year_to=year_to,
+    )
 
 
 def preview_expressions(topic: str, group: str, *, catalog: Path = DEFAULT_CATALOG,
@@ -159,11 +389,16 @@ def preview_expressions(topic: str, group: str, *, catalog: Path = DEFAULT_CATAL
                         year_from: int | None = None,
                         year_to: int | None = None) -> list[str]:
     """不触网地预览将要提交的表达式，便于人工复核覆盖范围。"""
-    journals = journals_by_group(group, catalog)
     return [
         batch.expression
-        for batch in build_batches(topic, journals, year_from=year_from,
-                                   year_to=year_to, max_chars=max_chars)
+        for batch in preview_plans(
+            topic,
+            group,
+            catalog=catalog,
+            max_chars=max_chars,
+            year_from=year_from,
+            year_to=year_to,
+        )
     ]
 
 
@@ -173,6 +408,11 @@ __all__ = [
     "SUPPORTED_GROUPS",
     "BatchOutcome",
     "CnkiProfessionalSearchService",
+    "ExpressionBatch",
+    "ExpressionExecutor",
+    "build_group_plans",
     "build_expression",
+    "build_topic_expression",
+    "preview_plans",
     "preview_expressions",
 ]

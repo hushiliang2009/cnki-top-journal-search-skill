@@ -4,6 +4,9 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
+from cnki_search import mcp_server
 from cnki_search.mcp_server import CnkiMcpServer
 from cnki_search.models import SearchOutcome, SearchStatus
 from cnki_search.rate_limit import SerialSearchGate
@@ -415,3 +418,121 @@ def test_fastmcp_tool_run_propagates_cancellation() -> None:
         assert not server._tasks
 
     asyncio.run(scenario())
+
+
+def test_server_aclose_cancels_professional_call_and_closes_runtime() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+
+        class Runtime:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def search_group(self, *_args, **_kwargs):
+                started.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self) -> None:
+                self.closed = True
+
+        runtime = Runtime()
+
+        async def factory():
+            return runtime
+
+        server = CnkiMcpServer(professional_factory=factory)
+        task = asyncio.create_task(
+            server.cnki_professional_search("数字经济")
+        )
+        await started.wait()
+        await server.aclose()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert runtime.closed is True
+        assert server._professional is None
+
+    asyncio.run(scenario())
+
+
+def test_real_fastmcp_lifespan_closes_runtime_on_the_creation_loop() -> None:
+    async def scenario() -> None:
+        class Runtime:
+            def __init__(self) -> None:
+                self.closed_on = None
+
+            async def aclose(self) -> None:
+                self.closed_on = asyncio.get_running_loop()
+
+        runtime = Runtime()
+        server = CnkiMcpServer()
+        server._professional = runtime
+        mcp = server.build_fastmcp()
+        loop = asyncio.get_running_loop()
+
+        async with mcp._mcp_server.lifespan(mcp._mcp_server):
+            assert runtime.closed_on is None
+        assert runtime.closed_on is loop
+        assert server._professional is None
+
+    asyncio.run(scenario())
+
+
+def test_main_uses_nonblocking_shutdown_if_run_fails_before_lifespan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Runner:
+        def run(self, *, transport: str) -> None:
+            assert transport == "stdio"
+            raise RuntimeError("run failed before lifespan")
+
+    class Server:
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+
+        def build_fastmcp(self):
+            return Runner()
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    server = Server()
+    monkeypatch.setattr(mcp_server, "CnkiMcpServer", lambda: server)
+    with pytest.raises(RuntimeError, match="before lifespan"):
+        mcp_server.main()
+    assert server.shutdown_calls == 1
+
+
+def test_professional_runtime_imports_and_closes_in_both_layouts() -> None:
+    program = """
+import asyncio
+from cnki_search.professional_runtime import ProfessionalSearchRuntime
+
+class Session:
+    def __init__(self): self.closed = False
+    def ensure_open(self): return None
+    async def close(self): self.closed = True
+
+class Service:
+    async def search_group(self, topic, group, *, limit, year_from, year_to):
+        return {'status': 'success', 'topic': topic}
+
+async def main():
+    session = Session()
+    runtime = ProfessionalSearchRuntime(session, Service())
+    assert (await runtime.search_group(
+        'topic', 'cssci', limit=1, year_from=None, year_to=None
+    ))['topic'] == 'topic'
+    await runtime.aclose()
+    assert session.closed
+
+asyncio.run(main())
+"""
+    for root in (ROOT / "scripts", ROOT / "mcpb" / "src"):
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=root,
+            env=os.environ | {"PYTHONPATH": str(root)},
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr

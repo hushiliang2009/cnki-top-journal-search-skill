@@ -21,15 +21,27 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
+import os
+import tempfile
 import time
-from collections.abc import Awaitable, Callable, Sequence
+import unicodedata
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .browser import BrowserUnavailableError, await_maybe
-from .models import MAX_RESULTS_PER_PAGE, SearchStatus
+from .models import (
+    MAX_AUTHOR_LENGTH,
+    MAX_AUTHORS,
+    MAX_JOURNAL_LENGTH,
+    MAX_RESULTS_PER_PAGE,
+    MAX_TITLE_LENGTH,
+    SearchStatus,
+    is_verifiable_publication_year,
+)
 from .professional import ExpressionBatch
 
 #: 实测：连续 4 次快速请求即触发安全验证，冷却约 75 秒后恢复。30 秒是据此取的
@@ -39,6 +51,7 @@ MIN_REQUEST_INTERVAL_SECONDS = 30.0
 CHALLENGE_BACKOFF_SECONDS = 180.0
 #: 同一批次因风控最多重试几次；超过则如实上报未完成，交由使用者决定。
 MAX_CHALLENGE_RETRIES = 3
+PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 LOGIN_READY_TITLE = "中国知网"
 DEFAULT_LOGIN_TIMEOUT_SECONDS = 600.0
@@ -141,6 +154,103 @@ class WebVpnWindowClosed(RuntimeError):
     """浏览器窗口被关闭，会话无法继续。关窗等同于登出。"""
 
 
+class CheckpointPersistenceError(RuntimeError):
+    """断点无法安全地原子持久化。"""
+
+
+async def _finish_cleanup(cleanup: Awaitable[Any]) -> None:
+    """等待清理任务完成，期间外层任务的重复取消不得中断资源回收。"""
+    task = asyncio.ensure_future(cleanup)
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    await task
+
+
+def _clear_current_cancellation() -> None:
+    task = asyncio.current_task()
+    if task is not None:
+        while task.cancelling():
+            task.uncancel()
+
+
+async def _wait_task_bounded(
+    task: asyncio.Task[Any],
+    timeout_seconds: float,
+    *,
+    cancel_on_timeout: bool,
+) -> tuple[bool, asyncio.CancelledError | None]:
+    """有界等待独立任务，并记录等待期间收到的客户端取消。"""
+    deadline = asyncio.get_running_loop().time() + max(timeout_seconds, 0.0)
+    return await _wait_task_until(
+        task,
+        deadline,
+        cancel_on_timeout=cancel_on_timeout,
+    )
+
+
+async def _wait_task_until(
+    task: asyncio.Task[Any],
+    deadline: float,
+    *,
+    cancel_on_timeout: bool,
+) -> tuple[bool, asyncio.CancelledError | None]:
+    """在同一个单调时钟截止点前等待独立任务。"""
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            if cancel_on_timeout:
+                task.cancel()
+            return False, cancellation
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+        except TimeoutError:
+            if cancel_on_timeout:
+                task.cancel()
+            return False, cancellation
+        except asyncio.CancelledError as exc:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                cancellation = cancellation or exc
+                _clear_current_cancellation()
+                continue
+            if task.done():
+                break
+            raise
+        except BaseException:
+            if task.done():
+                break
+            raise
+    return True, cancellation
+
+
+async def _finish_cleanup_bounded(
+    cleanup: Awaitable[Any],
+    timeout_seconds: float,
+) -> tuple[bool, asyncio.CancelledError | None]:
+    task = asyncio.ensure_future(cleanup)
+    return await _wait_task_bounded(
+        task,
+        timeout_seconds,
+        cancel_on_timeout=True,
+    )
+
+
+async def _finish_cleanup_until(
+    cleanup: Awaitable[Any],
+    deadline: float,
+) -> tuple[bool, asyncio.CancelledError | None]:
+    task = asyncio.ensure_future(cleanup)
+    return await _wait_task_until(
+        task,
+        deadline,
+        cancel_on_timeout=True,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class WebVpnConfig:
     """WebVPN 入口配置。
@@ -151,7 +261,6 @@ class WebVpnConfig:
     """
 
     home_url: str
-    profile_dir: Path
     login_timeout_seconds: float = DEFAULT_LOGIN_TIMEOUT_SECONDS
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
 
@@ -221,31 +330,405 @@ class BatchCheckpoint:
     completed: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     def load(self, token: str) -> None:
+        self.completed = {}
         try:
             payload = json.loads(self.state_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return
-        if payload.get("token") != token:      # 检索条件变了，旧断点作废
+        except OSError as exc:
+            raise CheckpointPersistenceError(
+                "无法安全读取专业检索断点"
+            ) from exc
+        except ValueError:
+            self.save(token)
             return
-        self.completed = {int(key): value for key, value in payload.get("completed", {}).items()}
+        if not isinstance(payload, dict) or payload.get("token") != token:
+            self.save(token)
+            return
+        saved = payload.get("completed", {})
+        if isinstance(saved, dict):
+            for key, value in saved.items():
+                try:
+                    index = int(key)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(value, dict):
+                    safe = _checkpoint_result(
+                        value,
+                        index,
+                        from_payload=True,
+                    )
+                    if safe is not None:
+                        self.completed[index] = safe
+        self.save(token)
 
     def save(self, token: str) -> None:
+        temporary: Path | None = None
         try:
-            self.state_file.parent.mkdir(parents=True, exist_ok=True)
-            self.state_file.write_text(
-                json.dumps({"token": token, "completed": self.completed}, ensure_ascii=False),
-                encoding="utf-8",
+            safe_completed: dict[int, dict[str, Any]] = {}
+            for key, value in self.completed.items():
+                if not isinstance(value, dict):
+                    continue
+                index = int(key)
+                safe = _checkpoint_result(value, index)
+                if safe is not None:
+                    safe_completed[index] = safe
+            payload = json.dumps(
+                {"token": token, "completed": safe_completed},
+                ensure_ascii=False,
             )
-        except OSError:
-            pass
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.state_file.parent,
+                prefix=f".{self.state_file.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.state_file)
+            temporary = None
+            self.completed = safe_completed
+        except (OSError, TypeError, ValueError) as exc:
+            self.completed = {}
+            raise CheckpointPersistenceError(
+                "无法安全写入专业检索断点"
+            ) from exc
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def clear(self) -> None:
         self.completed = {}
-        self.state_file.unlink(missing_ok=True)
+        try:
+            self.state_file.unlink(missing_ok=True)
+        except OSError as exc:
+            raise CheckpointPersistenceError(
+                "无法安全清除专业检索断点"
+            ) from exc
 
 
 BatchExecutor = Callable[[ExpressionBatch], Awaitable[dict[str, Any]]]
 ChallengeHandler = Callable[[ExpressionBatch], Awaitable[bool]]
+StopPredicate = Callable[[list[dict[str, Any]]], bool]
+
+_CHECKPOINT_RESULT_FIELDS = (
+    "status",
+    "index",
+    "total_rows",
+    "excluded_non_journal_rows",
+    "records",
+    "incomplete_records",
+)
+_CHECKPOINT_RECORD_FIELDS = (
+    "title",
+    "authors",
+    "journal_raw",
+    "publication_date",
+    "publication_year",
+    "document_type",
+    "citations",
+    "downloads",
+    "is_online_first",
+    "result_rank",
+    "source_database",
+)
+
+
+def _checkpoint_text(value: str) -> str | None:
+    normalized = "".join(
+        character
+        for character in unicodedata.normalize("NFKC", value)
+        if unicodedata.category(character) not in {"Cc", "Cf"}
+    ).strip()
+    folded = normalized.casefold()
+    if any(
+        marker in folded
+        for marker in (
+            "su %=",
+            "ly=",
+            "ye between",
+            "http://",
+            "https://",
+            "://",
+            "cookie",
+        )
+    ):
+        return None
+    if "<" in normalized and ">" in normalized:
+        return None
+    if normalized.startswith(("/", "\\", "~")):
+        return None
+    if folded.startswith(("$home", "${home}", "%userprofile%")):
+        return None
+    if _checkpoint_windows_drive_path(normalized):
+        return None
+    file_scheme, separator, file_target = folded.partition(":")
+    if separator and "".join(file_scheme.split()) == "file":
+        file_target = file_target.lstrip()
+        if file_target.startswith(("/", "\\")) or _checkpoint_windows_drive_path(
+            file_target
+        ):
+            return None
+    return normalized
+
+
+def _checkpoint_windows_drive_path(value: str) -> bool:
+    return (
+        len(value) >= 3
+        and value[0].isalpha()
+        and value[1] == ":"
+        and value[2] in {"\\", "/"}
+    )
+
+
+def _checkpoint_bibliographic_text(
+    value: str,
+    maximum: int,
+) -> str | None:
+    normalized = _checkpoint_text(value)
+    if normalized is None:
+        return None
+    cleaned = "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) not in {"Cc", "Cf"}
+    ).strip()[:maximum]
+    return _checkpoint_text(cleaned)
+
+
+def _string_sequence(value: Any) -> list[str] | None:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes, bytearray))
+        or any(not isinstance(item, str) for item in value)
+    ):
+        return None
+    authors: list[str] = []
+    for item in value[:MAX_AUTHORS]:
+        cleaned = _checkpoint_bibliographic_text(item, MAX_AUTHOR_LENGTH)
+        if cleaned is None:
+            return None
+        if cleaned:
+            authors.append(cleaned)
+    return authors
+
+
+def _checkpoint_record(
+    record: Any,
+    *,
+    formal: bool,
+) -> dict[str, Any] | None:
+    if hasattr(record, "to_dict"):
+        source = record.to_dict()
+    elif isinstance(record, Mapping):
+        source = dict(record)
+    else:
+        return None
+    required_strings = (
+        "title",
+        "journal_raw",
+        "publication_date",
+        "document_type",
+        "source_database",
+    )
+    if any(not isinstance(source.get(name), str) for name in required_strings):
+        return None
+    title = _checkpoint_bibliographic_text(
+        source["title"],
+        MAX_TITLE_LENGTH,
+    )
+    journal = _checkpoint_bibliographic_text(
+        source["journal_raw"],
+        MAX_JOURNAL_LENGTH,
+    )
+    publication_date = _checkpoint_text(source["publication_date"])
+    document_type = _checkpoint_text(source["document_type"])
+    source_database = _checkpoint_text(source["source_database"])
+    if any(
+        value is None
+        for value in (
+            title,
+            journal,
+            publication_date,
+            document_type,
+            source_database,
+        )
+    ):
+        return None
+    if document_type != "期刊" or source_database != "CNKI":
+        return None
+    authors = _string_sequence(source.get("authors"))
+    if authors is None:
+        return None
+    safe: dict[str, Any] = {
+        "title": title,
+        "journal_raw": journal,
+        "publication_date": publication_date,
+        "document_type": document_type,
+        "source_database": source_database,
+    }
+    safe["authors"] = authors
+    for name in ("publication_year", "citations", "downloads"):
+        value = source.get(name)
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool)
+        ):
+            return None
+        if name in {"citations", "downloads"} and value is not None and value < 0:
+            return None
+        safe[name] = value
+    complete_bibliography = (
+        bool(safe["title"])
+        and bool(safe["journal_raw"])
+        and is_verifiable_publication_year(safe["publication_year"])
+    )
+    if formal != complete_bibliography:
+        return None
+    result_rank = source.get("result_rank")
+    if (
+        not isinstance(result_rank, int)
+        or isinstance(result_rank, bool)
+        or result_rank < 0
+    ):
+        return None
+    safe["result_rank"] = result_rank
+    for name in ("is_online_first",):
+        value = source.get(name)
+        if not isinstance(value, bool):
+            return None
+        safe[name] = value
+    return {
+        name: safe[name]
+        for name in _CHECKPOINT_RECORD_FIELDS
+        if name in safe
+    }
+
+
+def _checkpoint_records(
+    value: Any,
+    *,
+    formal: bool,
+    require_list: bool,
+) -> list[dict[str, Any]] | None:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes, bytearray))
+        or (require_list and not isinstance(value, list))
+    ):
+        return None
+    records: list[dict[str, Any]] = []
+    for record in value:
+        safe = _checkpoint_record(record, formal=formal)
+        if safe is None:
+            return None
+        records.append(safe)
+    return records
+
+
+def _checkpoint_result(
+    result: dict[str, Any],
+    index: int,
+    *,
+    from_payload: bool = False,
+) -> dict[str, Any] | None:
+    status = result.get("status")
+    total_rows = result.get("total_rows", 0)
+    excluded = result.get("excluded_non_journal_rows", 0)
+    records_value = result.get("records") if from_payload else result.get(
+        "records", ()
+    )
+    incomplete_value = result.get(
+        "incomplete_records",
+        [] if from_payload else (),
+    )
+    records = _checkpoint_records(
+        records_value,
+        formal=True,
+        require_list=from_payload,
+    )
+    incomplete = _checkpoint_records(
+        incomplete_value,
+        formal=False,
+        require_list=from_payload,
+    )
+    if (
+        status not in {
+            SearchStatus.SUCCESS.value,
+            SearchStatus.NO_RESULTS.value,
+        }
+        or not isinstance(total_rows, int)
+        or isinstance(total_rows, bool)
+        or not isinstance(excluded, int)
+        or isinstance(excluded, bool)
+        or total_rows < 0
+        or excluded < 0
+        or excluded > total_rows
+        or records is None
+        or incomplete is None
+    ):
+        return None
+    if excluded + len(records) + len(incomplete) > total_rows:
+        return None
+    if status == SearchStatus.NO_RESULTS.value and (
+        total_rows != 0
+        or excluded != 0
+        or records
+        or incomplete
+    ):
+        return None
+    safe = {
+        "status": status,
+        "index": index,
+        "total_rows": total_rows,
+        "excluded_non_journal_rows": excluded,
+        "records": records,
+        "incomplete_records": incomplete,
+    }
+    return {name: safe[name] for name in _CHECKPOINT_RESULT_FIELDS}
+
+
+def _restore_checkpoint_result(
+    result: dict[str, Any],
+    batch: ExpressionBatch,
+) -> dict[str, Any]:
+    from .models import PaperRecord
+
+    restored: dict[str, Any] = {
+        "status": result.get("status"),
+        "index": result.get("index", batch.index),
+        "total_rows": result.get("total_rows", 0),
+        "excluded_non_journal_rows": result.get(
+            "excluded_non_journal_rows", 0
+        ),
+    }
+    for name in ("records", "incomplete_records"):
+        records: list[PaperRecord] = []
+        for saved in result.get(name, ()):
+            if not isinstance(saved, dict):
+                continue
+            values = {
+                field: saved[field]
+                for field in _CHECKPOINT_RECORD_FIELDS
+                if field in saved
+            }
+            values["search_query"] = batch.expression
+            try:
+                records.append(PaperRecord(**values))
+            except (TypeError, ValueError):
+                continue
+        restored[name] = tuple(records)
+    return {
+        name: restored[name]
+        for name in _CHECKPOINT_RESULT_FIELDS
+    }
 
 
 async def run_batches(
@@ -256,6 +739,7 @@ async def run_batches(
     checkpoint: BatchCheckpoint | None = None,
     throttle: Throttle | None = None,
     max_challenge_retries: int = MAX_CHALLENGE_RETRIES,
+    should_stop: StopPredicate | None = None,
 ) -> dict[str, Any]:
     """依次执行各批次，遇安全验证则暂停等待人工处理后续跑。
 
@@ -264,64 +748,218 @@ async def run_batches(
     """
     if not batches:
         raise ValueError("批次列表不能为空")
-    token = "|".join(batch.expression for batch in batches)
+    token = hashlib.sha256(
+        "\n".join(batch.expression for batch in batches).encode("utf-8")
+    ).hexdigest()
     if checkpoint is not None:
-        checkpoint.load(token)
+        try:
+            checkpoint.load(token)
+        except CheckpointPersistenceError as exc:
+            return _summary(
+                [],
+                batches,
+                token,
+                None,
+                False,
+                stopped_at=batches[0],
+                stopped_result={
+                    "status": SearchStatus.CONFIGURATION_ERROR.value,
+                    "detail": str(exc),
+                },
+                terminal_status=SearchStatus.CONFIGURATION_ERROR.value,
+            )
 
     results: list[dict[str, Any]] = []
     human_intervention_required = False
     for batch in batches:
         if checkpoint is not None and batch.index in checkpoint.completed:
-            results.append(checkpoint.completed[batch.index])
+            results.append(
+                _restore_checkpoint_result(
+                    checkpoint.completed[batch.index],
+                    batch,
+                )
+            )
+            if should_stop is not None and should_stop(results):
+                return _summary(
+                    results,
+                    batches,
+                    token,
+                    checkpoint,
+                    human_intervention_required,
+                    limit_reached=True,
+                )
             continue
 
-        attempts = 0
+        challenge_attempts = 0
+        network_retries = 0
         while True:
             if throttle is not None:
                 await throttle.wait()
             result = await execute(batch)
-            challenged = result.get("status") == SearchStatus.CHALLENGE_DETECTED.value
+            status = result.get("status")
+            challenged = status == SearchStatus.CHALLENGE_DETECTED.value
             if throttle is not None:
                 throttle.record(challenged=challenged)
-            if not challenged:
-                break
-            human_intervention_required = True
-            attempts += 1
-            if on_challenge is None or attempts > max_challenge_retries:
-                return _summary(results, batches, token, checkpoint,
-                                human_intervention_required, stopped_at=batch)
-            if not await on_challenge(batch):
-                return _summary(results, batches, token, checkpoint,
-                                human_intervention_required, stopped_at=batch)
+            if challenged:
+                human_intervention_required = True
+                challenge_attempts += 1
+                if (
+                    on_challenge is None
+                    or challenge_attempts > max_challenge_retries
+                ):
+                    return _summary(
+                        results,
+                        batches,
+                        token,
+                        checkpoint,
+                        human_intervention_required,
+                        stopped_at=batch,
+                        stopped_result=result,
+                        terminal_status=SearchStatus.CHALLENGE_DETECTED.value,
+                    )
+                if not await on_challenge(batch):
+                    return _summary(
+                        results,
+                        batches,
+                        token,
+                        checkpoint,
+                        human_intervention_required,
+                        stopped_at=batch,
+                        stopped_result=result,
+                        terminal_status=SearchStatus.CHALLENGE_DETECTED.value,
+                    )
+                continue
+            if status == SearchStatus.NETWORK_ERROR.value and network_retries < 1:
+                network_retries += 1
+                continue
+            if status not in {
+                SearchStatus.SUCCESS.value,
+                SearchStatus.NO_RESULTS.value,
+            }:
+                return _summary(
+                    results,
+                    batches,
+                    token,
+                    checkpoint,
+                    human_intervention_required,
+                    stopped_at=batch,
+                    stopped_result=result,
+                    terminal_status=status,
+                )
+            break
 
         results.append(result)
         if checkpoint is not None:
-            checkpoint.completed[batch.index] = result
-            checkpoint.save(token)
+            safe = _checkpoint_result(
+                result,
+                batch.index,
+            )
+            if safe is None:
+                checkpoint.completed = {}
+                return _summary(
+                    [],
+                    batches,
+                    token,
+                    None,
+                    human_intervention_required,
+                    stopped_at=batch,
+                    stopped_result={
+                        "status": SearchStatus.CONFIGURATION_ERROR.value,
+                        "detail": "批次结果无法安全写入专业检索断点",
+                    },
+                    terminal_status=SearchStatus.CONFIGURATION_ERROR.value,
+                )
+            checkpoint.completed[batch.index] = safe
+            try:
+                checkpoint.save(token)
+            except CheckpointPersistenceError as exc:
+                return _summary(
+                    [],
+                    batches,
+                    token,
+                    None,
+                    human_intervention_required,
+                    stopped_at=batch,
+                    stopped_result={
+                        "status": SearchStatus.CONFIGURATION_ERROR.value,
+                        "detail": str(exc),
+                    },
+                    terminal_status=SearchStatus.CONFIGURATION_ERROR.value,
+                )
+        if (
+            status == SearchStatus.SUCCESS.value
+            and should_stop is not None
+            and should_stop(results)
+        ):
+            return _summary(
+                results,
+                batches,
+                token,
+                checkpoint,
+                human_intervention_required,
+                limit_reached=True,
+            )
 
     if checkpoint is not None:
-        checkpoint.clear()
+        try:
+            checkpoint.clear()
+        except CheckpointPersistenceError as exc:
+            return _summary(
+                [],
+                batches,
+                token,
+                None,
+                human_intervention_required,
+                stopped_at=batches[-1],
+                stopped_result={
+                    "status": SearchStatus.CONFIGURATION_ERROR.value,
+                    "detail": str(exc),
+                },
+                terminal_status=SearchStatus.CONFIGURATION_ERROR.value,
+            )
     return _summary(results, batches, token, checkpoint, human_intervention_required)
 
 
 def _summary(results: list[dict[str, Any]], batches: Sequence[ExpressionBatch],
              token: str, checkpoint: BatchCheckpoint | None,
              human_intervention_required: bool,
-             stopped_at: ExpressionBatch | None = None) -> dict[str, Any]:
+             stopped_at: ExpressionBatch | None = None,
+             stopped_result: dict[str, Any] | None = None,
+             limit_reached: bool = False,
+             terminal_status: str | None = None) -> dict[str, Any]:
     if stopped_at is not None and checkpoint is not None:
-        checkpoint.save(token)
+        try:
+            checkpoint.save(token)
+        except CheckpointPersistenceError as exc:
+            results = []
+            limit_reached = False
+            terminal_status = SearchStatus.CONFIGURATION_ERROR.value
+            stopped_result = {
+                "status": terminal_status,
+                "detail": str(exc),
+            }
+    public_stopped_result = None
+    if stopped_result is not None:
+        public_stopped_result = {
+            name: stopped_result[name]
+            for name in ("status", "index", "detail")
+            if name in stopped_result
+        }
     return {
         "batches_completed": len(results),
         "batches_total": len(batches),
         "complete": stopped_at is None,
         "stopped_at_batch": stopped_at.index if stopped_at is not None else None,
+        "stopped_result": public_stopped_result,
         "human_intervention_required": human_intervention_required,
+        "limit_reached": limit_reached,
+        "terminal_status": terminal_status,
         "results": results,
     }
 
 
 class WebVpnSession:
-    """有头浏览器 + 持久化 profile，用于承载人工登录并复用同一进程完成检索。
+    """有头浏览器的非持久化会话，用于承载人工登录并在同一进程完成检索。
 
     刻意不导出 ``storage_state``：票据跨进程无效，落盘明文认证 cookie 只会平白
     多出一处凭据泄露面。
@@ -331,18 +969,26 @@ class WebVpnSession:
         self.config = config
         self._context_factory = context_factory
         self._playwright: Any = None
+        self.browser: Any = None
         self.context: Any = None
         self.page: Any = None
 
     async def __aenter__(self) -> "WebVpnSession":
-        if self._context_factory is None:
-            self._playwright = await _start_playwright()
-            self._context_factory = _PersistentContextFactory(self._playwright, self.config)
-        self.context = await await_maybe(self._context_factory.launch())
-        pages = getattr(self.context, "pages", None) or []
-        self.page = pages[0] if pages else await await_maybe(self.context.new_page())
-        await await_maybe(self.page.goto(self.config.home_url, wait_until="domcontentloaded"))
-        return self
+        try:
+            if self._context_factory is None:
+                self._playwright = await _start_playwright()
+                self._context_factory = _EphemeralContextFactory(self._playwright)
+            else:
+                self._playwright = getattr(self._context_factory, "playwright", None)
+            self.browser, self.context = await await_maybe(self._context_factory.launch())
+            pages = getattr(self.context, "pages", None) or []
+            self.page = pages[0] if pages else await await_maybe(self.context.new_page())
+            await await_maybe(self.page.goto(
+                self.config.home_url, wait_until="domcontentloaded"))
+            return self
+        except BaseException:
+            await _finish_cleanup(self.close())
+            raise
 
     async def wait_until_ready(self, *, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                                now: Callable[[], float] = time.monotonic) -> None:
@@ -372,14 +1018,19 @@ class WebVpnSession:
         if callable(is_closed) and is_closed():
             raise WebVpnWindowClosed("浏览器窗口已关闭，WebVPN 会话结束，请重新登录")
 
-    async def __aexit__(self, *_exc: object) -> None:
-        for resource, method in ((self.context, "close"), (self._playwright, "stop")):
+    async def close(self) -> None:
+        for resource, method in (
+            (self.context, "close"),
+            (self.browser, "close"),
+            (self._playwright, "stop"),
+        ):
             if resource is not None:
-                try:
+                with contextlib.suppress(Exception, asyncio.CancelledError):
                     await await_maybe(getattr(resource, method)())
-                except Exception:
-                    pass
-        self.context = self.page = self._playwright = None
+        self.page = self.context = self.browser = self._playwright = None
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await asyncio.shield(self.close())
 
 
 async def wait_for_professional_page(
@@ -423,39 +1074,249 @@ class ProfessionalSearchPage:
     def __init__(self, page: Any) -> None:
         self.page = page
 
-    async def open_from_home(self, context: Any, *, timeout_seconds: float = 20.0) -> Any:
+    async def open_from_home(
+        self,
+        context: Any,
+        *,
+        timeout_seconds: float = 20.0,
+        preserve_home: bool = False,
+    ) -> Any:
         """从知网首页点进高级检索。**不要改成直接 goto 高级检索地址。**
 
         高级检索通常在新标签页打开，且新页面需要时间加载。固定 sleep 是在赌
         网络速度：慢一点就会在 DOM 尚未就绪时去找标签，报出"未找到专业检索"
         这种指向完全错误的错误。这里改为轮询等待新标签页出现并完成加载。
+
+        ``preserve_home`` 用于批次运行时：先在同一浏览器上下文创建批次自有页面，
+        打开当前首页地址，再从该页点击高级检索。这样即使站点改为同页跳转，
+        保留首页也不会被覆盖。方法只把返回页的所有权交给调用方；识别失败时，
+        本次点击产生的所有页面均在抛出异常前关闭。
         """
-        origin = self.page
-        link = self.page.get_by_role("link", name=ADV_SEARCH_LINK_TEXT)
-        if await await_maybe(link.count()) < 1:
-            raise WebVpnNavigationError("知网首页未找到「高级检索」入口")
-        await await_maybe(link.first.click())
+        retained_home = self.page
+        baseline = list(getattr(context, "pages", []) or [])
+        owned: list[Any] = []
+        popup_listener_pages: list[Any] = []
+        popup_cleanup_deadline: float | None = None
+        popup_close_tasks: set[asyncio.Task[Any]] = set()
+        popup_closing_pages: list[Any] = []
+        click_cleanup_task: asyncio.Task[Any] | None = None
+        click_cleanup_deadline: float | None = None
+        has_popup_boundary = False
 
-        # 不能认"第一个新出现的标签页"：站点会短暂开一个中转标签页再关掉，
-        # 抓到它就会让驱动指向一个已关闭的页面，后续报错还指向完全错误的原因。
-        # 判据改为"仍存活、且确实呈现出高级检索内容"。
-        deadline = time.monotonic() + timeout_seconds
-        while True:
-            found = await self._locate_advanced_search_page(context, origin)
-            if found is not None:
-                self.page = found
-                return self.page
-            if time.monotonic() >= deadline:
-                raise WebVpnNavigationError(
-                    "点击「高级检索」后未出现可用的高级检索页面；"
-                    "站点可能改版，或中转标签页被关闭"
+        def schedule_popup_close(page: Any) -> None:
+            if popup_cleanup_deadline is None:
+                return
+            if asyncio.get_running_loop().time() >= popup_cleanup_deadline:
+                return
+            if any(page is closing for closing in popup_closing_pages):
+                return
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                return
+            popup_closing_pages.append(page)
+            close_task = asyncio.create_task(self._close_pages([page]))
+            popup_close_tasks.add(close_task)
+
+            def consume_close_result(task: asyncio.Task[Any]) -> None:
+                popup_close_tasks.discard(task)
+                for index, closing in enumerate(popup_closing_pages):
+                    if closing is page:
+                        popup_closing_pages.pop(index)
+                        break
+                self._consume_task_result(task)
+
+            close_task.add_done_callback(consume_close_result)
+
+        def own_popup(page: Any) -> None:
+            if all(page is not existing for existing in owned):
+                owned.append(page)
+            listen_for_popups(page)
+            schedule_popup_close(page)
+
+        def listen_for_popups(page: Any) -> bool:
+            on = getattr(page, "on", None)
+            if not callable(on):
+                return False
+            if any(page is existing for existing in popup_listener_pages):
+                return True
+            on("popup", own_popup)
+            popup_listener_pages.append(page)
+            return True
+
+        def stop_listening_for_popups() -> None:
+            for page in popup_listener_pages:
+                remove = getattr(page, "remove_listener", None)
+                if callable(remove):
+                    with contextlib.suppress(Exception):
+                        remove("popup", own_popup)
+            popup_listener_pages.clear()
+
+        def own_context_delta() -> None:
+            for page in list(getattr(context, "pages", []) or []):
+                if (
+                    all(page is not existing for existing in baseline)
+                    and all(page is not existing for existing in owned)
+                ):
+                    owned.append(page)
+
+        async def close_owned_pages_until_stable() -> None:
+            while True:
+                pending = [
+                    page
+                    for page in owned
+                    if not (
+                        callable(getattr(page, "is_closed", None))
+                        and page.is_closed()
+                    )
+                ]
+                if pending:
+                    await self._close_pages(pending)
+                    continue
+                await asyncio.sleep(0)
+                if all(
+                    callable(getattr(page, "is_closed", None))
+                    and page.is_closed()
+                    for page in owned
+                ):
+                    return
+
+        async def close_cancelled_click_until(deadline: float) -> None:
+            nonlocal popup_cleanup_deadline
+            popup_cleanup_deadline = deadline
+            for page in list(owned):
+                schedule_popup_close(page)
+            try:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+            finally:
+                popup_cleanup_deadline = None
+                if click_cleanup_task is not None and not click_cleanup_task.done():
+                    click_cleanup_task.cancel()
+                for close_task in list(popup_close_tasks):
+                    if not close_task.done():
+                        close_task.cancel()
+
+        try:
+            if preserve_home:
+                creation_task = asyncio.create_task(
+                    await_maybe(context.new_page())
                 )
-            await asyncio.sleep(1)
+                try:
+                    origin = await asyncio.shield(creation_task)
+                except asyncio.CancelledError:
+                    _clear_current_cancellation()
+                    completed, _repeat_cancel = await _wait_task_bounded(
+                        creation_task,
+                        PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
+                        cancel_on_timeout=True,
+                    )
+                    if completed and not creation_task.cancelled():
+                        with contextlib.suppress(BaseException):
+                            owned.append(creation_task.result())
+                    else:
+                        creation_task.add_done_callback(
+                            self._close_page_created_after_cancellation
+                        )
+                    own_context_delta()
+                    raise
+                owned.append(origin)
+                home_url = str(getattr(retained_home, "url", "") or "")
+                if not home_url:
+                    raise WebVpnNavigationError("知网首页地址不可用，无法建立批次页面")
+                await await_maybe(
+                    origin.goto(home_url, wait_until="domcontentloaded")
+                )
+                self.page = origin
+            else:
+                origin = retained_home
 
-    async def _locate_advanced_search_page(self, context: Any, origin: Any) -> Any | None:
-        candidates = list(getattr(context, "pages", []) or [])
-        if origin not in candidates:
-            candidates.append(origin)          # 同页跳转时 origin 仍是目标
+            has_popup_boundary = listen_for_popups(origin)
+            link = self.page.get_by_role("link", name=ADV_SEARCH_LINK_TEXT)
+            if await await_maybe(link.count()) < 1:
+                raise WebVpnNavigationError("知网首页未找到「高级检索」入口")
+            click_task = asyncio.create_task(await_maybe(link.first.click()))
+            try:
+                await asyncio.wait((click_task,))
+                click_task.result()
+            except asyncio.CancelledError:
+                _clear_current_cancellation()
+                click_cleanup_deadline = (
+                    asyncio.get_running_loop().time()
+                    + PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS
+                )
+                click_cleanup_task = click_task
+                click_task.add_done_callback(self._consume_task_result)
+                click_task.cancel()
+                if not has_popup_boundary:
+                    own_context_delta()
+                raise
+
+            # 不能认"第一个新出现的标签页"：站点会短暂开一个中转标签页再关掉，
+            # 抓到它就会让驱动指向已关闭页面。只检查本次批次拥有的页面。
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                if not has_popup_boundary:
+                    own_context_delta()
+                candidates = [origin, *owned]
+                found = await self._locate_advanced_search_page(candidates)
+                if found is not None:
+                    self.page = found
+                    stop_listening_for_popups()
+                    completed, cancellation = await _finish_cleanup_bounded(
+                        self._close_pages(
+                            page for page in owned if page is not found
+                        ),
+                        PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
+                    )
+                    if cancellation is not None:
+                        raise cancellation
+                    if not completed:
+                        raise WebVpnNavigationError(
+                            "批次页面清理超时，已停止本次检索"
+                        )
+                    return self.page
+                if time.monotonic() >= deadline:
+                    raise WebVpnNavigationError(
+                        "点击「高级检索」后未出现可用的高级检索页面；"
+                        "站点可能改版，或中转标签页被关闭"
+                    )
+                await asyncio.sleep(1)
+        except BaseException as exc:
+            initial_cancellation = (
+                exc if isinstance(exc, asyncio.CancelledError) else None
+            )
+            if initial_cancellation is not None:
+                _clear_current_cancellation()
+            try:
+                if click_cleanup_deadline is None:
+                    _completed, cleanup_cancellation = (
+                        await _finish_cleanup_bounded(
+                            close_owned_pages_until_stable(),
+                            PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
+                        )
+                    )
+                else:
+                    _completed, cleanup_cancellation = (
+                        await _finish_cleanup_until(
+                            close_cancelled_click_until(
+                                click_cleanup_deadline
+                            ),
+                            click_cleanup_deadline,
+                        )
+                    )
+            finally:
+                stop_listening_for_popups()
+            self.page = retained_home
+            if cleanup_cancellation is not None:
+                raise cleanup_cancellation
+            if initial_cancellation is not None:
+                raise initial_cancellation
+            raise
+
+    async def _locate_advanced_search_page(
+        self, candidates: Sequence[Any]
+    ) -> Any | None:
         for page in candidates:
             is_closed = getattr(page, "is_closed", None)
             if callable(is_closed) and is_closed():
@@ -467,6 +1328,40 @@ class ProfessionalSearchPage:
                 if ADV_SEARCH_LINK_TEXT in (title or ""):
                     return page
         return None
+
+    @staticmethod
+    async def _close_pages(pages: Iterable[Any]) -> None:
+        for page in list(pages):
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                continue
+            with contextlib.suppress(Exception):
+                await await_maybe(page.close())
+
+    @staticmethod
+    def _close_page_created_after_cancellation(
+        creation_task: asyncio.Task[Any],
+    ) -> None:
+        if creation_task.cancelled():
+            return
+        try:
+            page = creation_task.result()
+        except BaseException:
+            return
+        cleanup_task = asyncio.create_task(
+            _finish_cleanup_bounded(
+                ProfessionalSearchPage._close_pages([page]),
+                PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS,
+            )
+        )
+        cleanup_task.add_done_callback(
+            ProfessionalSearchPage._consume_task_result
+        )
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Task[Any]) -> None:
+        with contextlib.suppress(BaseException):
+            task.result()
 
     async def switch_to_professional(self, *, timeout_seconds: float = 20.0) -> None:
         """切到「专业检索」标签。
@@ -607,22 +1502,58 @@ class ProfessionalSearchPage:
                 return SearchStatus.CHALLENGE_DETECTED
         return SearchStatus.PAGE_CONTRACT_CHANGED
 
+    async def wait_for_outcome(
+        self,
+        timeout_seconds: float = 30,
+        *,
+        poll_seconds: float = 0.5,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        now: Callable[[], float] = time.monotonic,
+    ) -> SearchStatus:
+        """等待结果页完成渲染，临时结构未就绪不立即判为契约变化。"""
+        deadline = now() + timeout_seconds
+        while True:
+            status = await self.classify_outcome()
+            if status is not SearchStatus.PAGE_CONTRACT_CHANGED:
+                return status
+            if now() >= deadline:
+                return status
+            await sleep(poll_seconds)
 
-class _PersistentContextFactory:
-    def __init__(self, playwright: Any, config: WebVpnConfig) -> None:
+    async def execute_plan(self, plan: ExpressionBatch) -> tuple[str, str, str]:
+        await self.fill_expression(plan.expression)
+        await self.submit()
+        status = await self.wait_for_outcome()
+        if status is SearchStatus.SUCCESS:
+            if plan.source_category is not None:
+                await self.apply_source_category(plan.source_category)
+            await self.set_page_size(plan.page_size)
+            status = await self.wait_for_outcome()
+        html = await await_maybe(self.page.content()) if status is SearchStatus.SUCCESS else ""
+        return status.value, html, str(getattr(self.page, "url", ""))
+
+
+class _EphemeralContextFactory:
+    def __init__(self, playwright: Any) -> None:
         self.playwright = playwright
-        self.config = config
 
-    async def launch(self) -> Any:
-        self.config.profile_dir.mkdir(parents=True, exist_ok=True)
+    async def launch(self) -> tuple[Any, Any]:
+        browser = None
         try:
-            return await await_maybe(self.playwright.chromium.launch_persistent_context(
-                str(self.config.profile_dir),
-                headless=False,          # 人工登录与滑动验证都需要可见窗口
+            browser = await await_maybe(
+                self.playwright.chromium.launch(headless=False)
+            )
+            context = await await_maybe(browser.new_context(
                 locale="zh-CN",
                 accept_downloads=False,
             ))
-        except Exception as exc:
+            return browser, context
+        except BaseException as exc:
+            if browser is not None:
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await _finish_cleanup(await_maybe(browser.close()))
+            if not isinstance(exc, Exception):
+                raise
             raise BrowserUnavailableError(
                 "无法启动有头浏览器：WebVPN 模式需要图形界面完成人工认证"
             ) from exc

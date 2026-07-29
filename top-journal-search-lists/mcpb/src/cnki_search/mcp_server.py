@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
+from contextlib import asynccontextmanager
+from datetime import date
 from typing import Annotated, Any
 
 from pydantic import Field
 
 from . import __version__
+from .browser import BrowserUnavailableError
 from .models import MAX_RESULTS_PER_PAGE
+from .professional_runtime import build_professional_runtime_from_env
 from .professional_service import CHINESE_TOP_GROUP, SUPPORTED_GROUPS
+from .search import PageContractChanged
 from .service import CnkiPublicSearchService
+from .webvpn import (
+    ExpressionTruncated,
+    WebVpnLoginTimeout,
+    WebVpnNavigationError,
+    WebVpnWindowClosed,
+)
 
 REQUIRED_TOOLS = ["cnki_search", "cnki_professional_search"]
 MIN_LIMIT = 1
@@ -26,8 +36,6 @@ MAX_PROFESSIONAL_LIMIT = MAX_RESULTS_PER_PAGE
 #: 知网首页地址。未设置时工具返回配置错误而不是擅自拉起浏览器——该模式会打开
 #: 可见窗口并要求人工登录，绝不能在调用方毫无预期时发生。
 WEBVPN_HOME_ENV = "CNKI_WEBVPN_HOME"
-WEBVPN_PROFILE_ENV = "CNKI_WEBVPN_PROFILE"
-DEFAULT_WEBVPN_PROFILE = Path.home() / ".cnki-search" / "webvpn-profile"
 
 _WEBVPN_DISABLED_HINT = (
     f"WebVPN 专业检索未启用：请将环境变量 {WEBVPN_HOME_ENV} 设为所在机构 WebVPN "
@@ -40,7 +48,11 @@ def webvpn_enabled() -> bool:
 
 
 def _configuration_error(message: str) -> dict[str, Any]:
-    return {"ok": False, "mode": "webvpn", "status": "configuration_error",
+    return _professional_error("configuration_error", message)
+
+
+def _professional_error(status: str, message: str) -> dict[str, Any]:
+    return {"ok": False, "mode": "webvpn", "status": status,
             "human_intervention_required": True, "records": [],
             "incomplete_records": [], "detail": message}
 
@@ -53,6 +65,7 @@ class CnkiMcpServer:
         # 绝不能在 MCP 服务器启动时就发生。
         self._professional_factory = professional_factory
         self._professional: Any = None
+        self._professional_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._shutdown = False
 
@@ -91,8 +104,18 @@ class CnkiMcpServer:
             service = await self._ensure_professional()
             return await service.search_group(topic, group, limit=limit,
                                               year_from=year_from, year_to=year_to)
-        except ValueError as exc:
+        except asyncio.CancelledError:
+            raise
+        except (BrowserUnavailableError, ValueError) as exc:
             return _configuration_error(str(exc))
+        except (WebVpnLoginTimeout, WebVpnWindowClosed) as exc:
+            return _professional_error("login_required", str(exc))
+        except (
+            WebVpnNavigationError,
+            ExpressionTruncated,
+            PageContractChanged,
+        ) as exc:
+            return _professional_error("page_contract_changed", str(exc))
         finally:
             if task is not None:
                 self._tasks.discard(task)
@@ -103,11 +126,16 @@ class CnkiMcpServer:
         票据不能跨进程复用，会话必须在同一进程内保持存活，因此这里缓存实例，
         而不是每次调用都重新登录。
         """
-        if self._professional is None:
-            if self._professional_factory is None:
-                raise ValueError(_WEBVPN_DISABLED_HINT)
-            self._professional = await self._professional_factory()
-        return self._professional
+        if self._professional is not None:
+            return self._professional
+        async with self._professional_lock:
+            if self._professional is None:
+                factory = (
+                    self._professional_factory
+                    or build_professional_runtime_from_env
+                )
+                self._professional = await factory()
+            return self._professional
 
     def shutdown(self) -> None:
         if self._shutdown:
@@ -121,11 +149,31 @@ class CnkiMcpServer:
             if task is not current and not task.done():
                 task.cancel()
 
+    async def aclose(self) -> None:
+        self.shutdown()
+        pending = [task for task in self._tasks if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        if self._professional is not None:
+            await self._professional.aclose()
+            self._professional = None
+
     def build_fastmcp(self, fastmcp_class: type | None = None) -> Any:
         if fastmcp_class is None:
             from mcp.server.fastmcp import FastMCP
-            fastmcp_class = FastMCP
-        mcp = fastmcp_class("CNKI Public Search")
+
+            @asynccontextmanager
+            async def lifespan(_app: Any):
+                try:
+                    yield {}
+                finally:
+                    await self.aclose()
+
+            mcp = FastMCP("CNKI Public Search", lifespan=lifespan)
+        else:
+            mcp = fastmcp_class("CNKI Public Search")
         lowlevel = getattr(mcp, "_mcp_server", None)
         if lowlevel is not None:
             lowlevel.version = __version__
@@ -142,8 +190,12 @@ class CnkiMcpServer:
             topic: Annotated[str, Field(min_length=1, pattern=r".*\S.*")],
             group: Annotated[str, Field(pattern=r"^(chinese_top_journals|cssci)$")] = CHINESE_TOP_GROUP,
             limit: Annotated[int, Field(ge=MIN_LIMIT, le=MAX_PROFESSIONAL_LIMIT)] = MAX_PROFESSIONAL_LIMIT,
-            year_from: int | None = None,
-            year_to: int | None = None,
+            year_from: Annotated[
+                int | None, Field(ge=1900, le=date.today().year + 1)
+            ] = None,
+            year_to: Annotated[
+                int | None, Field(ge=1900, le=date.today().year + 1)
+            ] = None,
         ) -> dict[str, Any]:
             return await self.cnki_professional_search(topic, group, limit, year_from, year_to)
 

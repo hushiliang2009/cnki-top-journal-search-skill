@@ -16,6 +16,8 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
+from .models import MAX_RESULTS_PER_PAGE
+
 # 输入框的 maxlength 属性是 18000，但**服务端接受的上限远低于此**。
 # 2026-07-28 实机夹逼（主题固定为"数字经济"，逐档提交 CSSCI 刊名前 N 本）：
 #
@@ -98,6 +100,20 @@ def year_clause(year_from: int, year_to: int) -> str:
     return f"YE BETWEEN ('{year_from}', '{year_to}')"
 
 
+def build_topic_expression(
+    topic: str,
+    *,
+    year_from: int | None = None,
+    year_to: int | None = None,
+) -> str:
+    clauses = [f"{TOPIC_FIELD} {RELEVANCE_OPERATOR} {quote_value(topic)}"]
+    if year_from is not None and year_to is not None:
+        clauses.append(year_clause(year_from, year_to))
+    elif (year_from is None) != (year_to is None):
+        raise ValueError("年份区间必须同时提供起止年份")
+    return " AND ".join(clauses)
+
+
 def build_expression(topic: str, journals: list[str], *,
                      year_from: int | None = None, year_to: int | None = None,
                      topic_field: str = TOPIC_FIELD) -> str:
@@ -116,6 +132,8 @@ class ExpressionBatch:
     total: int
     journals: tuple[str, ...]
     expression: str
+    page_size: int = MAX_RESULTS_PER_PAGE
+    source_category: str | None = None
 
 
 def build_batches(topic: str, journals: list[str], *,
