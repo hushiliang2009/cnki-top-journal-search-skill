@@ -85,7 +85,23 @@ def test_async_session_cancellation_closes_every_resource() -> None:
     asyncio.run(scenario())
 
 
-def test_async_service_timeout_returns_network_error_and_queue_cancellation_does_not_start() -> None:
+def test_async_service_timeout_returns_network_error_and_queue_cancellation_does_not_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 本用例断言"超时发生时会话恰好建立了一次"，因此预算必须够走到建会话那一步。
+    # search() 在建会话前串行做两次 to_thread：目录校验与缓存查询；asyncio.to_thread
+    # 首次使用还会惰性创建线程池。原预算 0.1 秒在并行跑多个 Python 版本的 CI runner
+    # 上不够用，会话来不及建立，started 停在 0，用例跨平台随机变红。
+    #
+    # 先只把目录校验置空（无缓存，每次重解析两万多行目录，本机约 14 毫秒）并不足够：
+    # ubuntu (3.12) 仍然失败，说明瓶颈不止于此，线程池启动与调度同样受负载影响。
+    # 因此这里同时给足余量——预算放大到 2 秒，是观察到的失败阈值的约 20 倍，
+    # 线程池启动不可能消耗到这个量级。代价是本用例耗时约 2 秒。
+    #
+    # "入口超时覆盖慢目录"这一产品行为另有专门用例
+    # test_entry_timeout_covers_slow_catalog_and_cache_in_both_layouts 覆盖，不受影响。
+    monkeypatch.setattr("cnki_search.service.validate_catalog", lambda _path: None)
+
     async def scenario() -> None:
         started = 0
         entered = asyncio.Event()
@@ -107,7 +123,7 @@ def test_async_service_timeout_returns_network_error_and_queue_cancellation_does
             session_factory=Session,
             catalog=CATALOG,
             gate=SerialSearchGate(minimum_interval=0),
-            search_timeout_seconds=0.1,
+            search_timeout_seconds=2.0,
         )
         outcome = await service.search("topic")
         assert outcome.status is SearchStatus.NETWORK_ERROR
