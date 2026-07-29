@@ -278,6 +278,8 @@ def test_webvpn_e2e_helper_prints_only_the_sanitized_summary(
             self, topic: str, group: str, *, limit: int,
             year_from: int | None, year_to: int | None,
         ) -> dict[str, object]:
+            print("SEARCH_STDOUT_SECRET")
+            print("SEARCH_STDERR_SECRET", file=sys.stderr)
             calls.append((topic, group, limit, year_from, year_to))
             return {
                 "status": "success",
@@ -294,11 +296,15 @@ def test_webvpn_e2e_helper_prints_only_the_sanitized_summary(
             }
 
         async def aclose(self) -> None:
+            print("CLOSE_STDOUT_SECRET")
+            print("CLOSE_STDERR_SECRET", file=sys.stderr)
             self.closed = True
 
     runtime = Runtime()
 
     async def build_runtime() -> Runtime:
+        print("BUILD_STDOUT_SECRET")
+        print("BUILD_STDERR_SECRET", file=sys.stderr)
         return runtime
 
     monkeypatch.setenv(
@@ -321,7 +327,10 @@ def test_webvpn_e2e_helper_prints_only_the_sanitized_summary(
         ("数字化转型", "chinese_top_journals", 5, 2020, 2025)
     ]
     assert runtime.closed is True
-    assert json.loads(capsys.readouterr().out) == {
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert len(captured.out.splitlines()) == 1
+    assert json.loads(captured.out) == {
         "status": "success",
         "group": "chinese_top_journals",
         "record_count": 1,
@@ -366,6 +375,82 @@ def _install_e2e_runtime(
     return runtime
 
 
+@pytest.mark.parametrize("failure_stage", ["build", "search", "close"])
+def test_webvpn_e2e_discards_runtime_output_on_every_failure_stage(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure_stage: str,
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+
+    class Runtime:
+        closed = False
+
+        async def search_group(
+            self, *_args: object, **_kwargs: object,
+        ) -> dict[str, object]:
+            print("SEARCH_STDOUT_SECRET")
+            print("SEARCH_STDERR_SECRET", file=sys.stderr)
+            if failure_stage == "search":
+                raise RuntimeError("SEARCH_EXCEPTION_SECRET")
+            return {
+                "status": "success",
+                "batches_completed": 1,
+                "batches_total": 1,
+                "records": [],
+            }
+
+        async def aclose(self) -> None:
+            self.closed = True
+            print("CLOSE_STDOUT_SECRET")
+            print("CLOSE_STDERR_SECRET", file=sys.stderr)
+            if failure_stage == "close":
+                raise RuntimeError("CLOSE_EXCEPTION_SECRET")
+
+    runtime = Runtime()
+
+    async def build_runtime() -> Runtime:
+        print("BUILD_STDOUT_SECRET")
+        print("BUILD_STDERR_SECRET", file=sys.stderr)
+        if failure_stage == "build":
+            raise RuntimeError("BUILD_EXCEPTION_SECRET")
+        return runtime
+
+    monkeypatch.setattr(
+        helper, "build_professional_runtime_from_env", build_runtime
+    )
+
+    exit_code = helper.main([
+        "--topic", "数字化转型",
+        "--group", "chinese_top_journals",
+    ])
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert exit_code != 0
+    assert captured.out == ""
+    assert len(captured.err.splitlines()) == 1
+    assert json.loads(captured.err) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+    }
+    if failure_stage != "build":
+        assert runtime.closed is True
+    for secret in (
+        "BUILD_STDOUT_SECRET",
+        "BUILD_STDERR_SECRET",
+        "BUILD_EXCEPTION_SECRET",
+        "SEARCH_STDOUT_SECRET",
+        "SEARCH_STDERR_SECRET",
+        "SEARCH_EXCEPTION_SECRET",
+        "CLOSE_STDOUT_SECRET",
+        "CLOSE_STDERR_SECRET",
+        "CLOSE_EXCEPTION_SECRET",
+    ):
+        assert secret not in combined
+
+
 @pytest.mark.parametrize(
     "unsafe_key",
     [
@@ -378,6 +463,13 @@ def _install_e2e_runtime(
         "profile_KEYSECRET",
         "browser.context.KEYSECRET",
         "local-path-KEYSECRET",
+        "c00kie-KEYSECRET",
+        "cοοkie-KEYSECRET",
+        "stor4ageState-KEYSECRET",
+        "passw0rd-KEYSECRET",
+        "credentia1-KEYSECRET",
+        "unknown2-KEYSECRET",
+        "结果键-KEYSECRET",
     ],
 )
 def test_webvpn_e2e_helper_normalizes_sensitive_keys_without_echoing_them(
@@ -394,7 +486,13 @@ def test_webvpn_e2e_helper_normalizes_sensitive_keys_without_echoing_them(
             "status": "success",
             "batches_completed": 1,
             "batches_total": 1,
-            "records": [{"title": "题名", unsafe_key: "VALUESECRET"}],
+            "records": [{
+                "title": "题名",
+                "journal_raw": "管理世界",
+                "publication_year": 2025,
+                "priority_level": 6,
+                unsafe_key: "VALUESECRET",
+            }],
         },
     )
 

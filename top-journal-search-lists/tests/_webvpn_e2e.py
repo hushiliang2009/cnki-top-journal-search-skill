@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
 import math
 import sys
@@ -66,6 +68,10 @@ def _normalized_key(value: object) -> str:
     if type(value) is not str:
         _reject_unsafe_output()
     normalized = unicodedata.normalize("NFKC", value).casefold()
+    if any(not character.isascii() for character in normalized):
+        _reject_unsafe_output()
+    if any(character.isdigit() for character in normalized):
+        _reject_unsafe_output()
     return "".join(character for character in normalized if character.isalnum())
 
 
@@ -181,9 +187,12 @@ def main(argv: list[str] | None = None) -> int:
         return _emit_safe_error()
     except BaseException:
         return _emit_safe_error()
+    isolated_stdout = io.StringIO()
+    isolated_stderr = io.StringIO()
     try:
-        summary = asyncio.run(_run(args))
-        print(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False))
+        with redirect_stdout(isolated_stdout), redirect_stderr(isolated_stderr):
+            summary = asyncio.run(_run(args))
+        print(json.dumps(summary, ensure_ascii=False, allow_nan=False))
         return 0
     except BaseException:
         return _emit_safe_error()
