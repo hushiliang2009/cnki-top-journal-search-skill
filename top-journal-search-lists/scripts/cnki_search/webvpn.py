@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import time
 from collections.abc import Awaitable, Callable, Iterable, Sequence
@@ -324,6 +325,11 @@ class BatchCheckpoint:
 
     def save(self, token: str) -> None:
         try:
+            self.completed = {
+                int(index): _checkpoint_result(value, int(index))
+                for index, value in self.completed.items()
+                if isinstance(value, dict)
+            }
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             self.state_file.write_text(
                 json.dumps({"token": token, "completed": self.completed}, ensure_ascii=False),
@@ -339,6 +345,93 @@ class BatchCheckpoint:
 
 BatchExecutor = Callable[[ExpressionBatch], Awaitable[dict[str, Any]]]
 ChallengeHandler = Callable[[ExpressionBatch], Awaitable[bool]]
+StopPredicate = Callable[[list[dict[str, Any]]], bool]
+
+_CHECKPOINT_RESULT_FIELDS = (
+    "status",
+    "index",
+    "total_rows",
+    "excluded_non_journal_rows",
+    "records",
+    "incomplete_records",
+)
+_CHECKPOINT_RECORD_FIELDS = (
+    "title",
+    "authors",
+    "journal_raw",
+    "publication_date",
+    "publication_year",
+    "document_type",
+    "citations",
+    "downloads",
+    "is_online_first",
+    "result_rank",
+    "source_database",
+    "journal_matched_title",
+    "journal_match_status",
+    "journal_match_method",
+    "priority_level",
+    "priority_group",
+    "source_catalogs",
+    "subject_categories",
+    "ncs_internal_rank",
+    "manual_review_required",
+)
+
+
+def _checkpoint_record(record: Any) -> dict[str, Any]:
+    source = record.to_dict() if hasattr(record, "to_dict") else dict(record)
+    return {
+        name: source[name]
+        for name in _CHECKPOINT_RECORD_FIELDS
+        if name in source
+    }
+
+
+def _checkpoint_result(result: dict[str, Any], index: int) -> dict[str, Any]:
+    safe = {
+        "status": result.get("status"),
+        "index": index,
+        "total_rows": result.get("total_rows", 0),
+        "excluded_non_journal_rows": result.get(
+            "excluded_non_journal_rows", 0
+        ),
+        "records": [
+            _checkpoint_record(record)
+            for record in result.get("records", ())
+        ],
+        "incomplete_records": [
+            _checkpoint_record(record)
+            for record in result.get("incomplete_records", ())
+        ],
+    }
+    return {name: safe[name] for name in _CHECKPOINT_RESULT_FIELDS}
+
+
+def _restore_checkpoint_result(
+    result: dict[str, Any],
+    batch: ExpressionBatch,
+) -> dict[str, Any]:
+    from .models import PaperRecord
+
+    restored = dict(result)
+    for name in ("records", "incomplete_records"):
+        records: list[PaperRecord] = []
+        for saved in result.get(name, ()):
+            if not isinstance(saved, dict):
+                continue
+            values = {
+                field: saved[field]
+                for field in _CHECKPOINT_RECORD_FIELDS
+                if field in saved
+            }
+            values["search_query"] = batch.expression
+            try:
+                records.append(PaperRecord(**values))
+            except (TypeError, ValueError):
+                continue
+        restored[name] = tuple(records)
+    return restored
 
 
 async def run_batches(
@@ -349,6 +442,7 @@ async def run_batches(
     checkpoint: BatchCheckpoint | None = None,
     throttle: Throttle | None = None,
     max_challenge_retries: int = MAX_CHALLENGE_RETRIES,
+    should_stop: StopPredicate | None = None,
 ) -> dict[str, Any]:
     """依次执行各批次，遇安全验证则暂停等待人工处理后续跑。
 
@@ -357,7 +451,9 @@ async def run_batches(
     """
     if not batches:
         raise ValueError("批次列表不能为空")
-    token = "|".join(batch.expression for batch in batches)
+    token = hashlib.sha256(
+        "\n".join(batch.expression for batch in batches).encode("utf-8")
+    ).hexdigest()
     if checkpoint is not None:
         checkpoint.load(token)
 
@@ -365,18 +461,69 @@ async def run_batches(
     human_intervention_required = False
     for batch in batches:
         if checkpoint is not None and batch.index in checkpoint.completed:
-            results.append(checkpoint.completed[batch.index])
+            results.append(
+                _restore_checkpoint_result(
+                    checkpoint.completed[batch.index],
+                    batch,
+                )
+            )
+            if should_stop is not None and should_stop(results):
+                return _summary(
+                    results,
+                    batches,
+                    token,
+                    checkpoint,
+                    human_intervention_required,
+                    limit_reached=True,
+                )
             continue
 
-        attempts = 0
+        challenge_attempts = 0
+        network_retries = 0
         while True:
             if throttle is not None:
                 await throttle.wait()
             result = await execute(batch)
-            challenged = result.get("status") == SearchStatus.CHALLENGE_DETECTED.value
+            status = result.get("status")
+            challenged = status == SearchStatus.CHALLENGE_DETECTED.value
             if throttle is not None:
                 throttle.record(challenged=challenged)
-            if result.get("status") == SearchStatus.PAGE_CONTRACT_CHANGED.value:
+            if challenged:
+                human_intervention_required = True
+                challenge_attempts += 1
+                if (
+                    on_challenge is None
+                    or challenge_attempts > max_challenge_retries
+                ):
+                    return _summary(
+                        results,
+                        batches,
+                        token,
+                        checkpoint,
+                        human_intervention_required,
+                        stopped_at=batch,
+                        stopped_result=result,
+                        terminal_status=SearchStatus.CHALLENGE_DETECTED.value,
+                    )
+                if not await on_challenge(batch):
+                    return _summary(
+                        results,
+                        batches,
+                        token,
+                        checkpoint,
+                        human_intervention_required,
+                        stopped_at=batch,
+                        stopped_result=result,
+                        terminal_status=SearchStatus.CHALLENGE_DETECTED.value,
+                    )
+                continue
+            if status == SearchStatus.NETWORK_ERROR.value and network_retries < 1:
+                network_retries += 1
+                continue
+            if status not in {
+                SearchStatus.SUCCESS.value,
+                SearchStatus.NO_RESULTS.value,
+            }:
                 return _summary(
                     results,
                     batches,
@@ -385,22 +532,30 @@ async def run_batches(
                     human_intervention_required,
                     stopped_at=batch,
                     stopped_result=result,
+                    terminal_status=status,
                 )
-            if not challenged:
-                break
-            human_intervention_required = True
-            attempts += 1
-            if on_challenge is None or attempts > max_challenge_retries:
-                return _summary(results, batches, token, checkpoint,
-                                human_intervention_required, stopped_at=batch)
-            if not await on_challenge(batch):
-                return _summary(results, batches, token, checkpoint,
-                                human_intervention_required, stopped_at=batch)
+            break
 
         results.append(result)
         if checkpoint is not None:
-            checkpoint.completed[batch.index] = result
+            checkpoint.completed[batch.index] = _checkpoint_result(
+                result,
+                batch.index,
+            )
             checkpoint.save(token)
+        if (
+            status == SearchStatus.SUCCESS.value
+            and should_stop is not None
+            and should_stop(results)
+        ):
+            return _summary(
+                results,
+                batches,
+                token,
+                checkpoint,
+                human_intervention_required,
+                limit_reached=True,
+            )
 
     if checkpoint is not None:
         checkpoint.clear()
@@ -411,16 +566,27 @@ def _summary(results: list[dict[str, Any]], batches: Sequence[ExpressionBatch],
              token: str, checkpoint: BatchCheckpoint | None,
              human_intervention_required: bool,
              stopped_at: ExpressionBatch | None = None,
-             stopped_result: dict[str, Any] | None = None) -> dict[str, Any]:
+             stopped_result: dict[str, Any] | None = None,
+             limit_reached: bool = False,
+             terminal_status: str | None = None) -> dict[str, Any]:
     if stopped_at is not None and checkpoint is not None:
         checkpoint.save(token)
+    public_stopped_result = None
+    if stopped_result is not None:
+        public_stopped_result = {
+            name: stopped_result[name]
+            for name in ("status", "index", "detail")
+            if name in stopped_result
+        }
     return {
         "batches_completed": len(results),
         "batches_total": len(batches),
         "complete": stopped_at is None,
         "stopped_at_batch": stopped_at.index if stopped_at is not None else None,
-        "stopped_result": stopped_result,
+        "stopped_result": public_stopped_result,
         "human_intervention_required": human_intervention_required,
+        "limit_reached": limit_reached,
+        "terminal_status": terminal_status,
         "results": results,
     }
 

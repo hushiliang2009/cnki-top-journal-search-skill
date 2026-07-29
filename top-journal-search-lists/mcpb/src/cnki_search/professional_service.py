@@ -21,7 +21,7 @@ from typing import Any
 
 from catalog_lookup import DEFAULT_CATALOG, journals_by_group
 
-from .models import PaperRecord, SearchStatus
+from .models import PaperRecord, SearchStatus, is_verifiable_publication_year
 from .professional import (
     DEFAULT_MAX_EXPRESSION_CHARS,
     ExpressionBatch,
@@ -52,7 +52,6 @@ class BatchOutcome:
     incomplete_records: tuple[PaperRecord, ...] = ()
     total_rows: int = 0
     excluded_non_journal_rows: int = 0
-    result_url: str | None = None
     detail: str | None = None
 
 
@@ -107,9 +106,9 @@ class CnkiProfessionalSearchService:
 
     async def _run(self, batches: list[ExpressionBatch], limit: int) -> dict[str, Any]:
         async def execute(batch: ExpressionBatch) -> dict[str, Any]:
-            status, html, url = await self.executor(batch)
+            status, html, _url = await self.executor(batch)
             if status != SearchStatus.SUCCESS.value:
-                return {"index": batch.index, "status": status, "result_url": url}
+                return {"index": batch.index, "status": status}
             try:
                 parsed = parse_public_result_page(
                     html, query=batch.expression, limit=limit
@@ -118,69 +117,87 @@ class CnkiProfessionalSearchService:
                 return {
                     "index": batch.index,
                     "status": SearchStatus.PAGE_CONTRACT_CHANGED.value,
-                    "result_url": url,
                     "detail": str(exc),
                 }
             return {
                 "index": batch.index,
                 "status": SearchStatus.SUCCESS.value,
-                "result_url": url,
                 "total_rows": parsed.total_rows,
                 "excluded_non_journal_rows": parsed.excluded_non_journal_rows,
                 "records": parsed.records,
                 "incomplete_records": parsed.incomplete_records,
             }
 
+        def reached_limit(results: list[dict[str, Any]]) -> bool:
+            unique = {
+                _record_key(record)
+                for item in results
+                for record in item.get("records", ())
+            }
+            return len(unique) >= limit
+
         schedule = await run_batches(batches, execute, on_challenge=self.on_challenge,
-                                     checkpoint=self.checkpoint, throttle=self.throttle)
+                                     checkpoint=self.checkpoint, throttle=self.throttle,
+                                     should_stop=reached_limit)
         return self._merge(schedule, batches)
 
     def _merge(self, schedule: dict[str, Any], batches: list[ExpressionBatch]) -> dict[str, Any]:
         records: list[PaperRecord] = []
         incomplete: list[PaperRecord] = []
         total_rows = excluded = 0
-        seen: set[tuple[str, str, int | None]] = set()
+        positions: dict[tuple[str, str, int | None], int] = {}
         for item in schedule["results"]:
             total_rows += item.get("total_rows", 0)
             excluded += item.get("excluded_non_journal_rows", 0)
             for record in item.get("records", ()):
-                key = (record.title, record.journal_raw, record.publication_year)
-                if key in seen:          # 同一篇论文可能落在相邻批次的边界上
-                    continue
-                seen.add(key)
-                records.append(record)
+                key = _record_key(record)
+                position = positions.get(key)
+                if position is None:
+                    positions[key] = len(records)
+                    records.append(record)
+                elif (
+                    _record_completeness_score(record)
+                    > _record_completeness_score(records[position])
+                ):
+                    records[position] = record
             incomplete.extend(item.get("incomplete_records", ()))
 
         annotated = annotate_and_sort_records(records, catalog=self.catalog)
         stopped_result = schedule.get("stopped_result")
-        contract_changed = (
-            stopped_result
-            if stopped_result
-            and stopped_result.get("status")
-            == SearchStatus.PAGE_CONTRACT_CHANGED.value
-            else None
-        )
-        complete = schedule["complete"] and contract_changed is None
-        if contract_changed is not None:
+        terminal_status = schedule["terminal_status"]
+        complete = schedule["complete"] and terminal_status is None
+        if terminal_status is not None:
             status = (
-                SearchStatus.PARTIAL
+                SearchStatus.PARTIAL.value
                 if annotated
-                else SearchStatus.PAGE_CONTRACT_CHANGED
+                else terminal_status
             )
         elif not annotated:
             status = (
-                SearchStatus.NO_RESULTS if complete else SearchStatus.PARTIAL
+                SearchStatus.NO_RESULTS.value
+                if complete
+                else SearchStatus.PARTIAL.value
             )
         else:
-            status = SearchStatus.SUCCESS if complete and not incomplete else SearchStatus.PARTIAL
+            status = (
+                SearchStatus.SUCCESS.value
+                if complete and not incomplete
+                else SearchStatus.PARTIAL.value
+            )
         result = {
-            "ok": status is SearchStatus.PARTIAL or contract_changed is None,
+            "ok": status in {
+                SearchStatus.SUCCESS.value,
+                SearchStatus.NO_RESULTS.value,
+                SearchStatus.PARTIAL.value,
+            },
             "mode": "webvpn",
-            "status": status.value,
+            "status": status,
             "complete": complete,
             "batches_completed": schedule["batches_completed"],
             "batches_total": schedule["batches_total"],
             "stopped_at_batch": schedule["stopped_at_batch"],
+            "limit_reached": schedule["limit_reached"],
+            "terminal_status": terminal_status,
             # 显式暴露：本模式必须有人值守，调用方不得据此安排无人值守任务
             "human_intervention_required": schedule["human_intervention_required"],
             "expressions": [batch.expression for batch in batches],
@@ -189,17 +206,44 @@ class CnkiProfessionalSearchService:
             "records": [record.to_dict() for record in annotated],
             "incomplete_records": [record.to_dict() for record in incomplete],
         }
-        if contract_changed is not None:
-            terminal_detail = contract_changed.get(
-                "detail"
-            ) or "知网页面结构已变化"
-            result["terminal_status"] = (
-                SearchStatus.PAGE_CONTRACT_CHANGED.value
+        if terminal_status is not None:
+            terminal_detail = (
+                stopped_result.get("detail")
+                if stopped_result is not None
+                else None
             )
-            result["terminal_detail"] = terminal_detail
-            if status is SearchStatus.PAGE_CONTRACT_CHANGED:
+            if (
+                not terminal_detail
+                and terminal_status == SearchStatus.PAGE_CONTRACT_CHANGED.value
+            ):
+                terminal_detail = "知网页面结构已变化"
+            if terminal_detail:
+                result["terminal_detail"] = terminal_detail
+            if status == terminal_status and terminal_detail:
                 result["detail"] = terminal_detail
         return result
+
+
+def _record_key(record: PaperRecord) -> tuple[str, str, int | None]:
+    return (
+        " ".join(record.title.split()).casefold(),
+        " ".join(record.journal_raw.split()).casefold(),
+        record.publication_year,
+    )
+
+
+def _record_completeness_score(record: PaperRecord) -> int:
+    return sum(
+        (
+            bool(record.title.strip()),
+            bool(record.journal_raw.strip()),
+            is_verifiable_publication_year(record.publication_year),
+            len(record.authors),
+            bool(record.publication_date.strip()),
+            record.citations is not None,
+            record.downloads is not None,
+        )
+    )
 
 
 def build_group_plans(

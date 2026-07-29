@@ -1,10 +1,12 @@
 import asyncio
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
 from cnki_search import webvpn
-from cnki_search.models import SearchStatus
+from cnki_search.models import PaperRecord, SearchStatus
 from cnki_search.professional import build_batches, build_expression
 
 
@@ -23,6 +25,23 @@ def _ok(batch) -> dict:
 
 def _challenge(batch) -> dict:
     return {"status": SearchStatus.CHALLENGE_DETECTED.value, "batch": batch.index}
+
+
+def _record(batch, *, title: str = "数字经济研究") -> dict:
+    return PaperRecord(
+        title=title,
+        authors=["张三"],
+        journal_raw="管理世界",
+        publication_date="2025-03-11",
+        publication_year=2025,
+        document_type="期刊",
+        citations=3,
+        downloads=5,
+        is_online_first=False,
+        result_rank=1,
+        source_database="CNKI",
+        search_query=batch.expression,
+    ).to_dict()
 
 
 # ── 配置校验 ────────────────────────────────────────────────────────────────
@@ -49,6 +68,34 @@ def test_all_batches_run_in_order_when_nothing_blocks() -> None:
     assert summary["complete"] is True
     assert summary["batches_completed"] == summary["batches_total"] == 3
     assert summary["human_intervention_required"] is False
+    assert summary["limit_reached"] is False
+    assert summary["terminal_status"] is None
+
+
+def test_limit_stops_before_submitting_remaining_batches() -> None:
+    batches = _batches(3)
+    executor_calls: list[int] = []
+
+    async def execute(batch):
+        executor_calls.append(batch.index)
+        return {
+            "status": SearchStatus.SUCCESS.value,
+            "records": [_record(batch)],
+        }
+
+    summary = asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            should_stop=lambda results: len(results) == 1,
+        )
+    )
+
+    assert summary["limit_reached"] is True
+    assert summary["batches_completed"] == 1
+    assert summary["complete"] is True
+    assert summary["terminal_status"] is None
+    assert executor_calls == [1]
 
 
 def test_challenge_pauses_for_human_then_resumes_the_same_batch() -> None:
@@ -138,6 +185,83 @@ def test_page_contract_change_stops_before_later_batches() -> None:
     assert summary["stopped_at_batch"] == 1
     assert summary["batches_completed"] == 0
     assert summary["stopped_result"]["status"] == SearchStatus.PAGE_CONTRACT_CHANGED.value
+    assert summary["limit_reached"] is False
+    assert summary["terminal_status"] == SearchStatus.PAGE_CONTRACT_CHANGED.value
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        SearchStatus.NO_DATA_RETRY_LATER,
+        SearchStatus.FORBIDDEN,
+        SearchStatus.RATE_LIMITED,
+    ],
+)
+def test_terminal_status_stops_before_later_batches(status: SearchStatus) -> None:
+    batches = _batches(2)
+    seen: list[int] = []
+
+    async def execute(batch):
+        seen.append(batch.index)
+        return {"status": status.value, "batch": batch.index}
+
+    summary = asyncio.run(webvpn.run_batches(batches, execute))
+
+    assert seen == [1]
+    assert summary["complete"] is False
+    assert summary["batches_completed"] == 0
+    assert summary["terminal_status"] == status.value
+    assert summary["limit_reached"] is False
+
+
+def test_no_results_is_completed_and_later_batches_continue() -> None:
+    batches = _batches(2)
+    seen: list[int] = []
+
+    async def execute(batch):
+        seen.append(batch.index)
+        if batch.index == 1:
+            return {"status": SearchStatus.NO_RESULTS.value, "records": []}
+        return _ok(batch)
+
+    summary = asyncio.run(webvpn.run_batches(batches, execute))
+
+    assert seen == [1, 2]
+    assert summary["complete"] is True
+    assert summary["batches_completed"] == 2
+    assert summary["terminal_status"] is None
+
+
+def test_network_error_retries_once_with_fresh_throttle_wait() -> None:
+    batches = _batches(2)
+    attempts: list[int] = []
+
+    class CountingThrottle:
+        def __init__(self) -> None:
+            self.wait_calls = 0
+
+        async def wait(self) -> float:
+            self.wait_calls += 1
+            return 0.0
+
+        def record(self, *, challenged: bool = False) -> None:
+            assert challenged is False
+
+    throttle = CountingThrottle()
+
+    async def execute(batch):
+        attempts.append(batch.index)
+        return {"status": SearchStatus.NETWORK_ERROR.value}
+
+    summary = asyncio.run(
+        webvpn.run_batches(batches, execute, throttle=throttle)
+    )
+
+    assert attempts == [1, 1]
+    assert throttle.wait_calls == 2
+    assert summary["batches_completed"] == 0
+    assert summary["terminal_status"] == SearchStatus.NETWORK_ERROR.value
+    assert summary["limit_reached"] is False
 
 
 def test_empty_batch_list_is_rejected() -> None:
@@ -196,6 +320,143 @@ def test_checkpoint_is_discarded_when_the_query_changes(tmp_path: Path) -> None:
         other, execute_other, checkpoint=webvpn.BatchCheckpoint(state)))
     assert seen == [1]                        # 换了检索条件，旧断点不得复用
     assert summary["complete"] is True
+
+
+def test_checkpoint_contains_no_expression_url_html_cookie_or_path(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(2)
+
+    async def execute(batch):
+        if batch.index == 2:
+            return _challenge(batch)
+        return {
+            "status": SearchStatus.SUCCESS.value,
+            "index": batch.index,
+            "records": [_record(batch)],
+            "incomplete_records": [],
+            "result_url": "https://webvpn.example.edu.cn/result",
+            "html": "<table>secret</table>",
+            "cookie": "ticket=secret",
+            "profile_path": "C:\\Users\\example\\profile",
+        }
+
+    asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    text = state.read_text(encoding="utf-8")
+    payload = json.loads(text)
+    assert payload["token"] == hashlib.sha256(
+        "\n".join(batch.expression for batch in batches).encode("utf-8")
+    ).hexdigest()
+    assert set(payload["completed"]["1"]) == {
+        "status",
+        "index",
+        "total_rows",
+        "excluded_non_journal_rows",
+        "records",
+        "incomplete_records",
+    }
+    for forbidden in (
+        "SU %=",
+        "https://",
+        "<table",
+        "cookie",
+        "profile_path",
+        "C:\\Users",
+    ):
+        assert forbidden.casefold() not in text.casefold()
+
+
+def test_checkpoint_records_are_restored_as_paper_records(tmp_path: Path) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(2)
+
+    async def interrupted(batch):
+        if batch.index == 2:
+            return _challenge(batch)
+        return {
+            "status": SearchStatus.SUCCESS.value,
+            "index": batch.index,
+            "records": [_record(batch)],
+            "incomplete_records": [],
+        }
+
+    asyncio.run(
+        webvpn.run_batches(
+            batches,
+            interrupted,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    async def resumed(batch):
+        return {
+            "status": SearchStatus.SUCCESS.value,
+            "index": batch.index,
+            "records": [],
+            "incomplete_records": [],
+        }
+
+    summary = asyncio.run(
+        webvpn.run_batches(
+            batches,
+            resumed,
+            checkpoint=webvpn.BatchCheckpoint(state),
+            should_stop=lambda results: len(results) == 1,
+        )
+    )
+
+    record = summary["results"][0]["records"][0]
+    assert isinstance(record, PaperRecord)
+    assert record.search_query == batches[0].expression
+
+
+def test_checkpoint_resave_sanitizes_loaded_completed_payload(tmp_path: Path) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(2)
+    token = hashlib.sha256(
+        "\n".join(batch.expression for batch in batches).encode("utf-8")
+    ).hexdigest()
+    state.write_text(
+        json.dumps(
+            {
+                "token": token,
+                "completed": {
+                    "1": {
+                        "status": SearchStatus.SUCCESS.value,
+                        "index": 1,
+                        "records": [_record(batches[0])],
+                        "result_url": "https://example.invalid/result",
+                        "cookie": "ticket=secret",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    async def execute(batch):
+        return _challenge(batch)
+
+    asyncio.run(
+        webvpn.run_batches(
+            batches,
+            execute,
+            checkpoint=webvpn.BatchCheckpoint(state),
+        )
+    )
+
+    text = state.read_text(encoding="utf-8")
+    for forbidden in ("SU %=", "https://", "cookie"):
+        assert forbidden.casefold() not in text.casefold()
 
 
 def test_checkpoint_is_cleared_after_a_complete_run(tmp_path: Path) -> None:

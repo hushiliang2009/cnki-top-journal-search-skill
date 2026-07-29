@@ -28,6 +28,33 @@ RESULT_TEMPLATE = """
 """
 
 
+def _result_page(
+    *,
+    title: str,
+    journal: str,
+    authors: tuple[str, ...] = (),
+    publication_date: str = "2025-03-11",
+    citations: int | None = None,
+    downloads: int | None = None,
+) -> str:
+    author_links = "".join(f"<a>{author}</a>" for author in authors)
+    citation_text = "" if citations is None else str(citations)
+    download_text = "" if downloads is None else str(downloads)
+    return f"""
+    <table class="result-table-list"><tbody>
+      <tr>
+        <td class="name"><a>{title}</a></td>
+        <td class="author">{author_links}</td>
+        <td class="source"><a>{journal}</a></td>
+        <td class="date">{publication_date}</td>
+        <td class="data">期刊</td>
+        <td class="quote">{citation_text}</td>
+        <td class="download">{download_text}</td>
+      </tr>
+    </tbody></table>
+    """
+
+
 def _executor(pages: list[tuple[str, str]], seen: list[ExpressionBatch] | None = None):
     async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
         if seen is not None:
@@ -121,7 +148,7 @@ def test_cssci_group_uses_one_facet_plan() -> None:
 
 
 def test_duplicate_records_across_batches_are_merged_once() -> None:
-    async def execute(_expression: str) -> tuple[str, str, str]:
+    async def execute(_batch: ExpressionBatch) -> tuple[str, str, str]:
         return (SearchStatus.SUCCESS.value,
                 RESULT_TEMPLATE.format(title="同一篇论文", journal="管理评论"),
                 "https://example.invalid/")
@@ -132,8 +159,130 @@ def test_duplicate_records_across_batches_are_merged_once() -> None:
     assert titles.count("同一篇论文") == 1
 
 
+def test_limit_stops_before_submitting_remaining_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batches = [
+        ExpressionBatch(index, 3, (), f"SU %= '主题{index}'")
+        for index in range(1, 4)
+    ]
+    monkeypatch.setattr(
+        service_module,
+        "build_group_plans",
+        lambda *_args, **_kwargs: batches,
+    )
+    executor_calls: list[int] = []
+
+    async def execute(batch: ExpressionBatch) -> tuple[str, str, str]:
+        executor_calls.append(batch.index)
+        return (
+            SearchStatus.SUCCESS.value,
+            _result_page(
+                title=f"论文{batch.index}",
+                journal="管理世界",
+                authors=("张三",),
+            ),
+            "https://example.invalid/result",
+        )
+
+    result = asyncio.run(
+        CnkiProfessionalSearchService(execute).search_group(
+            "数字经济",
+            service_module.CHINESE_TOP_GROUP,
+            limit=1,
+        )
+    )
+
+    assert result["limit_reached"] is True
+    assert result["terminal_status"] is None
+    assert result["batches_completed"] == 1
+    assert executor_calls == [1]
+    assert "result_url" not in result
+
+
+def test_limit_counts_normalized_unique_formal_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batches = [
+        ExpressionBatch(index, 3, (), f"SU %= '主题{index}'")
+        for index in range(1, 4)
+    ]
+    monkeypatch.setattr(
+        service_module,
+        "build_group_plans",
+        lambda *_args, **_kwargs: batches,
+    )
+    executor_calls: list[int] = []
+
+    async def execute(batch: ExpressionBatch) -> tuple[str, str, str]:
+        executor_calls.append(batch.index)
+        if batch.index == 1:
+            html = (
+                _result_page(title="Alpha Study", journal="Journal A")
+                + _result_page(title="alpha study", journal="journal a")
+            )
+        else:
+            html = _result_page(title="Beta Study", journal="Journal B")
+        return (SearchStatus.SUCCESS.value, html, "")
+
+    result = asyncio.run(
+        CnkiProfessionalSearchService(execute).search_group(
+            "数字经济",
+            service_module.CHINESE_TOP_GROUP,
+            limit=2,
+        )
+    )
+
+    assert executor_calls == [1, 2]
+    assert result["limit_reached"] is True
+    assert result["batches_completed"] == 2
+    assert len(result["records"]) == 2
+
+
+def test_duplicate_keeps_more_complete_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batches = [
+        ExpressionBatch(index, 2, (), f"SU %= '主题{index}'")
+        for index in range(1, 3)
+    ]
+    monkeypatch.setattr(
+        service_module,
+        "build_group_plans",
+        lambda *_args, **_kwargs: batches,
+    )
+
+    async def execute(batch: ExpressionBatch) -> tuple[str, str, str]:
+        if batch.index == 1:
+            html = _result_page(
+                title="Digital Economy Study",
+                journal="Management World",
+            )
+        else:
+            html = _result_page(
+                title=" digital economy study ",
+                journal="management world",
+                authors=("张三",),
+                citations=8,
+                downloads=12,
+            )
+        return (SearchStatus.SUCCESS.value, html, "")
+
+    result = asyncio.run(
+        CnkiProfessionalSearchService(execute).search_group(
+            "数字经济",
+            service_module.CHINESE_TOP_GROUP,
+        )
+    )
+
+    assert len(result["records"]) == 1
+    assert result["records"][0]["authors"] == ["张三"]
+    assert result["records"][0]["citations"] == 8
+    assert result["records"][0]["downloads"] == 12
+
+
 def test_challenge_without_handler_reports_partial_and_flags_human_intervention() -> None:
-    async def execute(_expression: str) -> tuple[str, str, str]:
+    async def execute(_batch: ExpressionBatch) -> tuple[str, str, str]:
         return (SearchStatus.CHALLENGE_DETECTED.value, "", "https://kns.cnki.net/verify/home")
 
     service = CnkiProfessionalSearchService(execute)
@@ -142,7 +291,9 @@ def test_challenge_without_handler_reports_partial_and_flags_human_intervention(
     assert result["human_intervention_required"] is True
     assert result["stopped_at_batch"] == 1
     assert result["records"] == []
-    assert result["status"] == SearchStatus.PARTIAL.value
+    assert result["status"] == SearchStatus.CHALLENGE_DETECTED.value
+    assert result["terminal_status"] == SearchStatus.CHALLENGE_DETECTED.value
+    assert result["limit_reached"] is False
 
 
 def test_page_contract_status_stays_an_error_instead_of_becoming_no_results() -> None:
