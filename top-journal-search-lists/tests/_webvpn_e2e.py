@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from contextlib import redirect_stderr, redirect_stdout
-import io
+from collections.abc import Iterator
+from contextlib import contextmanager
 import json
 import math
+import os
 import sys
 import unicodedata
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -178,6 +179,81 @@ def _emit_safe_error() -> int:
     return 1
 
 
+@contextmanager
+def _silence_process_output() -> Iterator[None]:
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    saved_stdout_fd: int | None = None
+    saved_stderr_fd: int | None = None
+    null_stdout = None
+    null_stderr = None
+
+    try:
+        try:
+            original_stdout.flush()
+            original_stderr.flush()
+            stdout_fd = original_stdout.fileno()
+            stderr_fd = original_stderr.fileno()
+            if (
+                type(stdout_fd) is not int
+                or stdout_fd < 0
+                or type(stderr_fd) is not int
+                or stderr_fd < 0
+            ):
+                _reject_unsafe_output()
+        except BaseException:
+            _reject_unsafe_output()
+
+        saved_stdout_fd = os.dup(1)
+        saved_stderr_fd = os.dup(2)
+        null_stdout = open(os.devnull, "w", encoding="utf-8", newline="\n")
+        null_stderr = open(os.devnull, "w", encoding="utf-8", newline="\n")
+        os.dup2(null_stdout.fileno(), 1)
+        os.dup2(null_stderr.fileno(), 2)
+        sys.stdout = null_stdout
+        sys.stderr = null_stderr
+        yield
+    finally:
+        active_exception = sys.exc_info()[0] is not None
+        cleanup_failed = False
+
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except BaseException:
+                cleanup_failed = True
+
+        if saved_stdout_fd is not None:
+            try:
+                os.dup2(saved_stdout_fd, 1)
+            except BaseException:
+                cleanup_failed = True
+        if saved_stderr_fd is not None:
+            try:
+                os.dup2(saved_stderr_fd, 2)
+            except BaseException:
+                cleanup_failed = True
+
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+
+        for stream in (null_stdout, null_stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except BaseException:
+                    cleanup_failed = True
+        for descriptor in (saved_stdout_fd, saved_stderr_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except BaseException:
+                    cleanup_failed = True
+
+        if cleanup_failed and not active_exception:
+            _reject_unsafe_output()
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
@@ -187,10 +263,8 @@ def main(argv: list[str] | None = None) -> int:
         return _emit_safe_error()
     except BaseException:
         return _emit_safe_error()
-    isolated_stdout = io.StringIO()
-    isolated_stderr = io.StringIO()
     try:
-        with redirect_stdout(isolated_stdout), redirect_stderr(isolated_stderr):
+        with _silence_process_output():
             summary = asyncio.run(_run(args))
         print(json.dumps(summary, ensure_ascii=False, allow_nan=False))
         return 0
