@@ -85,7 +85,18 @@ def test_async_session_cancellation_closes_every_resource() -> None:
     asyncio.run(scenario())
 
 
-def test_async_service_timeout_returns_network_error_and_queue_cancellation_does_not_start() -> None:
+def test_async_service_timeout_returns_network_error_and_queue_cancellation_does_not_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 本用例断言"超时发生时会话恰好建立了一次"，因此 100 毫秒预算必须够走到建会话。
+    # search() 在建会话前串行做两次 to_thread：目录校验与缓存查询。目录校验无缓存，
+    # 每次重新解析两万多行目录（本机约 14 毫秒），在负载中的 CI 上会被放大到可能
+    # 超过整个预算——届时会话根本来不及建立，started 为 0，用例随机变红。
+    # 这里把目录校验置空，使预算只覆盖被测的超时与会话语义。
+    # "入口超时覆盖慢目录"这一产品行为另有专门用例
+    # test_entry_timeout_covers_slow_catalog_and_cache_in_both_layouts 覆盖，不受影响。
+    monkeypatch.setattr("cnki_search.service.validate_catalog", lambda _path: None)
+
     async def scenario() -> None:
         started = 0
         entered = asyncio.Event()
