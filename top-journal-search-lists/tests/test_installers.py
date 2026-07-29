@@ -438,6 +438,9 @@ def test_readme_documents_installer_safety_requirements(skill_root: Path) -> Non
         "离线启动",
         "恢复原有 Skill 和配置",
         "最近 3 份",
+        "`CNKI_WEBVPN_HOME`",
+        "`CNKI_WEBVPN_PROFILE`",
+        "服务重启后需要重新登录",
     ):
         assert text in readme
 

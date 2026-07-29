@@ -115,7 +115,7 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
     assert manifest["manifest_version"] == "0.4"
     assert manifest["name"] == "cnki-search"
     assert manifest["display_name"] == "CNKI Public Theme Search"
-    assert manifest["version"] == "0.4.0"
+    assert manifest["version"] == "0.4.1"
     assert manifest["description"] == (
         "Public CNKI theme search with master-journal classification; no login or downloads."
     )
@@ -139,7 +139,7 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
 
 def test_mcpb_pyproject_declares_public_runtime_dependencies(skill_root: Path) -> None:
     text = (skill_root / "mcpb/pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.4.0"' in text
+    assert 'version = "0.4.1"' in text
     assert 'requires-python = ">=3.11"' in text
     assert '"mcp>=1,<2"' in text
     assert '"playwright>=1.45,<2"' in text
@@ -151,8 +151,8 @@ def test_all_runtime_versions_and_release_allowlist_are_consistent(skill_root: P
         "scripts/cnki_search/__init__.py",
         "mcpb/src/cnki_search/__init__.py",
     ):
-        assert '__version__ = "0.4.0"' in (skill_root / relative).read_text(encoding="utf-8")
-    assert 'name = "cnki-search-mcp"\nversion = "0.4.0"' in (
+        assert '__version__ = "0.4.1"' in (skill_root / relative).read_text(encoding="utf-8")
+    assert 'name = "cnki-search-mcp"\nversion = "0.4.1"' in (
         skill_root / "mcpb/uv.lock"
     ).read_text(encoding="utf-8")
     assert ".mcpbignore" in _load_builder(skill_root).MCPB_ALLOWLIST
@@ -186,6 +186,7 @@ def test_release_builder_creates_clean_archives(skill_root: Path, tmp_path: Path
         token in "\n".join(members).casefold()
         for token in ("__pycache__", ".pytest_cache", ".venv", "local state", "details.py", "downloads.py")
     )
+    assert not any(member.endswith("tests/_webvpn_e2e.py") for member in members)
 
 
 def test_release_build_uses_only_explicit_output_directory(skill_root: Path, tmp_path: Path) -> None:

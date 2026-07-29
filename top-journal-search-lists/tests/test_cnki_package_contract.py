@@ -142,8 +142,11 @@ def _run_layout_contract(layout_root: Path) -> dict[str, object]:
         from pathlib import Path
 
         import catalog_lookup
+        from cnki_search.mcp_server import CnkiMcpServer
         from cnki_search.models import SearchRequest
+        from cnki_search.professional_runtime import build_professional_runtime_from_env
         from cnki_search.session import CNKI_HOME_URL
+        from mcp.server.fastmcp import FastMCP
 
         invalid_limits = []
         for limit in (0, 51):
@@ -152,11 +155,18 @@ def _run_layout_contract(layout_root: Path) -> dict[str, object]:
             except ValueError:
                 invalid_limits.append(limit)
         request = SearchRequest("  topic   phrase  ", 1)
+        mcp = CnkiMcpServer().build_fastmcp(FastMCP)
+        schemas = {
+            tool.name: tool.parameters
+            for tool in mcp._tool_manager.list_tools()
+        }
         print(json.dumps({
             "home_url": CNKI_HOME_URL,
             "normalized_query": request.query,
             "invalid_limits": invalid_limits,
             "catalog_exists": Path(catalog_lookup.DEFAULT_CATALOG).is_file(),
+            "professional_runtime_callable": callable(build_professional_runtime_from_env),
+            "schemas": schemas,
         }))
         """
     )
@@ -175,15 +185,23 @@ def _run_layout_contract(layout_root: Path) -> dict[str, object]:
 
 
 def test_skill_and_mcpb_layouts_independently_meet_runtime_contract(skill_root: Path) -> None:
+    states = {}
     for layout_name, layout_root in {
         "skill": skill_root / "scripts",
         "mcpb": skill_root / "mcpb/src",
     }.items():
         state = _run_layout_contract(layout_root)
+        states[layout_name] = state
         assert state["home_url"] == "https://www.cnki.net/", layout_name
         assert state["normalized_query"] == "topic phrase", layout_name
         assert state["invalid_limits"] == [0, 51], layout_name
         assert state["catalog_exists"] is True, layout_name
+        assert state["professional_runtime_callable"] is True, layout_name
+        assert set(state["schemas"]) == {"cnki_search", "cnki_professional_search"}
+        professional = state["schemas"]["cnki_professional_search"]["properties"]
+        assert professional["group"]["default"] == "chinese_top_journals", layout_name
+        assert professional["limit"]["maximum"] == 50, layout_name
+    assert states["skill"]["schemas"] == states["mcpb"]["schemas"]
 
 
 def test_helper_scripts_reference_only_existing_runtime_symbols(skill_root: Path) -> None:
@@ -243,6 +261,120 @@ def test_webvpn_probe_uses_current_ephemeral_config_contract(
         None,
     )]
     assert output.is_file()
+
+
+def test_webvpn_e2e_helper_prints_only_the_sanitized_summary(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    calls: list[tuple[object, ...]] = []
+
+    class Runtime:
+        closed = False
+
+        async def search_group(
+            self, topic: str, group: str, *, limit: int,
+            year_from: int | None, year_to: int | None,
+        ) -> dict[str, object]:
+            calls.append((topic, group, limit, year_from, year_to))
+            return {
+                "status": "success",
+                "batches_completed": 1,
+                "batches_total": 1,
+                "records": [{
+                    "title": "数字化转型与企业创新",
+                    "journal_raw": "管理世界",
+                    "publication_year": 2025,
+                    "priority_level": 6,
+                }],
+            }
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    runtime = Runtime()
+
+    async def build_runtime() -> Runtime:
+        return runtime
+
+    monkeypatch.setenv(
+        "CNKI_WEBVPN_HOME", "https://webvpn.example.edu.cn/https/abc/"
+    )
+    monkeypatch.setattr(
+        helper, "build_professional_runtime_from_env", build_runtime
+    )
+
+    exit_code = helper.main([
+        "--topic", "数字化转型",
+        "--group", "chinese_top_journals",
+        "--limit", "5",
+        "--year-from", "2020",
+        "--year-to", "2025",
+    ])
+
+    assert exit_code == 0
+    assert calls == [
+        ("数字化转型", "chinese_top_journals", 5, 2020, 2025)
+    ]
+    assert runtime.closed is True
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "success",
+        "group": "chinese_top_journals",
+        "record_count": 1,
+        "batches_completed": 1,
+        "batches_total": 1,
+        "sample": [{
+            "title": "数字化转型与企业创新",
+            "journal_raw": "管理世界",
+            "publication_year": 2025,
+            "priority_level": 6,
+        }],
+    }
+
+
+@pytest.mark.parametrize(
+    "unsafe_result",
+    [
+        {
+            "status": "success",
+            "records": [{"title": "题名", "result_url": "https://example.invalid"}],
+        },
+        {
+            "status": "success",
+            "records": [{"title": "题名", "diagnostic": r"C:\Users\person\Cookie"}],
+        },
+    ],
+)
+def test_webvpn_e2e_helper_rejects_sensitive_keys_and_absolute_paths(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    unsafe_result: dict[str, object],
+) -> None:
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+
+    class Runtime:
+        async def search_group(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+            return unsafe_result
+
+        async def aclose(self) -> None:
+            pass
+
+    async def build_runtime() -> Runtime:
+        return Runtime()
+
+    monkeypatch.setattr(
+        helper, "build_professional_runtime_from_env", build_runtime
+    )
+    with pytest.raises(ValueError, match="敏感|绝对路径"):
+        helper.main([
+            "--topic", "数字化转型",
+            "--group", "chinese_top_journals",
+            "--limit", "5",
+        ])
+    assert capsys.readouterr().out == ""
 
 
 _SMOKE_RESULT_HTML = """
@@ -377,6 +509,31 @@ def test_webvpn_documentation_states_its_constraints(skill_root: Path) -> None:
         # 底线不随模式改变：机构合法认证 ≠ 检测规避
         for statement in ("不伪造", "不轮换代理", "不自动破解"):
             assert statement in content, f"{relative} 缺少检测规避禁令：{statement}"
+
+
+def test_webvpn_documentation_matches_the_ephemeral_runtime_contract(
+    skill_root: Path,
+) -> None:
+    required = (
+        "CNKI_WEBVPN_HOME",
+        "CNKI_WEBVPN_PROFILE",
+        "非持久化",
+        "服务重启后需要重新登录",
+        "13 本",
+        "精确",
+        "来源类别",
+        "no_data_retry_later",
+        "不等于空结果",
+        "ai4scholar",
+        "不登录",
+        "不下载",
+        "人工值守",
+        "不可用于定时任务",
+    )
+    for relative in DOCUMENTATION_FILES:
+        content = (skill_root / relative).read_text(encoding="utf-8")
+        for statement in required:
+            assert statement in content, f"{relative} 缺少运行时约束：{statement}"
 
 
 def test_documentation_describes_only_ephemeral_memory_cache(skill_root: Path) -> None:
