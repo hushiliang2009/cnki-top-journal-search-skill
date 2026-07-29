@@ -23,7 +23,7 @@ import asyncio
 import contextlib
 import json
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -293,6 +293,16 @@ async def run_batches(
             challenged = result.get("status") == SearchStatus.CHALLENGE_DETECTED.value
             if throttle is not None:
                 throttle.record(challenged=challenged)
+            if result.get("status") == SearchStatus.PAGE_CONTRACT_CHANGED.value:
+                return _summary(
+                    results,
+                    batches,
+                    token,
+                    checkpoint,
+                    human_intervention_required,
+                    stopped_at=batch,
+                    stopped_result=result,
+                )
             if not challenged:
                 break
             human_intervention_required = True
@@ -317,7 +327,8 @@ async def run_batches(
 def _summary(results: list[dict[str, Any]], batches: Sequence[ExpressionBatch],
              token: str, checkpoint: BatchCheckpoint | None,
              human_intervention_required: bool,
-             stopped_at: ExpressionBatch | None = None) -> dict[str, Any]:
+             stopped_at: ExpressionBatch | None = None,
+             stopped_result: dict[str, Any] | None = None) -> dict[str, Any]:
     if stopped_at is not None and checkpoint is not None:
         checkpoint.save(token)
     return {
@@ -325,6 +336,7 @@ def _summary(results: list[dict[str, Any]], batches: Sequence[ExpressionBatch],
         "batches_total": len(batches),
         "complete": stopped_at is None,
         "stopped_at_batch": stopped_at.index if stopped_at is not None else None,
+        "stopped_result": stopped_result,
         "human_intervention_required": human_intervention_required,
         "results": results,
     }
@@ -446,39 +458,78 @@ class ProfessionalSearchPage:
     def __init__(self, page: Any) -> None:
         self.page = page
 
-    async def open_from_home(self, context: Any, *, timeout_seconds: float = 20.0) -> Any:
+    async def open_from_home(
+        self,
+        context: Any,
+        *,
+        timeout_seconds: float = 20.0,
+        preserve_home: bool = False,
+    ) -> Any:
         """从知网首页点进高级检索。**不要改成直接 goto 高级检索地址。**
 
         高级检索通常在新标签页打开，且新页面需要时间加载。固定 sleep 是在赌
         网络速度：慢一点就会在 DOM 尚未就绪时去找标签，报出"未找到专业检索"
         这种指向完全错误的错误。这里改为轮询等待新标签页出现并完成加载。
+
+        ``preserve_home`` 用于批次运行时：先在同一浏览器上下文创建批次自有页面，
+        打开当前首页地址，再从该页点击高级检索。这样即使站点改为同页跳转，
+        保留首页也不会被覆盖。方法只把返回页的所有权交给调用方；识别失败时，
+        本次点击产生的所有页面均在抛出异常前关闭。
         """
-        origin = self.page
-        link = self.page.get_by_role("link", name=ADV_SEARCH_LINK_TEXT)
-        if await await_maybe(link.count()) < 1:
-            raise WebVpnNavigationError("知网首页未找到「高级检索」入口")
-        await await_maybe(link.first.click())
-
-        # 不能认"第一个新出现的标签页"：站点会短暂开一个中转标签页再关掉，
-        # 抓到它就会让驱动指向一个已关闭的页面，后续报错还指向完全错误的原因。
-        # 判据改为"仍存活、且确实呈现出高级检索内容"。
-        deadline = time.monotonic() + timeout_seconds
-        while True:
-            found = await self._locate_advanced_search_page(context, origin)
-            if found is not None:
-                self.page = found
-                return self.page
-            if time.monotonic() >= deadline:
-                raise WebVpnNavigationError(
-                    "点击「高级检索」后未出现可用的高级检索页面；"
-                    "站点可能改版，或中转标签页被关闭"
+        retained_home = self.page
+        baseline = list(getattr(context, "pages", []) or [])
+        owned: list[Any] = []
+        try:
+            if preserve_home:
+                origin = await await_maybe(context.new_page())
+                owned.append(origin)
+                home_url = str(getattr(retained_home, "url", "") or "")
+                if not home_url:
+                    raise WebVpnNavigationError("知网首页地址不可用，无法建立批次页面")
+                await await_maybe(
+                    origin.goto(home_url, wait_until="domcontentloaded")
                 )
-            await asyncio.sleep(1)
+                self.page = origin
+            else:
+                origin = retained_home
 
-    async def _locate_advanced_search_page(self, context: Any, origin: Any) -> Any | None:
-        candidates = list(getattr(context, "pages", []) or [])
-        if origin not in candidates:
-            candidates.append(origin)          # 同页跳转时 origin 仍是目标
+            link = self.page.get_by_role("link", name=ADV_SEARCH_LINK_TEXT)
+            if await await_maybe(link.count()) < 1:
+                raise WebVpnNavigationError("知网首页未找到「高级检索」入口")
+            await await_maybe(link.first.click())
+
+            # 不能认"第一个新出现的标签页"：站点会短暂开一个中转标签页再关掉，
+            # 抓到它就会让驱动指向已关闭页面。只检查本次批次拥有的页面。
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                for page in list(getattr(context, "pages", []) or []):
+                    if (
+                        all(page is not existing for existing in baseline)
+                        and all(page is not existing for existing in owned)
+                    ):
+                        owned.append(page)
+                candidates = [origin, *owned]
+                found = await self._locate_advanced_search_page(candidates)
+                if found is not None:
+                    self.page = found
+                    await self._close_pages(
+                        page for page in owned if page is not found
+                    )
+                    return self.page
+                if time.monotonic() >= deadline:
+                    raise WebVpnNavigationError(
+                        "点击「高级检索」后未出现可用的高级检索页面；"
+                        "站点可能改版，或中转标签页被关闭"
+                    )
+                await asyncio.sleep(1)
+        except BaseException:
+            await _finish_cleanup(self._close_pages(owned))
+            self.page = retained_home
+            raise
+
+    async def _locate_advanced_search_page(
+        self, candidates: Sequence[Any]
+    ) -> Any | None:
         for page in candidates:
             is_closed = getattr(page, "is_closed", None)
             if callable(is_closed) and is_closed():
@@ -490,6 +541,15 @@ class ProfessionalSearchPage:
                 if ADV_SEARCH_LINK_TEXT in (title or ""):
                     return page
         return None
+
+    @staticmethod
+    async def _close_pages(pages: Iterable[Any]) -> None:
+        for page in list(pages):
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                continue
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await await_maybe(page.close())
 
     async def switch_to_professional(self, *, timeout_seconds: float = 20.0) -> None:
         """切到「专业检索」标签。

@@ -31,6 +31,7 @@ from .professional import (
 )
 from .ranking import annotate_and_sort_records
 from .results import parse_public_result_page
+from .search import PageContractChanged
 from .webvpn import BatchCheckpoint, Throttle, run_batches
 
 #: 中文顶尖期刊（13 本）——本模式的核心收益，单条表达式即可覆盖。
@@ -109,7 +110,17 @@ class CnkiProfessionalSearchService:
             status, html, url = await self.executor(batch)
             if status != SearchStatus.SUCCESS.value:
                 return {"index": batch.index, "status": status, "result_url": url}
-            parsed = parse_public_result_page(html, query=batch.expression, limit=limit)
+            try:
+                parsed = parse_public_result_page(
+                    html, query=batch.expression, limit=limit
+                )
+            except PageContractChanged as exc:
+                return {
+                    "index": batch.index,
+                    "status": SearchStatus.PAGE_CONTRACT_CHANGED.value,
+                    "result_url": url,
+                    "detail": str(exc),
+                }
             return {
                 "index": batch.index,
                 "status": SearchStatus.SUCCESS.value,
@@ -141,13 +152,25 @@ class CnkiProfessionalSearchService:
             incomplete.extend(item.get("incomplete_records", ()))
 
         annotated = annotate_and_sort_records(records, catalog=self.catalog)
-        complete = schedule["complete"]
-        if not annotated:
-            status = SearchStatus.NO_RESULTS if complete else SearchStatus.PARTIAL
+        stopped_result = schedule.get("stopped_result")
+        contract_changed = (
+            stopped_result
+            if stopped_result
+            and stopped_result.get("status")
+            == SearchStatus.PAGE_CONTRACT_CHANGED.value
+            else None
+        )
+        complete = schedule["complete"] and contract_changed is None
+        if contract_changed is not None:
+            status = SearchStatus.PAGE_CONTRACT_CHANGED
+        elif not annotated:
+            status = (
+                SearchStatus.NO_RESULTS if complete else SearchStatus.PARTIAL
+            )
         else:
             status = SearchStatus.SUCCESS if complete and not incomplete else SearchStatus.PARTIAL
-        return {
-            "ok": True,
+        result = {
+            "ok": contract_changed is None,
             "mode": "webvpn",
             "status": status.value,
             "complete": complete,
@@ -162,6 +185,11 @@ class CnkiProfessionalSearchService:
             "records": [record.to_dict() for record in annotated],
             "incomplete_records": [record.to_dict() for record in incomplete],
         }
+        if contract_changed is not None:
+            result["detail"] = contract_changed.get(
+                "detail", "知网页面结构已变化"
+            )
+        return result
 
 
 def build_group_plans(

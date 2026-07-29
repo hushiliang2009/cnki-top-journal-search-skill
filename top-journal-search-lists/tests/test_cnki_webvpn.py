@@ -119,6 +119,27 @@ def test_without_handler_a_challenge_stops_immediately() -> None:
     assert summary["complete"] is False and summary["stopped_at_batch"] == 1
 
 
+def test_page_contract_change_stops_before_later_batches() -> None:
+    batches = _batches(2)
+    seen: list[int] = []
+
+    async def execute(batch):
+        seen.append(batch.index)
+        return {
+            "status": SearchStatus.PAGE_CONTRACT_CHANGED.value,
+            "batch": batch.index,
+            "detail": "结果表结构变化",
+        }
+
+    summary = asyncio.run(webvpn.run_batches(batches, execute))
+
+    assert seen == [1]
+    assert summary["complete"] is False
+    assert summary["stopped_at_batch"] == 1
+    assert summary["batches_completed"] == 0
+    assert summary["stopped_result"]["status"] == SearchStatus.PAGE_CONTRACT_CHANGED.value
+
+
 def test_empty_batch_list_is_rejected() -> None:
     async def execute(batch):
         return _ok(batch)

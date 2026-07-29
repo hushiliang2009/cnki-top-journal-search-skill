@@ -53,13 +53,15 @@ class FakeLocator:
 class FakePage:
     def __init__(self, *, counts: dict | None = None, caps: dict | None = None,
                  tab_switch: bool = True, page_title: str = "中国知网",
-                 closed: bool = False, visibility: dict | None = None) -> None:
+                 closed: bool = False, visibility: dict | None = None,
+                 url: str = "https://webvpn.example.edu.cn/cnki-home") -> None:
         self.counts = counts or {}
         self.visibility = visibility or {}
         self.caps = caps or {}
         self.tab_switch = tab_switch
         self.page_title = page_title
         self.closed = closed
+        self.url = url
         self.actions: list[tuple[str, str]] = []
         self.filled = ""
         self._locators: dict[str, FakeLocator] = {}
@@ -72,6 +74,13 @@ class FakePage:
 
     async def wait_for_load_state(self, _state: str) -> None:
         return None
+
+    async def goto(self, url: str, *, wait_until: str) -> None:
+        assert wait_until == "domcontentloaded"
+        self.url = url
+
+    async def close(self) -> None:
+        self.closed = True
 
     def locator(self, selector: str) -> FakeLocator:
         if selector not in self._locators:
@@ -93,6 +102,11 @@ class FakePage:
 class FakeContext:
     def __init__(self, pages: list) -> None:
         self.pages = pages
+
+    async def new_page(self) -> FakePage:
+        page = _home_without_expression_box()
+        self.pages.append(page)
+        return page
 
 
 def test_advanced_search_is_reached_through_the_home_page_link() -> None:
@@ -149,21 +163,72 @@ def test_transient_tab_that_closes_is_skipped_rather_than_adopted() -> None:
     driver = webvpn.ProfessionalSearchPage(home)
 
     class Context:
-        pages = [home, transient, adv]
+        pages = [home]
 
-    result = asyncio.run(driver.open_from_home(Context(), timeout_seconds=3))
+    original_click = FakeLocator.click
+
+    async def click_and_open(self) -> None:
+        await original_click(self)
+        Context.pages.extend([transient, adv])
+
+    FakeLocator.click = click_and_open
+    try:
+        result = asyncio.run(driver.open_from_home(Context(), timeout_seconds=3))
+    finally:
+        FakeLocator.click = original_click
     assert result is adv, "应跳过已关闭的中转页，选中真正的高级检索页"
 
 
-def test_same_tab_navigation_is_also_supported() -> None:
-    """并非总是新开标签页；同页跳转时 origin 自身就是目标。"""
-    home = FakePage(page_title="高级检索-中国知网")   # 点击后原页变成高级检索
+def test_preserved_home_survives_same_tab_navigation() -> None:
+    """批次导航即使同页跳转，也只能改变批次自有页面。"""
+    home = _home_without_expression_box(page_title="中国知网")
+    driver = webvpn.ProfessionalSearchPage(home)
+
+    class Context(FakeContext):
+        async def new_page(self) -> FakePage:
+            page = _home_without_expression_box(
+                page_title="高级检索-中国知网"
+            )
+            self.pages.append(page)
+            return page
+
+    context = Context([home])
+    result = asyncio.run(
+        driver.open_from_home(
+            context, timeout_seconds=3, preserve_home=True
+        )
+    )
+
+    assert result is not home
+    assert home.page_title == "中国知网"
+    assert home.closed is False
+
+
+def test_new_tabs_are_closed_when_advanced_contract_is_not_found() -> None:
+    home = _home_without_expression_box(page_title="中国知网")
+    orphan = _home_without_expression_box(page_title="陌生页面")
     driver = webvpn.ProfessionalSearchPage(home)
 
     class Context:
         pages = [home]
 
-    assert asyncio.run(driver.open_from_home(Context(), timeout_seconds=3)) is home
+    original_click = FakeLocator.click
+
+    async def click_and_open(self) -> None:
+        await original_click(self)
+        Context.pages.append(orphan)
+
+    FakeLocator.click = click_and_open
+    try:
+        with pytest.raises(
+            webvpn.WebVpnNavigationError,
+            match="未出现可用的高级检索页面",
+        ):
+            asyncio.run(driver.open_from_home(Context(), timeout_seconds=0))
+    finally:
+        FakeLocator.click = original_click
+
+    assert orphan.closed is True
 
 
 def test_no_usable_advanced_search_page_raises_with_actionable_message() -> None:

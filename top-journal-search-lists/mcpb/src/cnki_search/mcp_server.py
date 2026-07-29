@@ -13,6 +13,7 @@ from .browser import BrowserUnavailableError
 from .models import MAX_RESULTS_PER_PAGE
 from .professional_runtime import build_professional_runtime_from_env
 from .professional_service import CHINESE_TOP_GROUP, SUPPORTED_GROUPS
+from .search import PageContractChanged
 from .service import CnkiPublicSearchService
 from .webvpn import (
     ExpressionTruncated,
@@ -64,6 +65,7 @@ class CnkiMcpServer:
         # 绝不能在 MCP 服务器启动时就发生。
         self._professional_factory = professional_factory
         self._professional: Any = None
+        self._professional_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._shutdown = False
 
@@ -108,7 +110,11 @@ class CnkiMcpServer:
             return _configuration_error(str(exc))
         except (WebVpnLoginTimeout, WebVpnWindowClosed) as exc:
             return _professional_error("login_required", str(exc))
-        except (WebVpnNavigationError, ExpressionTruncated) as exc:
+        except (
+            WebVpnNavigationError,
+            ExpressionTruncated,
+            PageContractChanged,
+        ) as exc:
             return _professional_error("page_contract_changed", str(exc))
         finally:
             if task is not None:
@@ -120,12 +126,16 @@ class CnkiMcpServer:
         票据不能跨进程复用，会话必须在同一进程内保持存活，因此这里缓存实例，
         而不是每次调用都重新登录。
         """
-        if self._professional is None:
-            factory = (
-                self._professional_factory or build_professional_runtime_from_env
-            )
-            self._professional = await factory()
-        return self._professional
+        if self._professional is not None:
+            return self._professional
+        async with self._professional_lock:
+            if self._professional is None:
+                factory = (
+                    self._professional_factory
+                    or build_professional_runtime_from_env
+                )
+                self._professional = await factory()
+            return self._professional
 
     def shutdown(self) -> None:
         if self._shutdown:

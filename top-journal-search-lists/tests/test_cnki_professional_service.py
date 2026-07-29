@@ -145,6 +145,38 @@ def test_challenge_without_handler_reports_partial_and_flags_human_intervention(
     assert result["status"] == SearchStatus.PARTIAL.value
 
 
+def test_page_contract_status_stays_an_error_instead_of_becoming_no_results() -> None:
+    async def execute(_plan: ExpressionBatch) -> tuple[str, str, str]:
+        return (SearchStatus.PAGE_CONTRACT_CHANGED.value, "", "")
+
+    service = CnkiProfessionalSearchService(execute)
+    result = asyncio.run(
+        service.search_group("数字经济", service_module.CHINESE_TOP_GROUP)
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == SearchStatus.PAGE_CONTRACT_CHANGED.value
+    assert result["complete"] is False
+    assert result["stopped_at_batch"] == 1
+    assert result["records"] == []
+
+
+def test_parser_contract_exception_becomes_structured_page_contract_error() -> None:
+    async def execute(_plan: ExpressionBatch) -> tuple[str, str, str]:
+        malformed = "<table class='result-table-list'><tbody></tbody></table>"
+        return (SearchStatus.SUCCESS.value, malformed, "")
+
+    service = CnkiProfessionalSearchService(execute)
+    result = asyncio.run(
+        service.search_group("数字经济", service_module.CHINESE_TOP_GROUP)
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == SearchStatus.PAGE_CONTRACT_CHANGED.value
+    assert result["complete"] is False
+    assert "未解析出任何题录" in result["detail"]
+
+
 def test_result_always_exposes_the_human_attendance_flag() -> None:
     """调用方据此判断能否安排无人值守任务，字段不得缺失。"""
     service = CnkiProfessionalSearchService(_executor([("某文", "经济研究")]))

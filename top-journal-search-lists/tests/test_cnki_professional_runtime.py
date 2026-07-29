@@ -116,8 +116,9 @@ def test_batch_executor_opens_from_home_and_closes_only_result_tab(
                 assert page is home
                 self.page = page
 
-            async def open_from_home(self, context):
+            async def open_from_home(self, context, *, preserve_home=False):
                 assert context is session.context
+                assert preserve_home is True
                 events.append("open")
                 self.page = result
                 return result
@@ -186,7 +187,8 @@ def test_challenge_page_is_only_observed_then_closed_before_retry(
             def __init__(self, page) -> None:
                 self.page = page
 
-            async def open_from_home(self, _context):
+            async def open_from_home(self, _context, *, preserve_home=False):
+                assert preserve_home is True
                 self.page = challenge
                 return challenge
 
@@ -259,6 +261,82 @@ def test_challenge_wait_never_exceeds_the_600_second_limit() -> None:
     asyncio.run(scenario())
 
 
+def test_challenge_wait_has_a_hard_limit_when_evaluate_is_slow() -> None:
+    from time import monotonic
+
+    from cnki_search.professional import ExpressionBatch
+    from cnki_search.professional_runtime import ProfessionalBatchExecutor
+
+    async def scenario() -> None:
+        class SlowPage:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def evaluate(self, _script, _markers):
+                await asyncio.sleep(0.2)
+                return True
+
+            async def close(self) -> None:
+                self.closed = True
+
+            def is_closed(self) -> bool:
+                return self.closed
+
+        page = SlowPage()
+        executor = ProfessionalBatchExecutor(
+            type("Session", (), {})(),
+            challenge_timeout_seconds=0.03,
+            challenge_poll_seconds=0,
+        )
+        executor.active_challenge_page = page
+        started = monotonic()
+        result = await executor.wait_for_manual_challenge(
+            ExpressionBatch(1, 1, (), "SU %= '数字经济'")
+        )
+        elapsed = monotonic() - started
+
+        assert result is False
+        assert elapsed < 0.12
+        assert page.closed is True
+
+    asyncio.run(scenario())
+
+
+def test_challenge_wait_has_a_hard_limit_when_evaluate_never_returns() -> None:
+    from cnki_search.professional import ExpressionBatch
+    from cnki_search.professional_runtime import ProfessionalBatchExecutor
+
+    async def scenario() -> None:
+        class HangingPage:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def evaluate(self, _script, _markers):
+                await asyncio.Event().wait()
+
+            async def close(self) -> None:
+                self.closed = True
+
+            def is_closed(self) -> bool:
+                return self.closed
+
+        page = HangingPage()
+        executor = ProfessionalBatchExecutor(
+            type("Session", (), {})(),
+            challenge_timeout_seconds=0.03,
+            challenge_poll_seconds=0,
+        )
+        executor.active_challenge_page = page
+        plan = ExpressionBatch(1, 1, (), "SU %= '数字经济'")
+
+        assert await asyncio.wait_for(
+            executor.wait_for_manual_challenge(plan), timeout=0.15
+        ) is False
+        assert page.closed is True
+
+    asyncio.run(scenario())
+
+
 def test_environment_factory_requires_home_before_constructing_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -305,5 +383,51 @@ def test_environment_factory_closes_session_when_initialization_fails(
 
     with pytest.raises(RuntimeError, match="登录初始化失败"):
         asyncio.run(professional_runtime.build_professional_runtime_from_env())
+    assert session is not None
+    assert session.close_calls == 1
+
+
+def test_environment_factory_closes_session_when_initialization_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cnki_search import professional_runtime
+
+    session = None
+
+    class WaitingSession:
+        def __init__(self, config) -> None:
+            nonlocal session
+            self.config = config
+            self.started = asyncio.Event()
+            self.close_calls = 0
+            session = self
+
+        async def __aenter__(self):
+            return self
+
+        async def wait_until_ready(self) -> None:
+            self.started.set()
+            await asyncio.Event().wait()
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    monkeypatch.setenv(
+        "CNKI_WEBVPN_HOME", "https://webvpn.example.edu.cn/https/abc/"
+    )
+    monkeypatch.setattr(professional_runtime, "WebVpnSession", WaitingSession)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            professional_runtime.build_professional_runtime_from_env()
+        )
+        while session is None:
+            await asyncio.sleep(0)
+        await session.started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
     assert session is not None
     assert session.close_calls == 1

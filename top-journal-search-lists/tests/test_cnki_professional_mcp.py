@@ -6,6 +6,7 @@ import pytest
 from cnki_search import mcp_server
 from cnki_search.browser import BrowserUnavailableError
 from cnki_search.mcp_server import CnkiMcpServer
+from cnki_search.search import PageContractChanged
 from cnki_search.webvpn import (
     ExpressionTruncated,
     WebVpnLoginTimeout,
@@ -102,6 +103,72 @@ def test_enabled_default_server_builds_production_runtime(
     assert created == 1
 
 
+def test_concurrent_first_calls_build_and_close_exactly_one_runtime() -> None:
+    async def scenario() -> None:
+        factory_started = asyncio.Event()
+        release_factory = asyncio.Event()
+        runtimes = []
+
+        class Runtime(FakeProfessionalService):
+            def __init__(self) -> None:
+                super().__init__()
+                self.close_calls = 0
+
+            async def aclose(self) -> None:
+                self.close_calls += 1
+
+        async def factory():
+            runtime = Runtime()
+            runtimes.append(runtime)
+            factory_started.set()
+            await release_factory.wait()
+            return runtime
+
+        server = CnkiMcpServer(professional_factory=factory)
+        first = asyncio.create_task(
+            server.cnki_professional_search("数字经济")
+        )
+        await factory_started.wait()
+        second = asyncio.create_task(
+            server.cnki_professional_search("共同富裕")
+        )
+        await asyncio.sleep(0)
+        release_factory.set()
+
+        results = await asyncio.gather(first, second)
+        assert [item["status"] for item in results] == ["success", "success"]
+        await server.aclose()
+
+        assert len(runtimes) == 1
+        assert runtimes[0].close_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_failed_factory_is_not_cached_and_next_call_can_retry() -> None:
+    async def scenario() -> None:
+        runtime = FakeProfessionalService()
+        attempts = 0
+
+        async def factory():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise BrowserUnavailableError("首次初始化失败")
+            return runtime
+
+        server = CnkiMcpServer(professional_factory=factory)
+        first = await server.cnki_professional_search("数字经济")
+        second = await server.cnki_professional_search("数字经济")
+
+        assert first["status"] == "configuration_error"
+        assert second["status"] == "success"
+        assert attempts == 2
+        assert server._professional is runtime
+
+    asyncio.run(scenario())
+
+
 def test_english_priority_groups_are_refused_before_any_session_is_opened() -> None:
     service = FakeProfessionalService()
     server = _server_with_service(service)
@@ -169,6 +236,7 @@ def test_shutdown_still_rejects_professional_calls() -> None:
         (WebVpnWindowClosed("窗口已关闭"), "login_required"),
         (WebVpnNavigationError("页面改版"), "page_contract_changed"),
         (ExpressionTruncated("表达式被截断"), "page_contract_changed"),
+        (PageContractChanged("结果表结构变化"), "page_contract_changed"),
     ],
 )
 def test_runtime_errors_are_mapped_to_stable_mcp_statuses(

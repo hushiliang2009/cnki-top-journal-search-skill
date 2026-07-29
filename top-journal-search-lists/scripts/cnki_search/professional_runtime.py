@@ -93,7 +93,9 @@ class ProfessionalBatchExecutor:
         result_page: Any = None
         retain_challenge = False
         try:
-            result_page = await driver.open_from_home(self.session.context)
+            result_page = await driver.open_from_home(
+                self.session.context, preserve_home=True
+            )
             await driver.switch_to_professional()
             status, html, _url = await driver.execute_plan(plan)
             if status == SearchStatus.CHALLENGE_DETECTED.value:
@@ -117,27 +119,34 @@ class ProfessionalBatchExecutor:
             return False
         deadline = self._now() + self.challenge_timeout_seconds
         try:
-            while self._now() <= deadline:
-                is_closed = getattr(page, "is_closed", None)
-                if callable(is_closed) and is_closed():
-                    return False
-                try:
-                    visible = await await_maybe(
-                        page.evaluate(
-                            CAPTCHA_VIEWPORT_JS, list(CAPTCHA_TEXT_MARKERS)
+            try:
+                async with asyncio.timeout(
+                    self.challenge_timeout_seconds
+                ):
+                    while self._now() <= deadline:
+                        is_closed = getattr(page, "is_closed", None)
+                        if callable(is_closed) and is_closed():
+                            return False
+                        try:
+                            visible = await await_maybe(
+                                page.evaluate(
+                                    CAPTCHA_VIEWPORT_JS,
+                                    list(CAPTCHA_TEXT_MARKERS),
+                                )
+                            )
+                        except Exception:
+                            return False
+                        if not visible:
+                            return True
+                        remaining = deadline - self._now()
+                        if remaining <= 0:
+                            return False
+                        await self._sleep(
+                            min(self.challenge_poll_seconds, remaining)
                         )
-                    )
-                except Exception:
                     return False
-                if not visible:
-                    return True
-                remaining = deadline - self._now()
-                if remaining <= 0:
-                    return False
-                await self._sleep(
-                    min(self.challenge_poll_seconds, remaining)
-                )
-            return False
+            except TimeoutError:
+                return False
         finally:
             if self.active_challenge_page is page:
                 self.active_challenge_page = None
