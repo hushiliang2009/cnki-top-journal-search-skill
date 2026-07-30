@@ -1366,12 +1366,30 @@ class ProfessionalSearchPage:
         with contextlib.suppress(BaseException):
             task.result()
 
+    async def _expression_box_visible(self) -> bool:
+        """表达式框是否**可见**。
+
+        它在高级检索与专业检索两个标签下都在 DOM 里，只在专业检索标签下可见。
+        因此判据必须是可见性；用 count() 判"存在"会在切换根本没生效时也返回真。
+        """
+        with contextlib.suppress(Exception):
+            box = self.page.locator(EXPRESSION_BOX_SELECTOR)
+            if await await_maybe(box.count()):
+                return bool(await await_maybe(box.first.is_visible()))
+        return False
+
     async def switch_to_professional(self, *, timeout_seconds: float = 20.0) -> None:
         """切到「专业检索」标签。
 
         非活动标签被 CSS 隐藏，只能用 JS 触发 click；页面为前端渲染，标签可能
         晚于 domcontentloaded 才出现，因此轮询而不是一次定成败。
+
+        标签切换是**开关**：已经停在专业检索时再点一次会切回高级检索。同一
+        会话内第二次进入高级检索页时，站点记住上次的标签，本就停在专业检索，
+        所以必须先判断、后点击。
         """
+        if await self._expression_box_visible():
+            return
         deadline = time.monotonic() + timeout_seconds
         while True:
             switched = await await_maybe(
@@ -1382,13 +1400,15 @@ class ProfessionalSearchPage:
             if time.monotonic() >= deadline:
                 raise WebVpnNavigationError("高级检索页未找到「专业检索」标签")
             await asyncio.sleep(1)
-        # 切换后表达式框才会变为可见，等它真正出现再返回
+        # 切换后表达式框才会变为可见，等它真正可见再返回。判据不能用 count()：
+        # 它在两个标签下都存在，那样会在切换未生效时也返回成功，随后 fill 在
+        # 不可见元素上白等 30 秒，且现象指向完全错误的方向。
         box_deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < box_deadline:
             await asyncio.sleep(1)
-            with contextlib.suppress(Exception):
-                if await await_maybe(self.page.locator(EXPRESSION_BOX_SELECTOR).count()):
-                    return
+            if await self._expression_box_visible():
+                return
+        raise WebVpnNavigationError("已点击「专业检索」标签，但表达式框始终不可见")
 
     async def fill_expression(self, expression: str) -> None:
         box = self.page.locator(EXPRESSION_BOX_SELECTOR)

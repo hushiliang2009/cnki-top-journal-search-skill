@@ -783,15 +783,74 @@ def test_missing_home_link_is_reported_rather_than_deep_linking() -> None:
 
 
 def test_professional_tab_is_switched_through_javascript_click() -> None:
-    """非活动标签被 CSS 隐藏，Playwright 判定其不可见，只能用 JS 触发。"""
-    page = FakePage()
+    """非活动标签被 CSS 隐藏，Playwright 判定其不可见，只能用 JS 触发。
+
+    到达高级检索页时表达式框是"存在但不可见"，此处必须如实建模——旧假页面
+    默认它可见，正是这一点让"用 count() 判存在"的缺陷得以通过测试。
+    """
+    page = TogglingTabPage(starts_professional=False)
     driver = webvpn.ProfessionalSearchPage(page)
     asyncio.run(driver.switch_to_professional(timeout_seconds=2))
     assert ("evaluate", webvpn.PROFESSIONAL_TAB_TEXT) in page.actions
 
 
+class TogglingTabPage(FakePage):
+    """真实站点：表达式框在两个标签下都在 DOM 里，只在专业检索标签下可见；
+    再点一次标签会切回去。同一会话第二次进入高级检索页时，站点记住上次的
+    标签，本就停在专业检索——此时若无条件再点，反而把它切走。"""
+
+    def __init__(self, *, starts_professional: bool = False) -> None:
+        super().__init__(visibility={webvpn.EXPRESSION_BOX_SELECTOR: starts_professional})
+        self.tab_clicks = 0
+
+    async def evaluate(self, script: str, arg=None):
+        self.tab_clicks += 1
+        self.actions.append(("evaluate", arg or ""))
+        box = self.locator(webvpn.EXPRESSION_BOX_SELECTOR)
+        box._visible = not box._visible          # 标签切换是开关，不是幂等赋值
+        return self.tab_switch
+
+
+def test_switch_confirms_the_box_is_visible_not_merely_present() -> None:
+    """判据必须是可见而不是存在。
+
+    表达式框在高级检索标签下同样在 DOM 里，只是被 CSS 隐藏。用 count() 判定
+    会在切换根本没生效时也返回成功，随后 fill 在不可见元素上白等 30 秒，
+    报出的现象还指向完全错误的方向。
+    """
+    page = FakePage(visibility={webvpn.EXPRESSION_BOX_SELECTOR: False})
+    driver = webvpn.ProfessionalSearchPage(page)
+    with pytest.raises(webvpn.WebVpnNavigationError, match="表达式框"):
+        asyncio.run(driver.switch_to_professional(timeout_seconds=2))
+
+
+def test_switch_is_idempotent_when_already_on_the_professional_tab() -> None:
+    """已经停在专业检索标签时不得再点——再点会切回高级检索。"""
+    page = TogglingTabPage(starts_professional=True)
+    driver = webvpn.ProfessionalSearchPage(page)
+    asyncio.run(driver.switch_to_professional(timeout_seconds=2))
+    assert page.tab_clicks == 0
+    assert asyncio.run(page.locator(webvpn.EXPRESSION_BOX_SELECTOR).is_visible()) is True
+
+
+def test_second_search_in_one_session_still_reaches_the_professional_tab() -> None:
+    """同一会话内连续两次专业检索：第二次站点已停在专业检索标签。
+
+    通用版真实验证是两次独立进程各登录一次，从未走到这条路径；而 MCP 工具
+    缓存会话，第二次调用必然走到这里。
+    """
+    page = TogglingTabPage(starts_professional=False)
+    driver = webvpn.ProfessionalSearchPage(page)
+    asyncio.run(driver.switch_to_professional(timeout_seconds=2))
+    assert page.tab_clicks == 1
+    asyncio.run(driver.switch_to_professional(timeout_seconds=2))
+    assert asyncio.run(page.locator(webvpn.EXPRESSION_BOX_SELECTOR).is_visible()) is True
+
+
 def test_missing_professional_tab_raises() -> None:
-    driver = webvpn.ProfessionalSearchPage(FakePage(tab_switch=False))
+    driver = webvpn.ProfessionalSearchPage(
+        FakePage(tab_switch=False, visibility={webvpn.EXPRESSION_BOX_SELECTOR: False})
+    )
     with pytest.raises(webvpn.WebVpnNavigationError, match="专业检索"):
         asyncio.run(driver.switch_to_professional(timeout_seconds=2))
 
