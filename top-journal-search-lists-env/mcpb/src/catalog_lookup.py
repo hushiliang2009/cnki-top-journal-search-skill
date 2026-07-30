@@ -455,6 +455,24 @@ def lookup_journals(path: Path, journals: list[str]) -> list[dict[str, Any]]:
     return [lookup_journal(index, journal) for journal in journals]
 
 
+def journals_by_group(group: str, path: Path = DEFAULT_CATALOG) -> list[str]:
+    """返回某个 priority_group 下全部期刊的规范刊名（已按最高层级去重）。
+
+    去重口径与目录的 highest_priority_wins 一致：一本刊只出现在它的最高层级里。
+    6 本中文环境顶尖期刊同时也是环境 CSSCI 来源期刊，因此它们只出现在
+    chinese_environment_top 中，不会重复出现在 environment_cssci 中。
+    """
+    titles = {
+        record["matched_title"]
+        for records in build_index(path).values()
+        for record in records
+        if record["priority_group"] == group
+    }
+    if not titles:
+        raise ValueError(f"目录中没有 priority_group='{group}' 的期刊")
+    return sorted(titles)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="校验环境期刊目录并查询最高检索层级。")
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)

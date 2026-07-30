@@ -258,3 +258,27 @@ def test_future_year_beyond_shared_range_is_incomplete() -> None:
     parsed = results.parse_public_result_page(html, query="主题", limit=20)
     assert parsed.records == []
     assert [item.publication_year for item in parsed.incomplete_records] == [year]
+
+def test_parser_accepts_the_professional_page_size_without_widening_public_search() -> None:
+    """解析器被两种模式共用，上限须取站点档位 50。
+
+    公开检索的 20 不靠解析器把守，而由 SearchRequest 与 mcp_server.MAX_LIMIT
+    约束；把解析器钉死在 20 会让专业检索按每页 50 条取回的结果无法解析。
+    """
+    from cnki_search_env.models import MAX_RESULTS_PER_PAGE
+
+    table = (
+        "<table class='result-table-list'><tbody><tr>"
+        "<td class='name'><a>大气污染的协同治理</a></td>"
+        "<td class='author'><a>张三</a></td>"
+        "<td class='source'><a>中国环境科学</a></td>"
+        "<td class='date'>2025-03-11</td>"
+        "<td class='data'>期刊</td>"
+        "</tr></tbody></table>"
+    )
+    assert MAX_RESULTS_PER_PAGE == 50
+    parsed = results.parse_public_result_page(table, query="主题", limit=MAX_RESULTS_PER_PAGE)
+    assert len(parsed.records) == 1
+    for bad in (0, MAX_RESULTS_PER_PAGE + 1):
+        with pytest.raises(ValueError):
+            results.parse_public_result_page(table, query="主题", limit=bad)
