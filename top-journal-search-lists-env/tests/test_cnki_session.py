@@ -505,6 +505,60 @@ async def _search_with_session(session: PublicCnkiSession, query: str):
     async with session:
         return await session.search(query)
 
+class PostSubmitChallengePage(RestrictedPage):
+    """首页正常，提交检索后被风控拦到安全验证页。"""
+
+    def __init__(self) -> None:
+        super().__init__("请完成安全验证")
+        self.searched = False
+
+    def title(self) -> str:
+        return "安全验证" if self.searched else "中国知网"
+
+
+async def _noop_contract(*_args: object, **_kwargs: object) -> None:
+    return None
+
+
+def test_post_submit_challenge_is_not_reported_as_contract_change() -> None:
+    """结果契约未出现时，必须先判断是不是站点主动阻断。
+
+    两者补救方式相反：页面结构变化要改解析器，安全验证必须立即停手。
+    一律报 page_contract_changed 会把排查引向错误方向。
+    """
+    page = PostSubmitChallengePage()
+    context = _Closable()
+    context.new_page = lambda: page  # type: ignore[attr-defined]
+    browser = _Closable()
+    browser.new_context = lambda **_kwargs: context  # type: ignore[attr-defined]
+
+    class Factory:
+        def launch_ephemeral(self) -> _Closable:
+            return browser
+
+    class ChallengedRunner:
+        async def run(self, _page: object, _query: str) -> int | None:
+            page.searched = True
+            page.url = "https://kns.cnki.net/verify/home?captchaType=blockPuzzle"
+            raise session_module.PageContractChanged("知网公开检索结果结构未出现")
+
+    session = PublicCnkiSession(browser_factory=Factory())
+    originals = (session_module.validate_public_theme_search_contract,
+                 session_module.PublicThemeSearchRunner)
+    session_module.validate_public_theme_search_contract = _noop_contract  # type: ignore[assignment]
+    session_module.PublicThemeSearchRunner = ChallengedRunner  # type: ignore[assignment]
+    try:
+        snapshot = asyncio.run(_search_with_session(session, "环境规制"))
+    finally:
+        (session_module.validate_public_theme_search_contract,
+         session_module.PublicThemeSearchRunner) = originals  # type: ignore[assignment]
+
+    assert session_module.classify_public_search_state(
+        **snapshot.state_arguments()
+    ) is SearchStatus.CHALLENGE_DETECTED
+    assert context.closed and browser.closed
+
+
 def test_session_returns_initial_restriction_before_theme_contract_and_closes_resources() -> None:
     page = RestrictedPage("403 Forbidden")
     context = _Closable()

@@ -64,7 +64,7 @@ class RecordingPage:
         return RecordingLocator(self)
 
     def locator(self, selector: str) -> RecordingLocator:
-        assert selector == ".sort .sort-default"
+        assert selector in (".sort .sort-default", search.PUBLIC_SEARCH_BUTTON_SELECTOR)
         return RecordingLocator(self)
 
     def expect_navigation(self, **_kwargs: object) -> Navigation:
@@ -118,11 +118,27 @@ def test_runner_accepts_unique_current_theme_control_with_duplicate_theme_texts(
     assert asyncio.run(search.PublicThemeSearchRunner().run(page, "数字化转型")) == 200
 
 
+class NoRoleButtonPage(RecordingPage):
+    """知网现状：首页检索按钮是不带 role 的 <div class="search-btn">。"""
+
+    def get_by_role(self, role: str, name: str) -> RecordingLocator:
+        locator = super().get_by_role(role, name)
+        if role == "button":
+            locator.count = lambda: 0  # type: ignore[method-assign]
+        return locator
+
+
+def test_public_button_falls_back_to_current_cnki_selector() -> None:
+    page = NoRoleButtonPage()
+    assert asyncio.run(search.PublicThemeSearchRunner().run(page, "环境规制")) == 200
+    assert ("click", "") in page.actions
+
+
 def test_runner_rejects_missing_or_ambiguous_search_button() -> None:
-    class MissingButtonPage(RecordingPage):
-        def get_by_role(self, role: str, name: str) -> RecordingLocator:
-            locator = super().get_by_role(role, name)
-            if role == "button":
+    class MissingButtonPage(NoRoleButtonPage):
+        def locator(self, selector: str) -> RecordingLocator:
+            locator = super().locator(selector)
+            if selector == search.PUBLIC_SEARCH_BUTTON_SELECTOR:
                 locator.count = lambda: 0  # type: ignore[method-assign]
             return locator
 
@@ -178,10 +194,17 @@ def test_mcpb_runner_independently_checks_button_and_result_contract() -> None:
     assert asyncio.run(module.PublicThemeSearchRunner().run(page, "数字化转型")) == 200
     assert ("button", "检索") in page.actions and ("click", "") in page.actions
 
-    class MissingButtonPage(RecordingPage):
+    class NoRolePage(RecordingPage):
         def get_by_role(self, role: str, name: str) -> RecordingLocator:
             locator = super().get_by_role(role, name)
             if role == "button":
+                locator.count = lambda: 0  # type: ignore[method-assign]
+            return locator
+
+    class MissingButtonPage(NoRolePage):
+        def locator(self, selector: str) -> RecordingLocator:
+            locator = super().locator(selector)
+            if selector == module.PUBLIC_SEARCH_BUTTON_SELECTOR:
                 locator.count = lambda: 0  # type: ignore[method-assign]
             return locator
 
@@ -192,6 +215,11 @@ def test_mcpb_runner_independently_checks_button_and_result_contract() -> None:
     class ErrorPage(RecordingPage):
         def wait_for_function(self, _script: str, *, timeout: int) -> None:
             raise RuntimeError("unexpected browser failure")
+
+    # 打包副本必须与 scripts/ 同步带上 .search-btn 回退，否则装出来的那份仍然坏的。
+    no_role = NoRolePage()
+    assert asyncio.run(module.PublicThemeSearchRunner().run(no_role, "数字化转型")) == 200
+    assert ("click", "") in no_role.actions
 
     with pytest.raises(module.PageContractChanged):
         asyncio.run(module.PublicThemeSearchRunner().run(MissingButtonPage(), "数字化转型"))

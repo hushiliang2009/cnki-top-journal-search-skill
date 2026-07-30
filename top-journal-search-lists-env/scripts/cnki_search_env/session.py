@@ -114,7 +114,16 @@ class PublicCnkiSession:
             if self.page.url != CNKI_HOME_URL:
                 raise PageContractChanged("知网公开首页未就绪")
             await validate_public_theme_search_contract(self.page)
-            http_status = await PublicThemeSearchRunner().run(self.page, query)
+            try:
+                http_status = await PublicThemeSearchRunner().run(self.page, query)
+            except PageContractChanged:
+                # 结果契约未出现有两种成因，补救方式相反：页面结构变化要改解析器，
+                # 而安全验证/登录/限流必须立即停手。此前只对首页快照分类，
+                # 检索后的页面从不分类，风控页因此被误报成 page_contract_changed。
+                blocked = await self._blocking_snapshot()
+                if blocked is not None:
+                    return blocked
+                raise
             body = await await_maybe(self.page.locator("body").inner_text(timeout=10_000))
             return SearchSnapshot(await await_maybe(self.page.content()), self.page.url,
                                   await await_maybe(self.page.title()), body, http_status)
@@ -122,6 +131,25 @@ class PublicCnkiSession:
             if _is_playwright_timeout(exc):
                 raise TransientBrowserError("知网公开检索超时") from exc
             raise
+
+    #: 检索提交后可据以判定"站点主动阻断"的状态；命中任一项都应如实上报，
+    #: 而不是笼统归为页面结构变化。
+    BLOCKING_STATES = frozenset({
+        SearchStatus.CHALLENGE_DETECTED, SearchStatus.LOGIN_REQUIRED,
+        SearchStatus.FORBIDDEN, SearchStatus.RATE_LIMITED, SearchStatus.NETWORK_ERROR,
+    })
+
+    async def _blocking_snapshot(self) -> SearchSnapshot | None:
+        """对当前页面分类；仅当命中阻断状态时返回快照，否则返回 None。"""
+        try:
+            body = await await_maybe(self.page.locator("body").inner_text(timeout=10_000))
+            snapshot = SearchSnapshot(await await_maybe(self.page.content()), self.page.url,
+                                      await await_maybe(self.page.title()), body)
+        except Exception:
+            return None
+        if classify_public_search_state(**snapshot.state_arguments()) in self.BLOCKING_STATES:
+            return snapshot
+        return None
 
     async def __aexit__(self, *_exc: object) -> None:
         await self._close_resources()

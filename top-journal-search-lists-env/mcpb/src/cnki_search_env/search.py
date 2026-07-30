@@ -11,6 +11,10 @@ class PageContractChanged(RuntimeError):
 
 PUBLIC_SEARCH_BOX_NAME = "中文文献、外文文献"
 PUBLIC_SEARCH_BUTTON_NAME = "检索"
+# 知网已把首页检索按钮改成不带 role 的 <div class="search-btn">，
+# get_by_role("button") 因此匹配数为 0。保留 role 查找为首选，
+# 站点改回可访问按钮时不必再改代码。
+PUBLIC_SEARCH_BUTTON_SELECTOR = ".search-btn"
 CURRENT_THEME_SELECTOR = ".sort .sort-default"
 CURRENT_THEME_TEXT = "主题▼"
 RESULT_TABLE_SELECTOR = "table.result-table-list"
@@ -32,6 +36,8 @@ async def current_public_theme_control(page: Any) -> Any:
 
 async def public_theme_search_button(page: Any) -> Any:
     button = page.get_by_role("button", name=PUBLIC_SEARCH_BUTTON_NAME)
+    if await await_maybe(button.count()) != 1:
+        button = page.locator(PUBLIC_SEARCH_BUTTON_SELECTOR)
     if await await_maybe(button.count()) != 1:
         raise PageContractChanged("知网公开首页主题检索按钮结构已变化")
     return button
