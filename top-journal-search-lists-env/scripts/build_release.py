@@ -23,6 +23,7 @@ CNKI_MODULES = (
     "search.py",
     "service.py",
     "session.py",
+    "webvpn.py",
 )
 TEST_ALLOWLIST = (
     "tests/_mcp_handshake.py",
@@ -36,6 +37,7 @@ TEST_ALLOWLIST = (
     "tests/test_cnki_models.py",
     "tests/test_cnki_package_contract.py",
     "tests/test_cnki_professional_env.py",
+    "tests/test_cnki_webvpn_env.py",
     "tests/test_cnki_ranking.py",
     "tests/test_cnki_rate_limit.py",
     "tests/test_cnki_results.py",

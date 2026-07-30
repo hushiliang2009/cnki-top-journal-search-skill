@@ -108,6 +108,34 @@ def test_release_manifest_covers_every_test_module(skill_root: Path) -> None:
     assert not missing, f"以下测试未登记进 build_release.TEST_ALLOWLIST：{sorted(missing)}"
 
 
+def test_shared_entry_may_name_webvpn_but_not_revive_legacy_capabilities(
+    skill_root: Path,
+) -> None:
+    """注册入口可以命名 WebVPN 模式，但旧能力令牌对它同样禁止。"""
+    for directory in ("scripts/cnki_search_env", "mcpb/src/cnki_search_env"):
+        for name in SHARED_ENTRY_MODULES:
+            content = (skill_root / directory / name).read_text(encoding="utf-8").casefold()
+            for token in ("advsearch", "brief/grid", "senquery",
+                          "access_confirmed", "detail_url", "download_url"):
+                assert token not in content, f"{directory}/{name} 不得引入 {token}"
+
+
+def test_webvpn_modules_are_isolated_and_self_documented(skill_root: Path) -> None:
+    """WebVPN 模式必须在代码里写明它不可无人值守，且不得夹带检测规避手段。"""
+    for directory in ("scripts/cnki_search_env", "mcpb/src/cnki_search_env"):
+        module = (skill_root / directory / "webvpn.py").read_text(encoding="utf-8")
+        for statement in ("人工", "值守", "不得自动破解"):
+            assert statement in module, f"{directory}/webvpn.py 缺少人工值守声明：{statement}"
+        # 绕过风控的手段一律禁止，这条底线不随模式改变。只查实际用法，
+        # 说明文字里提到这些概念（例如解释"与 User-Agent 无关"）不算违规。
+        for forbidden in ("user_agent=", "--proxy-server", "--user-agent",
+                          "stealth", "navigator.webdriver"):
+            assert forbidden not in module.casefold(), f"webvpn.py 不得使用检测规避手段 {forbidden}"
+        # 票据跨进程无效，落盘只会平白多一处凭据泄露面。同样只禁实际调用。
+        for forbidden in ("launch_persistent_context", "storage_state=", ".storage_state("):
+            assert forbidden not in module, f"webvpn.py 不得持久化登录票据（{forbidden}）"
+
+
 def _run_layout_contract(layout_root: Path) -> dict[str, object]:
     program = textwrap.dedent(
         """
