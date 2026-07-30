@@ -7,6 +7,22 @@
 `$top-journal-search-lists-env`，MCP 工具为 `cnki_search_env(query, limit)`。
 `limit` 最大为 20。
 
+另有一个可选的第二模式：`cnki_professional_search_env`，由使用者本人经所在
+机构官方 WebVPN 完成统一身份认证后，用知网专业检索按环境期刊目录定向检索
+中文期刊论文。覆盖 `chinese_environment_top`（6 本，`LY=` **精确**枚举）与
+`environment_cssci`（241 本，精确枚举并逐批附结果页「来源类别」= CSSCI），
+`limit` 为 1 至 50。
+
+该模式属**机构授权**的正常访问路径，与检测规避有本质区别：**不伪造**
+User-Agent、**不轮换代理**、不抹除自动化标志、**不自动破解**验证码。它
+**必须人工值守，不可用于定时任务**——登录、保持浏览器窗口、中途安全验证三处
+都需要人。启用时设置 `CNKI_ENV_WEBVPN_HOME` 为所在机构 WebVPN 改写后的知网
+首页地址（与通用版的 `CNKI_WEBVPN_HOME` 相互独立）；运行时使用**非持久化**
+浏览器上下文，不保存 Cookie、票据或 profile，**服务重启后需要重新登录**。
+
+返回 `no_data_retry_later` 表示知网临时拒绝，**不等于空结果**；其他层级不在
+覆盖范围内，应改用 ai4scholar。
+
 ## 支持范围
 
 - Windows 11 PowerShell；

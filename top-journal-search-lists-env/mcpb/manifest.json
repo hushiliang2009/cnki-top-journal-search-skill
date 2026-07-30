@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "cnki-search-env",
   "display_name": "CNKI Environmental Public Theme Search",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Public CNKI theme search with environmental journal classification; no login or downloads.",
   "author": {
     "name": "Top Environmental Journal Search"
@@ -17,7 +17,8 @@
     }
   },
   "tools": [
-    {"name": "cnki_search_env", "description": "Search the public CNKI homepage and rank first-page records by the environmental journal catalog."}
+    {"name": "cnki_search_env", "description": "Search the public CNKI homepage and rank first-page records by the environmental journal catalog."},
+    {"name": "cnki_professional_search_env", "description": "Attended-only CNKI professional search over the environmental catalog via institutional WebVPN; requires the user to sign in and keep the browser open, and is not usable for scheduled jobs."}
   ],
   "compatibility": {
     "platforms": ["darwin", "linux", "win32"],
