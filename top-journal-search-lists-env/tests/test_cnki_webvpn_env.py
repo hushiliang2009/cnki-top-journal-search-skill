@@ -1638,3 +1638,327 @@ def test_run_batches_applies_throttle_between_batches(tmp_path: Path) -> None:
 
 
 # ── 会话生命周期 ────────────────────────────────────────────────────────────
+
+
+class FakePage:
+    def __init__(self, titles: list[str]) -> None:
+        self.titles = titles
+        self.closed = False
+        self.visited: list[str] = []
+
+    async def goto(self, url: str, *, wait_until: str) -> None:
+        self.visited.append(url)
+
+    async def title(self) -> str:
+        return self.titles.pop(0) if len(self.titles) > 1 else self.titles[0]
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+
+class FakeContext:
+    def __init__(self, page: FakePage) -> None:
+        self.pages = [page]
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeBrowser:
+    def __init__(self, context: FakeContext) -> None:
+        self.context = context
+        self.closed = False
+        self.new_context_calls: list[dict] = []
+
+    async def new_context(self, **kwargs) -> FakeContext:
+        self.new_context_calls.append(kwargs)
+        return self.context
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeChromium:
+    def __init__(self, browser: FakeBrowser) -> None:
+        self.browser = browser
+        self.launch_calls: list[dict] = []
+
+    async def launch(self, **kwargs) -> FakeBrowser:
+        self.launch_calls.append(kwargs)
+        return self.browser
+
+
+class FakePlaywright:
+    def __init__(self, browser: FakeBrowser) -> None:
+        self.chromium = FakeChromium(browser)
+        self.stopped = False
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
+class FakeFactory:
+    def __init__(self, playwright: FakePlaywright) -> None:
+        self.playwright = playwright
+        self.launch_calls = 0
+
+    async def launch(self):
+        self.launch_calls += 1
+        return await webvpn._EphemeralContextFactory(self.playwright).launch()
+
+
+def _session(titles: list[str]):
+    page = FakePage(titles)
+    context = FakeContext(page)
+    browser = FakeBrowser(context)
+    playwright = FakePlaywright(browser)
+    factory = FakeFactory(playwright)
+    config = webvpn.WebVpnConfig("https://webvpn.example.edu.cn/https/abc/",
+                                 login_timeout_seconds=30, poll_interval_seconds=1)
+    session = webvpn.WebVpnSession(config, context_factory=factory)
+    return session, page, context, browser, playwright, factory
+
+
+def test_session_waits_until_the_signed_in_home_page_appears() -> None:
+    session, page, context, _browser, _playwright, _factory = _session(
+        ["统一身份认证平台", "统一身份认证平台", "中国知网"])
+
+    async def scenario() -> None:
+        async with session:
+            await session.wait_until_ready(sleep=_instant, now=_counter())
+
+    asyncio.run(scenario())
+    assert page.visited == ["https://webvpn.example.edu.cn/https/abc/"]
+    assert context.closed
+
+
+def test_session_times_out_when_login_never_completes() -> None:
+    session, _page, _context, _browser, _playwright, _factory = _session(
+        ["统一身份认证平台"])
+
+    async def scenario() -> None:
+        async with session:
+            await session.wait_until_ready(sleep=_instant, now=_counter(step=10))
+
+    with pytest.raises(webvpn.WebVpnLoginTimeout):
+        asyncio.run(scenario())
+
+
+def test_closing_the_window_is_reported_as_a_dedicated_error() -> None:
+    """关窗等同于登出，必须给出可行动的提示而不是崩溃。"""
+    session, page, _context, _browser, _playwright, _factory = _session(["中国知网"])
+
+    async def scenario() -> None:
+        async with session:
+            session.ensure_open()
+            page.closed = True
+            session.ensure_open()
+
+    with pytest.raises(webvpn.WebVpnWindowClosed):
+        asyncio.run(scenario())
+
+
+def test_session_uses_ephemeral_context_and_closes_every_resource() -> None:
+    session, _page, context, browser, playwright, factory = _session(["中国知网"])
+
+    async def scenario() -> None:
+        async with session:
+            assert factory.launch_calls == 1
+            assert playwright.chromium.launch_calls == [{"headless": False}]
+            assert browser.new_context_calls == [{
+                "locale": "zh-CN",
+                "accept_downloads": False,
+            }]
+        assert context.closed
+        assert browser.closed
+        assert playwright.stopped
+        await session.close()
+
+    asyncio.run(scenario())
+
+
+def test_ephemeral_factory_closes_browser_when_context_creation_fails() -> None:
+    page = FakePage(["中国知网"])
+    context = FakeContext(page)
+    browser = FakeBrowser(context)
+    playwright = FakePlaywright(browser)
+    failure = RuntimeError("new_context failed")
+
+    async def fail_new_context(**_kwargs):
+        raise failure
+
+    browser.new_context = fail_new_context
+
+    async def scenario() -> None:
+        with pytest.raises(webvpn.BrowserUnavailableError) as raised:
+            await webvpn._EphemeralContextFactory(playwright).launch()
+        assert raised.value.__cause__ is failure
+
+    asyncio.run(scenario())
+    assert browser.closed
+
+
+def test_ephemeral_factory_closes_browser_when_context_creation_is_cancelled() -> None:
+    page = FakePage(["中国知网"])
+    context = FakeContext(page)
+    browser = FakeBrowser(context)
+    playwright = FakePlaywright(browser)
+    cancellation = asyncio.CancelledError("new_context cancelled")
+
+    async def cancel_new_context(**_kwargs):
+        raise cancellation
+
+    browser.new_context = cancel_new_context
+
+    async def scenario() -> None:
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await webvpn._EphemeralContextFactory(playwright).launch()
+        assert raised.value is cancellation
+
+    asyncio.run(scenario())
+    assert browser.closed
+
+
+def test_session_cleans_up_when_factory_launch_fails_and_preserves_error() -> None:
+    page = FakePage(["中国知网"])
+    context = FakeContext(page)
+    browser = FakeBrowser(context)
+    playwright = FakePlaywright(browser)
+    failure = RuntimeError("launch failed")
+
+    class LaunchFailFactory:
+        async def launch(self):
+            raise failure
+
+    factory = LaunchFailFactory()
+    factory.playwright = playwright
+    session = webvpn.WebVpnSession(
+        webvpn.WebVpnConfig("https://webvpn.example.edu.cn/https/abc/"),
+        context_factory=factory,
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError) as raised:
+            await session.__aenter__()
+        assert raised.value is failure
+
+    asyncio.run(scenario())
+    assert playwright.stopped
+
+
+@pytest.mark.parametrize(
+    "initial_failure",
+    [RuntimeError("goto failed"), asyncio.CancelledError("goto cancelled")],
+    ids=["original_error", "original_cancellation"],
+)
+def test_session_finishes_cleanup_when_enter_task_is_cancelled_again(
+    initial_failure: BaseException,
+) -> None:
+    session, page, context, browser, playwright, _factory = _session(["中国知网"])
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+
+    async def fail_goto(_url: str, *, wait_until: str):
+        raise initial_failure
+
+    async def slow_context_close() -> None:
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        context.closed = True
+
+    page.goto = fail_goto
+    context.close = slow_context_close
+
+    async def scenario() -> BaseException:
+        async def enter() -> BaseException:
+            try:
+                await session.__aenter__()
+            except BaseException as raised:
+                return raised
+            raise AssertionError("__aenter__ 应当失败")
+
+        task = asyncio.create_task(enter())
+        await cleanup_started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        allow_cleanup.set()
+        result = await task
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return result
+
+    raised = asyncio.run(scenario())
+
+    assert raised is initial_failure
+    assert context.closed
+    assert browser.closed
+    assert playwright.stopped
+
+
+def test_session_cleans_up_when_new_page_fails_and_preserves_error() -> None:
+    page = FakePage(["中国知网"])
+    context = FakeContext(page)
+    context.pages = []
+    browser = FakeBrowser(context)
+    playwright = FakePlaywright(browser)
+    factory = FakeFactory(playwright)
+    failure = RuntimeError("new_page failed")
+
+    async def fail_new_page():
+        raise failure
+
+    context.new_page = fail_new_page
+    session = webvpn.WebVpnSession(
+        webvpn.WebVpnConfig("https://webvpn.example.edu.cn/https/abc/"),
+        context_factory=factory,
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError) as raised:
+            await session.__aenter__()
+        assert raised.value is failure
+
+    asyncio.run(scenario())
+    assert context.closed
+    assert browser.closed
+    assert playwright.stopped
+
+
+def test_session_cleans_up_when_home_navigation_fails_and_preserves_error() -> None:
+    session, page, context, browser, playwright, _factory = _session(["中国知网"])
+    failure = RuntimeError("goto failed")
+
+    async def fail_goto(_url: str, *, wait_until: str):
+        raise failure
+
+    page.goto = fail_goto
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError) as raised:
+            await session.__aenter__()
+        assert raised.value is failure
+
+    asyncio.run(scenario())
+    assert context.closed
+    assert browser.closed
+    assert playwright.stopped
+
+
+async def _instant(_delay: float) -> None:
+    return None
+
+
+def _counter(step: float = 1.0):
+    ticks = [0.0]
+
+    def now() -> float:
+        ticks[0] += step
+        return ticks[0]
+
+    return now
