@@ -19,8 +19,12 @@ class FakeService:
 
 
 def test_mcp_exposes_exact_public_tool() -> None:
+    """两个工具，且公开工具排在前——顺序即三类握手的断言口径。"""
     server = CnkiMcpServer(service=FakeService())
-    assert server.tool_names() == REQUIRED_TOOLS == ["cnki_search_env"]
+    assert server.tool_names() == REQUIRED_TOOLS == [
+        "cnki_search_env",
+        "cnki_professional_search_env",
+    ]
 
 
 def test_public_signature_is_query_and_limit_only() -> None:

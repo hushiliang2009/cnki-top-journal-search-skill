@@ -41,6 +41,7 @@ TEST_RELATIVE = (
     "tests/test_cnki_models.py",
     "tests/test_cnki_package_contract.py",
     "tests/test_cnki_professional_env.py",
+    "tests/test_cnki_professional_mcp_env.py",
     "tests/test_cnki_professional_service_env.py",
     "tests/test_cnki_professional_runtime_env.py",
     "tests/test_cnki_webvpn_outcome_env.py",
