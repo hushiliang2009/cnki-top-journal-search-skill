@@ -588,7 +588,11 @@ def test_click_cancel_uses_one_cleanup_budget(
     monkeypatch.setattr(
         webvpn,
         "PAGE_OWNERSHIP_CLEANUP_TIMEOUT_SECONDS",
-        0.05,
+        # 整体放大 10 倍：判别的是"一份预算还是两份"，与绝对数值无关。
+        # 原先预算 0.05 秒、关闭本身占 0.04 秒，断言 0.075 秒只剩 35 毫秒余量，
+        # macOS CI 负载下实测越过 0.119 秒。放大后余量 350 毫秒，
+        # 两份预算（1.0 秒）仍会被 0.75 秒的断言抓住——消除竞赛而不是降低概率。
+        0.5,
     )
     click_started = asyncio.Event()
     close_started = asyncio.Event()
@@ -634,7 +638,7 @@ def test_click_cancel_uses_one_cleanup_budget(
 
     async def close_batch_page() -> None:
         close_started.set()
-        await asyncio.sleep(0.04)
+        await asyncio.sleep(0.4)
         batch_page.closed = True
 
     batch_page.close = close_batch_page
@@ -656,12 +660,12 @@ def test_click_cancel_uses_one_cleanup_budget(
         started = monotonic()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=0.3)
+            await asyncio.wait_for(task, timeout=3.0)
         return monotonic() - started
 
     elapsed = asyncio.run(scenario())
 
-    assert elapsed < 0.075
+    assert elapsed < 0.75
     assert batch_page.closed is True
     assert home.closed is False
     assert batch_page._popup_handlers == []
