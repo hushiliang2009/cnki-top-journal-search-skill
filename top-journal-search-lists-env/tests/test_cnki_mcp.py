@@ -19,8 +19,12 @@ class FakeService:
 
 
 def test_mcp_exposes_exact_public_tool() -> None:
+    """两个工具，且公开工具排在前——顺序即三类握手的断言口径。"""
     server = CnkiMcpServer(service=FakeService())
-    assert server.tool_names() == REQUIRED_TOOLS == ["cnki_search_env"]
+    assert server.tool_names() == REQUIRED_TOOLS == [
+        "cnki_search_env",
+        "cnki_professional_search_env",
+    ]
 
 
 def test_public_signature_is_query_and_limit_only() -> None:
@@ -124,7 +128,7 @@ def test_server_announces_product_version_not_sdk_version() -> None:
     from cnki_search_env import __version__
 
     mcp = CnkiMcpServer(service=FakeService()).build_fastmcp(FastMCP)
-    assert mcp._mcp_server.version == __version__ == "0.1.0"
+    assert mcp._mcp_server.version == __version__ == "0.2.0"
 
 
 def test_shutdown_does_not_block_on_queued_work() -> None:

@@ -30,4 +30,5 @@ def _load_environment_catalog_module() -> ModuleType:
 _catalog = _load_environment_catalog_module()
 DEFAULT_CATALOG: Path = _catalog.DEFAULT_CATALOG
 lookup_journals = _catalog.lookup_journals
+journals_by_group = _catalog.journals_by_group
 validate_catalog = _catalog.validate_catalog

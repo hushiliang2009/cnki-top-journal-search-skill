@@ -9,6 +9,8 @@ import zipfile
 
 import pytest
 
+from cnki_search_env import mcp_server
+
 
 CNKI_MODULES = (
     "__init__.py",
@@ -18,24 +20,36 @@ CNKI_MODULES = (
     "install_config.py",
     "mcp_server.py",
     "models.py",
+    "professional.py",
+    "professional_runtime.py",
+    "professional_service.py",
     "ranking.py",
     "rate_limit.py",
     "results.py",
     "search.py",
     "service.py",
     "session.py",
+    "webvpn.py",
 )
 TEST_RELATIVE = (
     "tests/_mcp_handshake.py",
     "tests/_mcpb_handshake.py",
     "tests/_mcpb_raw_handshake.py",
     "tests/conftest.py",
+    "tests/_webvpn_probe.py",
     "tests/test_catalog_lookup.py",
     "tests/test_cnki_cache.py",
     "tests/test_cnki_async.py",
     "tests/test_cnki_mcp.py",
     "tests/test_cnki_models.py",
     "tests/test_cnki_package_contract.py",
+    "tests/test_cnki_professional_env.py",
+    "tests/test_cnki_professional_mcp_env.py",
+    "tests/test_cnki_professional_service_env.py",
+    "tests/test_cnki_professional_runtime_env.py",
+    "tests/test_cnki_webvpn_outcome_env.py",
+    "tests/test_cnki_webvpn_page_env.py",
+    "tests/test_cnki_webvpn_env.py",
     "tests/test_cnki_ranking.py",
     "tests/test_cnki_rate_limit.py",
     "tests/test_cnki_results.py",
@@ -105,7 +119,7 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
     assert manifest["manifest_version"] == "0.4"
     assert manifest["name"] == "cnki-search-env"
     assert manifest["display_name"] == "CNKI Environmental Public Theme Search"
-    assert manifest["version"] == "0.1.0"
+    assert manifest["version"] == "0.2.0"
     assert manifest["description"] == (
         "Public CNKI theme search with environmental journal classification; no login or downloads."
     )
@@ -114,12 +128,23 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
     assert manifest["server"]["entry_point"] == "src/server.py"
     assert manifest["server"]["mcp_config"]["command"] == "uv"
     assert set(manifest["compatibility"]["platforms"]) == {"win32", "darwin", "linux"}
+    # manifest 的 tools 是客户端可见的能力声明，必须与实际注册的工具一致；
+    # 少声明一个会让安装者看不到它，多声明则等于承诺了不存在的能力。
     assert manifest["tools"] == [
         {
             "name": "cnki_search_env",
             "description": "Search the public CNKI homepage and rank first-page records by the environmental journal catalog.",
-        }
+        },
+        {
+            "name": "cnki_professional_search_env",
+            "description": (
+                "Attended-only CNKI professional search over the environmental catalog via "
+                "institutional WebVPN; requires the user to sign in and keep the browser open, "
+                "and is not usable for scheduled jobs."
+            ),
+        },
     ]
+    assert [tool["name"] for tool in manifest["tools"]] == mcp_server.REQUIRED_TOOLS
     assert manifest["keywords"] == [
         "CNKI",
         "environmental-science",
@@ -129,14 +154,17 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
     ]
     assert manifest["license"] == "Apache-2.0"
     serialized = json.dumps(manifest, ensure_ascii=False).casefold()
-    for token in ("password", "cookie", "webvpn", "cnki_download", "cnki_fetch_details"):
+    # manifest 可以命名 WebVPN 这一模式（第二个工具正是靠它工作），但凭据类
+    # 字段与旧能力令牌照禁——与代码侧 SHARED_ENTRY_MODULES 的口径一致。
+    for token in ("password", "cookie", "cnki_download", "cnki_fetch_details"):
         assert token not in serialized
+    assert "webvpn" in serialized, "第二个工具必须在 manifest 里如实说明它经 WebVPN 工作"
     assert "user_config" not in manifest
 
 
 def test_mcpb_pyproject_declares_public_runtime_dependencies(skill_root: Path) -> None:
     text = (skill_root / "mcpb/pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.1.0"' in text
+    assert 'version = "0.2.0"' in text
     assert 'requires-python = ">=3.11"' in text
     assert '"mcp>=1,<2"' in text
     assert '"playwright>=1.45,<2"' in text
@@ -148,8 +176,8 @@ def test_all_runtime_versions_and_release_allowlist_are_consistent(skill_root: P
         "scripts/cnki_search_env/__init__.py",
         "mcpb/src/cnki_search_env/__init__.py",
     ):
-        assert '__version__ = "0.1.0"' in (skill_root / relative).read_text(encoding="utf-8")
-    assert 'name = "cnki-search-env-mcp"\nversion = "0.1.0"' in (
+        assert '__version__ = "0.2.0"' in (skill_root / relative).read_text(encoding="utf-8")
+    assert 'name = "cnki-search-env-mcp"\nversion = "0.2.0"' in (
         skill_root / "mcpb/uv.lock"
     ).read_text(encoding="utf-8")
     assert ".mcpbignore" in _load_builder(skill_root).MCPB_ALLOWLIST
@@ -183,6 +211,9 @@ def test_release_builder_creates_clean_archives(skill_root: Path, tmp_path: Path
         token in "\n".join(members).casefold()
         for token in ("__pycache__", ".pytest_cache", ".venv", "local state", "details.py", "downloads.py")
     )
+    # 人工实机验证脚本只在仓库检出下有意义：它会打开可见浏览器并等待人工登录，
+    # 混进发布包只会给安装者一个看起来能跑、实际必须有人值守的入口。
+    assert not any(member.endswith("tests/_webvpn_e2e.py") for member in members)
 
 
 def test_release_build_uses_only_explicit_output_directory(skill_root: Path, tmp_path: Path) -> None:

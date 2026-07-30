@@ -7,6 +7,11 @@ from enum import StrEnum
 from typing import Any
 
 
+#: 知网结果页「显示」下拉的最大档位，实测选项为 10/20/50，没有更大的档。
+#: 50 是站点上限，不是我们自选的数字。公开检索不切档位，其上限另由
+#: SearchRequest 与 mcp_server.MAX_LIMIT 约束在 20。
+MAX_RESULTS_PER_PAGE = 50
+
 MAX_TITLE_LENGTH = 500
 MAX_JOURNAL_LENGTH = 300
 MAX_AUTHOR_LENGTH = 120
@@ -24,6 +29,10 @@ class SearchStatus(StrEnum):
     PAGE_CONTRACT_CHANGED = "page_contract_changed"
     CONFIGURATION_ERROR = "configuration_error"
     NETWORK_ERROR = "network_error"
+    #: 知网返回「抱歉，暂无数据，请稍后重试。」——服务端临时拒绝，既不是无结果，
+    #: 也不是安全验证。实测由过长的专业检索表达式触发，补救办法是缩小分批，
+    #: 与限流的"等一等再来"不是一回事，因此单列一档。
+    NO_DATA_RETRY_LATER = "no_data_retry_later"
 
 
 @dataclass(frozen=True, slots=True)

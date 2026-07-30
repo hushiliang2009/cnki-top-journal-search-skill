@@ -30,7 +30,21 @@ def test_search_statuses_match_public_contract() -> None:
         "success", "no_results", "partial", "rate_limited",
         "challenge_detected", "login_required", "forbidden",
         "page_contract_changed", "network_error", "configuration_error",
+        # 知网「暂无数据，请稍后重试」——服务端临时拒绝，与无结果、安全验证
+        # 都不同，补救办法是缩小分批
+        "no_data_retry_later",
     }
+
+
+def test_page_size_ceiling_is_declared_without_widening_public_search() -> None:
+    """专业检索按每页 50 条取数；公开检索不切档位，上限仍为 20。"""
+    from cnki_search_env.models import MAX_RESULTS_PER_PAGE, SearchRequest
+
+    assert MAX_RESULTS_PER_PAGE == 50
+    assert SearchRequest("topic", 20).limit == 20
+    for bad in (0, 21):
+        with pytest.raises(ValueError):
+            SearchRequest("topic", bad)
 
 
 def _record(*, title: str = "Example paper", journal: str = "Journal", year: int | None = 2026) -> PaperRecord:
