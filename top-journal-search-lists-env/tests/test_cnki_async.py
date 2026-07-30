@@ -112,7 +112,12 @@ def test_async_service_timeout_returns_network_error_and_queue_cancellation_does
             session_factory=Session,
             catalog=CATALOG,
             gate=SerialSearchGate(minimum_interval=0),
-            search_timeout_seconds=0.1,
+            # 0.1 秒曾在 CI 的 ubuntu (3.12) 上不稳定：这段预算要覆盖两次
+            # asyncio.to_thread 往返（含线程池惰性创建）与调度抖动，只削减
+            # 目录解析成本仍不够。放大到 2.0 秒是消除竞赛本身，而不是降低概率；
+            # 用例判定的是"超时后返回 network_error"，与具体数值无关。
+            # 通用版 PR #11 已如此修正，环境版此前未同步。
+            search_timeout_seconds=2.0,
         )
         outcome = await service.search("topic")
         assert outcome.status is SearchStatus.NETWORK_ERROR
