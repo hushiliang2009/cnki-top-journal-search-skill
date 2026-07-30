@@ -1,5 +1,6 @@
 import asyncio
 import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -62,7 +63,8 @@ def _executor(pages: list[tuple[str, str]], seen: list[ExpressionBatch] | None =
     async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
         if seen is not None:
             seen.append(plan)
-        title, journal = pages.pop(0)
+        # 字段升级会多轮执行同一批次，用尽即抛 IndexError 与被测行为无关
+        title, journal = pages[0] if len(pages) == 1 else pages.pop(0)
         return (SearchStatus.SUCCESS.value,
                 RESULT_TEMPLATE.format(title=title, journal=journal),
                 "https://webvpn.example.edu.cn/https/abc/kns8s/defaultresult/index")
@@ -83,11 +85,15 @@ def test_environment_cssci_plan_enumerates_journals_and_keeps_the_facet() -> Non
     plans = service_module.preview_plans("碳中和", service_module.ENVIRONMENT_CSSCI_GROUP)
     assert len(plans) > 1, "241 本刊装不进一条表达式，必须分批"
     for plan in plans:
-        assert plan.expression.startswith("SU %= '碳中和'")
+        assert plan.expression.startswith("TI %= '碳中和'"), "默认字段是优先级最高的 TI"
         assert "LY=" in plan.expression
         assert len(plan.expression) <= service_module.DEFAULT_MAX_EXPRESSION_CHARS
         assert plan.source_category == "CSSCI", "每一批都要带来源类别，不能只给第一批"
         assert plan.page_size == 50
+    # 字段可指定：升级逻辑正是靠它逐级替换检索式
+    fallback = service_module.preview_plans(
+        "碳中和", service_module.ENVIRONMENT_CSSCI_GROUP, topic_field="SU")
+    assert all(p.expression.startswith("SU %= '碳中和'") for p in fallback)
     covered = [title for plan in plans for title in plan.journals]
     assert len(covered) == len(set(covered)) == 241
 
@@ -97,9 +103,10 @@ def test_chinese_top_group_fits_one_batch_and_is_annotated_at_level_six() -> Non
     service = CnkiProfessionalSearchService(
         _executor([("大气污染的协同治理", "中国环境科学")], seen))
     result = asyncio.run(
-        service.search_group("大气污染治理", service_module.CHINESE_ENVIRONMENT_TOP_GROUP))
+        service.search_group(
+            "大气污染治理", service_module.CHINESE_ENVIRONMENT_TOP_GROUP, limit=1))
 
-    assert len(seen) == 1, "6 本环境顶刊必须单批完成"
+    assert len(seen) == 1, "6 本环境顶刊必须单批完成，且 TI 够用即停"
     assert result["journal_count"] == 6
     assert seen[0].source_category is None
     assert result["batches_total"] == 1 and result["complete"] is True
@@ -115,7 +122,7 @@ def test_expression_restricts_journals_and_uses_official_syntax() -> None:
         "大气污染治理", service_module.CHINESE_ENVIRONMENT_TOP_GROUP)
     assert len(expressions) == 1
     expression = expressions[0]
-    assert expression.startswith("SU %= '大气污染治理'")
+    assert expression.startswith("TI %= '大气污染治理'")
     assert "LY='中国环境科学'" in expression and "LY='环境科学学报'" in expression
     assert " AND " in expression and " OR " in expression
 
@@ -123,7 +130,8 @@ def test_expression_restricts_journals_and_uses_official_syntax() -> None:
 def test_non_journal_rows_are_excluded_from_records() -> None:
     """只收中文学术期刊论文；解析层是页面设置之外的兜底。"""
     service = CnkiProfessionalSearchService(_executor([("某文", "环境科学学报")]))
-    result = asyncio.run(service.search_group("碳排放", service_module.CHINESE_ENVIRONMENT_TOP_GROUP))
+    result = asyncio.run(service.search_group(
+        "碳排放", service_module.CHINESE_ENVIRONMENT_TOP_GROUP, limit=1))
     assert result["excluded_non_journal_rows"] == 1
     assert all(record["journal_raw"] != "某大学" for record in result["records"])
 
@@ -154,7 +162,9 @@ def test_environment_cssci_group_merges_across_every_batch() -> None:
     assert result["journal_count"] == 241
     assert result["source_category"] == "CSSCI"
     assert result["batches_total"] > 1
-    assert len(seen) == result["batches_total"], "每一批都要真的提交"
+    per_field = Counter(_field_of(plan.expression) for plan in seen)
+    assert per_field[result["topic_field"]] == result["batches_total"], "每一批都要真的提交"
+    assert list(per_field) == result["topic_fields_tried"], "字段必须按声明的优先序试"
     assert all(plan.source_category == "CSSCI" for plan in seen)
     assert all("LY=" in plan.expression for plan in seen)
     assert all(record["priority_level"] == 9 for record in result["records"])
@@ -659,3 +669,81 @@ def test_custom_expression_runs_without_batching() -> None:
     result = asyncio.run(service.search_expression(expression))
     assert [plan.expression for plan in seen] == [expression]
     assert result["batches_total"] == 1 and result["expressions"] == [expression]
+
+
+# ── 检索字段按优先序升级（TI → SU → KY → TKA） ─────────────────────────
+
+def _field_of(expression: str) -> str:
+    return expression.split(" ", 1)[0]
+
+
+def _executor_yielding(counts: dict[str, int], seen: list[ExpressionBatch]):
+    """按字段返回不同数量的题录，用于驱动升级判定。"""
+    async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
+        seen.append(plan)
+        rows = "".join(
+            f"<tr><td class='name'><a>文{index}</a></td>"
+            f"<td class='author'><a>张三</a></td>"
+            f"<td class='source'><a>环境科学</a></td>"
+            f"<td class='date'>2025-03-11</td><td class='data'>期刊</td></tr>"
+            for index in range(counts.get(_field_of(plan.expression), 0))
+        )
+        return (SearchStatus.SUCCESS.value,
+                f"<table class='result-table-list'><tbody>{rows}</tbody></table>",
+                "https://example.invalid/")
+    return execute
+
+
+def test_title_field_is_tried_first() -> None:
+    """TI 优先：够用时不再向后试，省下的是限流预算与风控暴露。"""
+    seen: list[ExpressionBatch] = []
+    service = CnkiProfessionalSearchService(_executor_yielding({"TI": 5}, seen))
+    result = asyncio.run(service.search_group(
+        "碳中和", service_module.CHINESE_ENVIRONMENT_TOP_GROUP, limit=5))
+    assert [_field_of(p.expression) for p in seen] == ["TI"]
+    assert result["topic_field"] == "TI"
+    assert result["record_count"] if "record_count" in result else len(result["records"]) == 5
+
+
+def test_fields_escalate_in_declared_order_until_enough() -> None:
+    """TI 不够就退到 SU，再不够 KY，最后 TKA——顺序固定，不是随机试。"""
+    seen: list[ExpressionBatch] = []
+    service = CnkiProfessionalSearchService(
+        _executor_yielding({"TI": 1, "SU": 2, "KY": 9}, seen))
+    result = asyncio.run(service.search_group(
+        "碳中和", service_module.CHINESE_ENVIRONMENT_TOP_GROUP, limit=9))
+    assert [_field_of(p.expression) for p in seen] == ["TI", "SU", "KY"]
+    assert result["topic_field"] == "KY"
+    assert result["topic_fields_tried"] == ["TI", "SU", "KY"]
+    assert len(result["records"]) == 9
+
+
+def test_best_field_wins_when_none_reaches_the_limit() -> None:
+    """都不够用时取有效记录最多的那个，而不是最后试的那个。"""
+    seen: list[ExpressionBatch] = []
+    service = CnkiProfessionalSearchService(
+        _executor_yielding({"TI": 1, "SU": 7, "KY": 2, "TKA": 3}, seen))
+    result = asyncio.run(service.search_group(
+        "碳中和", service_module.CHINESE_ENVIRONMENT_TOP_GROUP, limit=50))
+    assert [_field_of(p.expression) for p in seen] == ["TI", "SU", "KY", "TKA"]
+    assert result["topic_field"] == "SU"
+    assert len(result["records"]) == 7
+
+
+def test_escalation_stops_immediately_on_a_blocking_status() -> None:
+    """命中风控后不得继续换字段试探——那正是把账号推向更严限制的做法。"""
+    seen: list[ExpressionBatch] = []
+
+    async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
+        seen.append(plan)
+        return (SearchStatus.CHALLENGE_DETECTED.value, "", "https://example.invalid/")
+
+    service = CnkiProfessionalSearchService(execute)
+    result = asyncio.run(service.search_group(
+        "碳中和", service_module.CHINESE_ENVIRONMENT_TOP_GROUP, limit=50))
+    assert [_field_of(p.expression) for p in seen] == ["TI"]
+    assert result["terminal_status"] == SearchStatus.CHALLENGE_DETECTED.value
+
+
+def test_declared_priority_is_the_documented_one() -> None:
+    assert service_module.TOPIC_FIELD_PRIORITY == ("TI", "SU", "KY", "TKA")

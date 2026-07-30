@@ -144,7 +144,8 @@ class ExpressionBatch:
 def build_batches(topic: str, journals: list[str], *,
                   year_from: int | None = None, year_to: int | None = None,
                   max_chars: int = DEFAULT_MAX_EXPRESSION_CHARS,
-                  source_category: str | None = None) -> list[ExpressionBatch]:
+                  source_category: str | None = None,
+                  topic_field: str = TOPIC_FIELD) -> list[ExpressionBatch]:
     """按字符上限把期刊集合切成多条表达式。
 
     只切 ``LY=`` 列表；主题、年份与来源类别在每批中重复出现。环境版的 CSSCI
@@ -157,7 +158,10 @@ def build_batches(topic: str, journals: list[str], *,
     current: list[str] = []
     for title in journals:
         probe = current + [title]
-        if len(build_expression(topic, probe, year_from=year_from, year_to=year_to)) <= max_chars:
+        probe_expression = build_expression(
+            topic, probe, year_from=year_from, year_to=year_to, topic_field=topic_field
+        )
+        if len(probe_expression) <= max_chars:
             current = probe
             continue
         if not current:
@@ -173,7 +177,9 @@ def build_batches(topic: str, journals: list[str], *,
             index=position,
             total=len(groups),
             journals=tuple(group),
-            expression=build_expression(topic, group, year_from=year_from, year_to=year_to),
+            expression=build_expression(
+                topic, group, year_from=year_from, year_to=year_to, topic_field=topic_field
+            ),
             source_category=source_category,
         )
         for position, group in enumerate(groups, start=1)

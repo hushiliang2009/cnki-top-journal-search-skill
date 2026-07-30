@@ -45,6 +45,12 @@ SUPPORTED_GROUPS = (CHINESE_ENVIRONMENT_TOP_GROUP, ENVIRONMENT_CSSCI_GROUP)
 #: 用收不窄到环境学科，因此分面与刊名枚举同时使用，两者都不能省。
 CSSCI_SOURCE_CATEGORY = "CSSCI"
 
+#: 检索字段的优先序：篇名最准，主题次之，关键词第三，篇关摘兜底。
+#: 按此顺序逐个试，**有效记录数够用就停**——每多试一个字段就是一次真实请求，
+#: 而批次间强制 ≥30 秒节流，请求数正是风控最敏感的维度。都不够用时取有效
+#: 记录最多的那个字段，而不是最后试的那个。
+TOPIC_FIELD_PRIORITY = ("TI", "SU", "KY", "TKA")
+
 
 @dataclass(frozen=True, slots=True)
 class BatchOutcome:
@@ -86,21 +92,51 @@ class CnkiProfessionalSearchService:
             raise ValueError(
                 f"CNKI 专业检索只覆盖中文层级 {SUPPORTED_GROUPS}，收到 {group!r}"
             )
-        batches = build_group_plans(
-            topic,
-            group,
-            catalog=self.catalog,
-            max_chars=self.max_expression_chars,
-            year_from=year_from,
-            year_to=year_to,
+        summary, field, tried = await self._search_with_field_escalation(
+            topic, group, limit=limit, year_from=year_from, year_to=year_to
         )
-        summary = await self._run(batches, limit)
         summary["group"] = group
+        summary["topic_field"] = field
+        summary["topic_fields_tried"] = tried
         # 两组都是逐本枚举，刊数直接来自环境目录，不写死在代码里。
         summary["journal_count"] = len(journals_by_group(group, self.catalog))
         if group == ENVIRONMENT_CSSCI_GROUP:
             summary["source_category"] = CSSCI_SOURCE_CATEGORY
         return summary
+
+    async def _search_with_field_escalation(
+        self, topic: str, group: str, *, limit: int,
+        year_from: int | None, year_to: int | None,
+    ) -> tuple[dict[str, Any], str, list[str]]:
+        """按 TOPIC_FIELD_PRIORITY 逐个字段试，有效记录数够用就停。
+
+        命中站点主动阻断（安全验证、登录、限流、拒绝、页面结构变化）时立即
+        停止换字段：继续试探只会把账号推向更严的限制，而且换个字段也不会让
+        风控消失。此时如实上报该次结果。
+        """
+        best: dict[str, Any] | None = None
+        best_field = TOPIC_FIELD_PRIORITY[0]
+        tried: list[str] = []
+        for field in TOPIC_FIELD_PRIORITY:
+            tried.append(field)
+            batches = build_group_plans(
+                topic,
+                group,
+                catalog=self.catalog,
+                max_chars=self.max_expression_chars,
+                year_from=year_from,
+                year_to=year_to,
+                topic_field=field,
+            )
+            summary = await self._run(batches, limit)
+            if best is None or len(summary["records"]) > len(best["records"]):
+                best, best_field = summary, field
+            if summary.get("terminal_status") is not None:
+                return summary, field, tried
+            if len(summary["records"]) >= limit:
+                return summary, field, tried
+        assert best is not None
+        return best, best_field, tried
 
     async def search_expression(self, expression: str, *, limit: int = 20) -> dict[str, Any]:
         """直接执行一条使用者自备的专业检索表达式，不做分批。"""
@@ -341,6 +377,7 @@ def build_group_plans(
     max_chars: int = DEFAULT_MAX_EXPRESSION_CHARS,
     year_from: int | None = None,
     year_to: int | None = None,
+    topic_field: str = TOPIC_FIELD_PRIORITY[0],
 ) -> list[ExpressionBatch]:
     if group in SUPPORTED_GROUPS:
         return build_batches(
@@ -352,6 +389,7 @@ def build_group_plans(
             source_category=(
                 CSSCI_SOURCE_CATEGORY if group == ENVIRONMENT_CSSCI_GROUP else None
             ),
+            topic_field=topic_field,
         )
     raise ValueError(
         f"CNKI 专业检索只覆盖中文层级 {SUPPORTED_GROUPS}，收到 {group!r}"
@@ -366,6 +404,7 @@ def preview_plans(
     max_chars: int = DEFAULT_MAX_EXPRESSION_CHARS,
     year_from: int | None = None,
     year_to: int | None = None,
+    topic_field: str = TOPIC_FIELD_PRIORITY[0],
 ) -> list[ExpressionBatch]:
     return build_group_plans(
         topic,
@@ -374,6 +413,7 @@ def preview_plans(
         max_chars=max_chars,
         year_from=year_from,
         year_to=year_to,
+        topic_field=topic_field,
     )
 
 
@@ -397,6 +437,7 @@ def preview_expressions(topic: str, group: str, *, catalog: Path = DEFAULT_CATAL
 
 __all__ = [
     "CHINESE_ENVIRONMENT_TOP_GROUP",
+    "TOPIC_FIELD_PRIORITY",
     "CSSCI_SOURCE_CATEGORY",
     "ENVIRONMENT_CSSCI_GROUP",
     "SUPPORTED_GROUPS",
