@@ -36,6 +36,7 @@ TEST_RELATIVE = (
     "tests/_mcpb_handshake.py",
     "tests/_mcpb_raw_handshake.py",
     "tests/conftest.py",
+    "tests/_webvpn_probe.py",
     "tests/test_catalog_lookup.py",
     "tests/test_cnki_cache.py",
     "tests/test_cnki_async.py",

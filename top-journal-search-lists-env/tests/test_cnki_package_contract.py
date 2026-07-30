@@ -233,6 +233,32 @@ _SMOKE_RESULT_HTML = """
 """
 
 
+def test_webvpn_probe_uses_current_ephemeral_config_contract(
+    skill_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_helper_module(skill_root, "_webvpn_probe")
+    captured: list[Any] = []
+
+    async def fake_run_probe(config: Any, *, submit_topic: str | None = None) -> Any:
+        captured.append((config, submit_topic))
+        return probe.ProbeResult(0, {}, {"contract_ok": True})
+
+    monkeypatch.setattr(probe, "run_probe", fake_run_probe)
+    output = tmp_path / "webvpn-probe.json"
+
+    exit_code = probe.main([
+        "--home", "https://webvpn.example.edu.cn/https/abc/",
+        "--output", str(output),
+    ])
+
+    assert exit_code == 0
+    assert captured == [(
+        probe.WebVpnConfig("https://webvpn.example.edu.cn/https/abc/"),
+        None,
+    )]
+    assert output.is_file()
+
+
 def _emit_native_and_child_output(stage: str) -> None:
     os.write(1, f"{stage}_FD_STDOUT_SECRET\n".encode())
     os.write(2, f"{stage}_FD_STDERR_SECRET\n".encode())
