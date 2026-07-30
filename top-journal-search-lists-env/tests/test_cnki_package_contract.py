@@ -30,12 +30,39 @@ def test_cnki_runtime_contract(skill_root: Path) -> None:
     assert "中国知网" in (skill_root / "README.md").read_text(encoding="utf-8")
 
 
-def test_package_exposes_public_home_and_no_legacy_capabilities(skill_root: Path) -> None:
-    code_files = [
-        *(skill_root / "scripts/cnki_search_env").glob("*.py"),
-        *(skill_root / "mcpb/src/cnki_search_env").glob("*.py"),
+#: 人工值守的 WebVPN 模式独占的模块。公开匿名模式的边界对它们不适用，
+#: 但它们各自的边界另有守卫把守，不是豁免。
+WEBVPN_MODULES = {
+    "webvpn.py",
+    "professional.py",
+    "professional_runtime.py",
+    "professional_service.py",
+}
+
+
+#: 两种模式共用的注册入口。它必须能命名 WebVPN 模式（工具描述、启用用的环境
+#: 变量），但旧能力令牌对它同样禁止。
+SHARED_ENTRY_MODULES = {"mcp_server.py"}
+
+
+def _public_mode_sources(skill_root: Path) -> list[Path]:
+    return [
+        path
+        for directory in ("scripts/cnki_search_env", "mcpb/src/cnki_search_env")
+        for path in (skill_root / directory).glob("*.py")
+        if path.name not in WEBVPN_MODULES | SHARED_ENTRY_MODULES
     ]
-    combined = "\n".join(path.read_text(encoding="utf-8").casefold() for path in code_files)
+
+
+def test_package_exposes_public_home_and_no_legacy_capabilities(skill_root: Path) -> None:
+    """公开匿名模式的边界不因新增 WebVPN 模式而放松。
+
+    这些令牌当初是随登录/下载/高级检索能力一并移除的，此处防回退。
+    WebVPN 模式的代码集中在 WEBVPN_MODULES，不得渗回公开模式的模块。
+    """
+    combined = "\n".join(
+        path.read_text(encoding="utf-8").casefold() for path in _public_mode_sources(skill_root)
+    )
     assert "https://www.cnki.net/" in combined
     for token in (
         "webvpn",
@@ -46,9 +73,39 @@ def test_package_exposes_public_home_and_no_legacy_capabilities(skill_root: Path
         "detail_url",
         "download_url",
     ):
-        assert token not in combined
+        assert token not in combined, f"公开匿名模式的模块不得引入 {token}"
     bundled_names = {path.name for path in (skill_root / "mcpb/src/cnki_search_env").glob("*.py")}
     assert not bundled_names & LEGACY_MODULES
+
+
+def test_release_manifest_covers_every_runtime_module(skill_root: Path) -> None:
+    """新增模块必须同时登记进发布清单。
+
+    漏登记时源码树里一切正常、测试全绿，只有安装到目标机器后才会
+    ModuleNotFoundError——本守卫把这个反馈提前到本地。通用版曾靠 CI 才发现，
+    环境版不重复那次代价。
+    """
+    import build_release
+
+    source_modules = {path.name for path in (skill_root / "scripts/cnki_search_env").glob("*.py")}
+    missing = source_modules - set(build_release.CNKI_MODULES)
+    assert not missing, f"以下模块未登记进 build_release.CNKI_MODULES：{sorted(missing)}"
+    stale = set(build_release.CNKI_MODULES) - source_modules
+    assert not stale, f"发布清单登记了不存在的模块：{sorted(stale)}"
+
+
+#: 只在仓库检出下有意义、不随发布包分发的测试。
+#: test_release_baseline.py 校验仓库根的 .gitignore 与 CI 工作流，发布包里没有这些文件。
+REPO_ONLY_TESTS = {"tests/test_release_baseline.py"}
+
+
+def test_release_manifest_covers_every_test_module(skill_root: Path) -> None:
+    """测试文件同理：漏登记会让发布包的自检覆盖面悄悄缩水。"""
+    import build_release
+
+    source_tests = {f"tests/{path.name}" for path in (skill_root / "tests").glob("test_*.py")}
+    missing = source_tests - set(build_release.TEST_ALLOWLIST) - REPO_ONLY_TESTS
+    assert not missing, f"以下测试未登记进 build_release.TEST_ALLOWLIST：{sorted(missing)}"
 
 
 def _run_layout_contract(layout_root: Path) -> dict[str, object]:
