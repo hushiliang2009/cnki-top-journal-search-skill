@@ -42,7 +42,7 @@ d6d69a038700ffe51b3c5e49c9130fbbedb1cf170c5f44692f84a749b2105aa8  top-journal-se
 
 ### 2.3 CI 状态
 
-`main` 最近一次运行 **25/25 全绿**（Ubuntu 3.11–3.14、Windows、macOS、安装器矩阵）。CI 上的 Windows 作业跑的是 Python 与安装器矩阵，**不包含**第 4 节那 8 个 PowerShell 执行用例。
+`main` 最近一次运行 **25/25 全绿**（Ubuntu 3.11–3.14、Windows、macOS、安装器矩阵）。CI 上的 Windows 作业跑的是 Python 与安装器矩阵，**不包含**第 4 节那 9 个 PowerShell 执行用例。
 
 ## 3. macOS 侧已完成、不需要重做的部分
 
@@ -61,27 +61,38 @@ d6d69a038700ffe51b3c5e49c9130fbbedb1cf170c5f44692f84a749b2105aa8  top-journal-se
 
 ## 4. 待办任务
 
-### 4.1 任务 A：跑通 8 个 PowerShell 门控用例
+### 4.1 任务 A：跑通 9 个 PowerShell 门控用例
 
-这 8 个用例带 `@requires_windows_powershell`，条件是 `os.name == "nt"` 且能找到 `powershell`。在 macOS/Linux 上恒被跳过，**只有 Windows 11 能执行**。
+这些用例带 `@requires_windows_powershell`，条件是 `os.name == "nt"` 且能找到 `powershell`。在 macOS/Linux 上恒被跳过，**只有 Windows 11 能执行**。
 
-通用版 `top-journal-search-lists/tests/test_installers.py`：
+共 **9 个测试函数**；其中环境版的第 3 个是参数化 ×2，所以 pytest 报告里会看到 **10 条 `SKIPPED`**。清点时以这两个数字为准。
+
+通用版 `top-journal-search-lists/tests/test_installers.py`（4 个）：
 
 1. `test_powershell_51_parses_no_bom_utf8_installer_with_ascii_executable_text`
 2. `test_powershell_rejects_python_310_before_creating_install_paths`
 3. `test_powershell_runtime_failure_restores_skill_and_config`
 4. `test_powershell_success_runs_self_checks_and_retains_exactly_three_backups`
 
-环境版 `top-journal-search-lists-env/tests/test_installers.py`：
+环境版 `top-journal-search-lists-env/tests/test_installers.py`（5 个）：
 
 5. `test_powershell_51_parses_no_bom_utf8_installer_with_ascii_executable_text`
 6. `test_powershell_rejects_python_310_before_creating_install_paths`
-7. `test_powershell_success_runs_self_checks_and_retains_exactly_three_backups`
-8. `test_environment_install_coexists_with_generic_skill_and_mcp`
+7. `test_powershell_runtime_failure_restores_skill_and_config`（**参数化 ×2**）
+8. `test_powershell_success_runs_self_checks_and_retains_exactly_three_backups`
+9. `test_environment_install_coexists_with_generic_skill_and_mcp`
 
-**注意用例 8 的性质**：它断言的共存行为，macOS 侧已用隔离 HOME 手工完整验证过（第 3 节第 1、2 条）。Windows 上跑它补的是「在 Windows 路径与 PowerShell 下同样成立」。
+**每个用例在其他平台上的覆盖情况并不相同**，逐条列明如下，避免高估或低估 Windows 这一步的价值：
 
-**这 8 个用例都已有静态对应项**在其他平台上断言 `install.ps1` 的文本内容（如 `-copy-skill` 参数存在、`Assert-PythonVersion` 在 `try {` 之前调用、含 `Restore-Transaction` 与 `Rotate-Backups`）。所以 Windows 补的是**「脚本真能执行」的证据**，不是新的逻辑覆盖。
+| 门控用例 | 非 Windows 平台上的对应覆盖 | Windows 补的是 |
+| --- | --- | --- |
+| 1 / 5 编码与解析 | `test_powershell_installer_is_no_bom_utf8_with_ascii_only_text`（无 BOM、纯 ASCII 两条静态断言） | PowerShell 5.1 **真的能解析**该文件、不报 `ParserError` |
+| 2 / 6 拒绝 Python 3.10 | `test_installers_validate_selected_python_before_any_install_write`（断言 `Assert-PythonVersion` 出现在 `try {` 之前） | 真实 PowerShell 下确实**先拒绝、后不建任何路径** |
+| 3 / 7 运行时失败回滚 | `test_installers_require_runtime_self_checks_and_transactional_restore`（断言含 `Restore-Transaction`、`Rotate-Backups`） | 回滚**真的把 Skill 与配置还原了** |
+| 4 / 8 成功路径与 3 份备份 | 同上，但只断言 `Rotate-Backups` **存在**，未断言「恰好 3 份」 | 「**恰好保留 3 份**」这一行为本身 |
+| 9 环境版与通用版共存 | **无静态对应项**；但该行为 macOS 侧已用隔离 HOME 手工完整验证（第 3 节第 1、2 条） | 在 **Windows 路径与 PowerShell 下同样成立** |
+
+> 用例 1/5 的那两条静态断言原本写在门控用例**内部**，因此在没有 Windows PowerShell 的 CI 上从未被执行——引入 BOM 或非 ASCII 字符的回归会一路绿灯。已在交接时抽成上表所列的独立用例，现在所有平台都会跑。
 
 执行方式：
 
@@ -93,7 +104,7 @@ git clone https://github.com/hushiliang2009/cnki-top-journal-search-skill.git
 python -m pytest top-journal-search-lists/tests/test_installers.py top-journal-search-lists-env/tests/test_installers.py -v -rs
 ```
 
-验收：这 8 个用例由 `SKIPPED` 变为 `PASSED`，且其余用例不因平台产生新的失败。
+验收：这 9 个用例（pytest 报告中的 10 条 `SKIPPED`）全部变为 `PASSED`，且其余用例不因平台产生新的失败。
 
 ### 4.2 任务 B：从 Release 附件安装到 ChatGPT Desktop 并验证四个工具
 
@@ -183,7 +194,7 @@ Windows 路径（已由 `test_windows_client_paths` 固定）：
 
 在本目录新增 `2026-XX-XX-win11-chatgpt-desktop-verification-result.md`，至少记录：
 
-1. 任务 A 的 pytest 完整输出摘要（8 个用例的最终状态、总计通过/失败数）。
+1. 任务 A 的 pytest 完整输出摘要（9 个用例的最终状态、总计通过/失败数；注意参数化会让实例数为 10）。
 2. 任务 B 的四个工具可见性证据，以及第 5、6 步的实际返回结构。
 3. 实际 Python 版本、PowerShell 版本、磁盘占用实测值。
 4. 任何与第 3、7 节所述不符的现象。
@@ -194,7 +205,7 @@ Windows 路径（已由 `test_windows_client_paths` 固定）：
 
 | 事项 | 状态 |
 | --- | --- |
-| 8 个 PowerShell 执行用例 | **待办（任务 A）** |
+| 9 个 PowerShell 执行用例（10 条 skip 实例） | **待办（任务 A）** |
 | ChatGPT Desktop 四工具实机验证 | **待办（任务 B）** |
 | 字段升级 SU/KY/TKA 实机路径 | 未走到，仅单元测试覆盖（任务 C，可选） |
 | 30 秒间隔是否最优 | 未做阶梯测试 |

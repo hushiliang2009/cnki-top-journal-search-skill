@@ -72,12 +72,20 @@ def test_installers_require_runtime_self_checks_and_transactional_restore(skill_
     assert "rotate_backups" in shell
 
 
+def test_powershell_installer_is_no_bom_utf8_with_ascii_only_text(skill_root: Path) -> None:
+    """PowerShell 5.1 按本地代码页读取无 BOM 文件，非 ASCII 字符会导致 ParserError。
+
+    这两条断言是纯静态的，必须在所有平台上跑：CI 没有 Windows PowerShell，
+    若只留在下面那个门控用例里，引入 BOM 或非 ASCII 字符的回归会一路绿灯。
+    """
+    payload = (skill_root / "installers/install.ps1").read_bytes()
+    assert not payload.startswith(b"\xef\xbb\xbf")
+    assert payload.decode("utf-8").isascii()
+
+
 @requires_windows_powershell
 def test_powershell_51_parses_no_bom_utf8_installer_with_ascii_executable_text(skill_root: Path) -> None:
     installer = skill_root / "installers/install.ps1"
-    payload = installer.read_bytes()
-    assert not payload.startswith(b"\xef\xbb\xbf")
-    assert payload.decode("utf-8").isascii()
 
     result = subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer)],
