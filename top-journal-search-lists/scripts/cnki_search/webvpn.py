@@ -108,6 +108,16 @@ SOURCE_CATEGORY_SELECTOR = "input[type=checkbox][value='{value}']"
 TOTAL_COUNT_JS = (
     r"""() => (document.body.innerText.match(/共找到\s*([\d,]+)\s*条结果/) || [])[1] || null"""
 )
+
+
+@dataclass(frozen=True, slots=True)
+class SourceCategoryApplication:
+    """结果页来源类别分面的稳定应用状态。"""
+
+    requested: SourceCategorySpec
+    applied: bool
+    total: int | None
+    status: SearchStatus
 #: 每页条数是自定义下拉，不是原生 <select>；列表默认 display:none，需先点开。
 #: 实测档位仅 10/20/50。
 PAGE_SIZE_CLICK_JS = """(want) => {
@@ -1477,36 +1487,41 @@ class ProfessionalSearchPage:
             return await await_maybe(self.page.evaluate(TOTAL_COUNT_JS))
         return None
 
-    async def apply_source_category(self, category: SourceCategorySpec | str, *,
-                                    timeout_seconds: float = 20.0) -> str | None:
-        """在结果页勾选来源类别分面，返回筛选后的结果总数。
+    async def apply_source_category(self, category: SourceCategorySpec, *,
+                                    timeout_seconds: float = 20.0) -> SourceCategoryApplication:
+        """在结果页勾选来源类别分面，并复核稳定的筛选后状态。
 
         必须先完成一次检索——分面不在高级检索输入页上，只在结果页出现。
         """
-        if isinstance(category, SourceCategorySpec):
-            value, label = category.code, category.label
-        else:
-            value = SOURCE_CATEGORY_VALUES.get(category)
-            label = category
-        if value is None:
-            raise ValueError(
-                f"未知的来源类别 {category!r}，可选：{sorted(SOURCE_CATEGORY_VALUES)}"
-            )
-        box = self.page.locator(SOURCE_CATEGORY_SELECTOR.format(value=value))
-        if await await_maybe(box.count()) < 1:
+        requested = category
+        value, label = requested.code, requested.label
+        box = self.page.locator(
+            SOURCE_CATEGORY_SELECTOR.format(value=value)
+        ).first
+        if await await_maybe(box.count()) != 1:
             raise WebVpnNavigationError(
                 f"结果页未找到「{label}」来源类别分面；需先完成一次检索"
             )
-        before = await self.total_results()
-        await await_maybe(box.first.check())
-        # 分面是异步刷新，等总数变化而不是固定 sleep
+        await await_maybe(box.check())
+        previous: tuple[object, ...] | None = None
+        stable = 0
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
-            await asyncio.sleep(1)
-            current = await self.total_results()
-            if current and current != before:
-                return current
-        return await self.total_results()
+            await asyncio.sleep(0.5)
+            checked = bool(await await_maybe(box.is_checked()))
+            status = await self.classify_outcome()
+            total_text = await self.total_results()
+            rows = await await_maybe(
+                self.page.locator(RESULT_TABLE_SELECTOR + " tbody tr").count()
+            )
+            snapshot = (checked, status.value, total_text, rows)
+            stable = stable + 1 if checked and snapshot == previous else 0
+            previous = snapshot
+            if stable >= 1 and status is not SearchStatus.PAGE_CONTRACT_CHANGED:
+                compact = (total_text or "").replace(",", "").strip()
+                total = int(compact) if compact.isdecimal() else None
+                return SourceCategoryApplication(requested, True, total, status)
+        raise WebVpnNavigationError(f"来源类别未稳定生效：{label}")
 
     async def classify_outcome(self) -> SearchStatus:
         """判定提交后的页面状态。顺序很重要：先看结果，再看拒绝，最后才看验证码。"""
@@ -1546,27 +1561,27 @@ class ProfessionalSearchPage:
             await sleep(poll_seconds)
 
     async def execute_plan(self, plan: ExpressionBatch) -> PlanExecutionResult:
-        source_category_applied = False
-        source_category_total: int | None = None
         await self.fill_expression(plan.expression)
         await self.submit()
         status = await self.wait_for_outcome()
+        application: SourceCategoryApplication | None = None
         if status is SearchStatus.SUCCESS:
             if plan.source_category is not None:
-                total = await self.apply_source_category(plan.source_category)
-                source_category_applied = True
-                if total is not None:
-                    compact = total.replace(",", "").strip()
-                    source_category_total = int(compact) if compact.isdecimal() else None
-            await self.set_page_size(plan.page_size)
-            status = await self.wait_for_outcome()
+                try:
+                    application = await self.apply_source_category(plan.source_category)
+                    status = application.status
+                except WebVpnNavigationError:
+                    status = SearchStatus.PAGE_CONTRACT_CHANGED
+            if status is SearchStatus.SUCCESS:
+                await self.set_page_size(plan.page_size)
+                status = await self.wait_for_outcome()
         html = await await_maybe(self.page.content()) if status is SearchStatus.SUCCESS else ""
         return PlanExecutionResult(
             status=status.value,
             html=html,
             url=str(getattr(self.page, "url", "")),
-            source_category_applied=source_category_applied,
-            source_category_total=source_category_total,
+            source_category_applied=bool(application and application.applied),
+            source_category_total=None if application is None else application.total,
         )
 
 

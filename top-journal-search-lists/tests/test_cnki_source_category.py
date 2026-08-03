@@ -70,8 +70,11 @@ def test_cssci_facet_value_matches_the_observed_page() -> None:
 
 def test_applying_the_facet_narrows_the_result_count() -> None:
     page = FacetPage(before="2,378", after="2,270")
-    total = asyncio.run(_driver(page).apply_source_category("CSSCI"))
-    assert total == "2,270"
+    application = asyncio.run(
+        _driver(page).apply_source_category(SourceCategorySpec("P0209", "CSSCI"))
+    )
+    assert application.applied is True
+    assert application.total == 2270
     selector = webvpn.SOURCE_CATEGORY_SELECTOR.format(value="P0209")
     assert page.locators[selector].checked is True
 
@@ -80,15 +83,22 @@ def test_applying_controlled_category_uses_its_cnki_code() -> None:
     page = FacetPage(before="2,378", after="2,270")
     category = SourceCategorySpec("P0209", "CSSCI")
 
-    total = asyncio.run(_driver(page).apply_source_category(category))
+    application = asyncio.run(_driver(page).apply_source_category(category))
 
-    assert total == "2,270"
+    assert application.applied is True
+    assert application.total == 2270
     selector = webvpn.SOURCE_CATEGORY_SELECTOR.format(value="P0209")
     assert page.locators[selector].checked is True
 
 
-def test_unchanged_total_is_valid_when_checkbox_is_checked_and_page_is_stable() -> None:
+def test_unchanged_total_is_valid_when_checkbox_is_checked_and_page_is_stable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """分面命中全部结果时总数可以不变，不能被误判为未生效。"""
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(webvpn.asyncio, "sleep", no_wait)
     page = FacetPage(before="50", after="50")
 
     application = asyncio.run(
@@ -102,15 +112,19 @@ def test_unchanged_total_is_valid_when_checkbox_is_checked_and_page_is_stable() 
     assert application.status is webvpn.SearchStatus.SUCCESS
 
 
-def test_unknown_category_is_rejected_with_the_available_options() -> None:
-    with pytest.raises(ValueError, match="未知的来源类别"):
-        asyncio.run(_driver(FacetPage()).apply_source_category("SSCI"))
+def test_source_category_requires_a_closed_code_and_label_pair() -> None:
+    with pytest.raises(ValueError):
+        SourceCategorySpec("P0209", "SSCI")
 
 
 def test_missing_facet_points_at_the_real_precondition() -> None:
     """分面不在输入页上；报错要说清"先检索"，否则会被当成站点改版。"""
     with pytest.raises(webvpn.WebVpnNavigationError, match="需先完成一次检索"):
-        asyncio.run(_driver(FacetPage(facet_present=False)).apply_source_category("CSSCI"))
+        asyncio.run(
+            _driver(FacetPage(facet_present=False)).apply_source_category(
+                SourceCategorySpec("P0209", "CSSCI")
+            )
+        )
 
 
 def test_total_results_is_read_from_the_page() -> None:
