@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import subprocess
 import sys
@@ -25,6 +26,17 @@ def _load_module():
     finally:
         sys.modules.pop(spec.name, None)
     return module
+
+
+def _write_rehashed_catalog(path: Path, payload: dict[str, object]) -> None:
+    payload["data_sha256"] = "{{DATA_SHA256}}"
+    payload["data_sha256"] = hashlib.sha256(
+        (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    ).hexdigest()
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
 
 
 def test_default_catalog_is_v4_json_for_both_runtime_layouts() -> None:
@@ -93,6 +105,40 @@ def test_explicit_standalone_catalog_without_companions_is_json_only(tmp_path: P
     assert result["validation_scope"] == "json_only"
     assert result["companion_files_verified"] == []
     assert result["mirrored_files_verified"] == 0
+
+
+def test_validate_rejects_catalog_without_schema_version_even_after_rehash(tmp_path: Path) -> None:
+    module = _load_module()
+    payload = json.loads(CATALOG_JSON.read_text(encoding="utf-8"))
+    del payload["schema_version"]
+    path = tmp_path / "missing-schema.json"
+    _write_rehashed_catalog(path, payload)
+    with pytest.raises(ValueError, match="字段不完整"):
+        module.validate_catalog(path)
+
+
+@pytest.mark.parametrize("field", ["revision_date", "source_memberships"])
+def test_validate_rejects_missing_required_record_fields_even_after_rehash(
+    tmp_path: Path, field: str,
+) -> None:
+    module = _load_module()
+    payload = json.loads(CATALOG_JSON.read_text(encoding="utf-8"))
+    del payload["journals"][0][field]
+    path = tmp_path / f"missing-{field}.json"
+    _write_rehashed_catalog(path, payload)
+    with pytest.raises(ValueError, match="记录字段"):
+        module.validate_catalog(path)
+
+
+def test_validate_rejects_record_type_and_version_drift_even_after_rehash(tmp_path: Path) -> None:
+    module = _load_module()
+    payload = json.loads(CATALOG_JSON.read_text(encoding="utf-8"))
+    payload["journals"][0]["source_memberships"] = {}
+    payload["journals"][1]["catalog_version"] = "3.0"
+    path = tmp_path / "invalid-record-contract.json"
+    _write_rehashed_catalog(path, payload)
+    with pytest.raises(ValueError, match="记录"):
+        module.validate_catalog(path)
 
 
 def test_partial_explicit_companion_set_is_rejected(tmp_path: Path) -> None:

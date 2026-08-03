@@ -14,6 +14,7 @@ from typing import Any
 
 
 CATALOG_FILENAME = "environment_journal_catalog_v4.0.json"
+SCHEMA_VERSION = "1.0"
 CATALOG_VERSION = "4.0"
 CATALOG_DATE = "2026-07-29"
 REVISION_DATE = "2026-07-31"
@@ -119,12 +120,64 @@ def _build_indexes(payload: dict[str, Any]) -> CatalogIndex:
     )
 
 
+def _validate_record_contract(record: Any) -> None:
+    if not isinstance(record, dict):
+        raise ValueError("环境目录记录必须为对象")
+    required_types: dict[str, type[Any]] = {
+        "journal_id": str,
+        "formal_title": str,
+        "formal_title_evidence_ids": list,
+        "aliases": list,
+        "issn": list,
+        "eissn": list,
+        "priority_group": str,
+        "priority_decision": dict,
+        "environment_subfields": list,
+        "subject_categories": list,
+        "formal_evidence": list,
+        "evidence_ids": list,
+        "index_memberships": list,
+        "index_subject_categories": dict,
+        "source_memberships": list,
+        "source_catalogs": list,
+        "catalog_version": str,
+        "catalog_date": str,
+        "revision_date": str,
+        "manual_review_required": bool,
+        "review_reasons": list,
+        "cnki_routing": dict,
+    }
+    if not set(required_types) <= record.keys() or "priority_level" not in record or "ncs_internal_rank" not in record:
+        raise ValueError("环境目录记录字段不完整")
+    if any(not isinstance(record[name], expected) for name, expected in required_types.items()):
+        raise ValueError("环境目录记录字段类型无效")
+    if type(record["priority_level"]) is not int:
+        raise ValueError("环境目录记录 priority_level 类型无效")
+    if record["ncs_internal_rank"] is not None and type(record["ncs_internal_rank"]) is not int:
+        raise ValueError("环境目录记录 ncs_internal_rank 类型无效")
+    if (record["catalog_version"], record["catalog_date"], record["revision_date"]) != (CATALOG_VERSION, CATALOG_DATE, REVISION_DATE):
+        raise ValueError("环境目录记录版本或日期无效")
+
+
+def _validate_schema(payload: dict[str, Any]) -> None:
+    required = {"schema_version", "catalog_version", "catalog_date", "revision_date", "priority_groups", "level_counts", "journals", "cnki_scopes", "data_sha256"}
+    if not required <= payload.keys():
+        raise ValueError("环境目录 JSON 字段不完整")
+    if payload["schema_version"] != SCHEMA_VERSION:
+        raise ValueError("环境目录 JSON schema 版本无效")
+    if not isinstance(payload["journals"], list) or not isinstance(payload["cnki_scopes"], dict):
+        raise ValueError("环境目录 JSON 字段类型无效")
+    for record in payload["journals"]:
+        _validate_record_contract(record)
+
+
 @lru_cache(maxsize=8)
 def _load_catalog_cached(resolved_path: str, size: int, mtime_ns: int) -> CatalogIndex:
     del size, mtime_ns
     payload = json.loads(Path(resolved_path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("环境目录 JSON 根对象无效")
+    _validate_schema(payload)
     return _build_indexes(payload)
 
 
@@ -151,9 +204,7 @@ def _assert_no_float(value: Any) -> None:
 
 def _validate_json(index: CatalogIndex, path: Path) -> dict[str, Any]:
     payload = index.payload
-    required = {"catalog_version", "catalog_date", "revision_date", "priority_groups", "level_counts", "journals", "cnki_scopes", "data_sha256"}
-    if not required <= payload.keys():
-        raise ValueError("环境目录 JSON 字段不完整")
+    _validate_schema(payload)
     if (payload["catalog_version"], payload["catalog_date"], payload["revision_date"]) != (CATALOG_VERSION, CATALOG_DATE, REVISION_DATE):
         raise ValueError("环境目录版本或日期无效")
     if payload["priority_groups"] != EXPECTED_GROUPS or payload["level_counts"] != EXPECTED_LEVEL_COUNTS:
