@@ -6,9 +6,13 @@ from pathlib import Path
 import pytest
 
 from cnki_search_env import professional_service as service_module
+from cnki_search_env.catalog_adapter import DEFAULT_CATALOG, lookup_journals
 from cnki_search_env.models import SearchStatus
-from cnki_search_env.professional import ExpressionBatch
-from cnki_search_env.professional_service import CnkiProfessionalSearchService, preview_expressions
+from cnki_search_env.professional import ExpressionBatch, SourceCategorySpec
+from cnki_search_env.professional_service import (
+    CnkiProfessionalSearchService,
+    preview_expressions,
+)
 from cnki_search_env.webvpn import BatchCheckpoint
 
 
@@ -747,3 +751,100 @@ def test_escalation_stops_immediately_on_a_blocking_status() -> None:
 
 def test_declared_priority_is_the_documented_one() -> None:
     assert service_module.TOPIC_FIELD_PRIORITY == ("TI", "SU", "KY", "TKA")
+
+
+@pytest.mark.parametrize(
+    ("group", "journal_count", "selector", "facet"),
+    [
+        ("chinese_environment_top", 6, "exact_titles", None),
+        ("other_formally_recognized_chinese", 60, "exact_titles", None),
+        (
+            "environment_cssci",
+            241,
+            "exact_titles",
+            SourceCategorySpec("P0209", "CSSCI"),
+        ),
+        (
+            "pku_core",
+            1987,
+            "topic_only",
+            SourceCategorySpec("P01", "北大核心"),
+        ),
+    ],
+)
+def test_environment_policies_come_from_catalog(
+    group: str,
+    journal_count: int,
+    selector: str,
+    facet: SourceCategorySpec | None,
+) -> None:
+    """目录范围变动时，策略必须由 cnki_scope 的固定载荷重新生成。"""
+    policy = service_module.build_group_policy(group)
+    assert policy.journal_selector == selector
+    assert len(policy.eligible_journal_ids) == journal_count
+    assert policy.source_category == facet
+
+
+def test_pku_core_has_no_ly_and_accepts_members_at_levels_1_to_12() -> None:
+    """北大核心应仅按主题检索，再由受控分面和目录身份过滤。"""
+    policy = service_module.build_group_policy("pku_core")
+    plan = service_module.build_group_plans(
+        "气候治理", policy=policy, topic_field="TI"
+    )[0]
+    assert plan.expression == "TI %= '气候治理'"
+    assert "LY=" not in plan.expression
+    assert policy.eligible_priority_levels == frozenset(range(1, 13))
+
+
+def test_every_environment_cssci_batch_keeps_exact_titles_and_cssci_facet() -> None:
+    """CSSCI 分面不能代替环境目录中的逐刊限定。"""
+    policy = service_module.build_group_policy("environment_cssci")
+    plans = service_module.build_group_plans(
+        "环境政策", policy=policy, topic_field="TI"
+    )
+    assert len(plans) > 1
+    assert all("LY=" in plan.expression for plan in plans)
+    assert all(
+        plan.source_category == SourceCategorySpec("P0209", "CSSCI")
+        for plan in plans
+    )
+
+
+def test_pku_core_direct_scope_and_skill_supplement_bases_are_fixed() -> None:
+    """单组 MCP 直接检索使用完整北大核心成员，而非跨组补集。"""
+    policy = service_module.build_group_policy("pku_core")
+    matches = lookup_journals(DEFAULT_CATALOG, list(policy.journal_titles))
+    higher = sum(1 for item in matches if 1 <= item["priority_level"] <= 10)
+    supplement = sum(1 for item in matches if item["priority_level"] in {11, 12})
+    assert len(policy.eligible_journal_ids) == 1987
+    assert higher == 245
+    assert supplement == 1742
+    assert higher + supplement == 1987
+
+
+def test_environment_cssci_excludes_non_level_nine_before_limit() -> None:
+    """目录外的第七级记录不能抢占环境 CSSCI 的单组限额。"""
+    async def execute(_plan: ExpressionBatch) -> tuple[str, str, str]:
+        rows = "".join(
+            (
+                "<tr><td class='name'><a>第七级</a></td>"
+                "<td class='author'><a>张三</a></td>"
+                "<td class='source'><a>中国人口·资源与环境</a></td>"
+                "<td class='date'>2025-03-11</td><td class='data'>期刊</td></tr>",
+                "<tr><td class='name'><a>第九级</a></td>"
+                "<td class='author'><a>李四</a></td>"
+                "<td class='source'><a>上海经济研究</a></td>"
+                "<td class='date'>2025-03-11</td><td class='data'>期刊</td></tr>",
+            )
+        )
+        return (
+            SearchStatus.SUCCESS.value,
+            f"<table class='result-table-list'><tbody>{rows}</tbody></table>",
+            "https://example.invalid/",
+        )
+
+    result = asyncio.run(CnkiProfessionalSearchService(execute).search_group(
+        "环境政策", "environment_cssci", limit=1,
+    ))
+    assert [item["priority_level"] for item in result["records"]] == [9]
+    assert result["excluded_out_of_scope_count"] == 1
