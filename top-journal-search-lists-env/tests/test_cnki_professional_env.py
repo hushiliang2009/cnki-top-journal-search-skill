@@ -19,7 +19,7 @@ def _load_mcpb_professional():
 
 def test_topic_uses_relevance_operator_and_spaced_logical_operators() -> None:
     expression = professional.build_expression("大气污染治理", ["中国环境科学"])
-    assert expression.startswith("SU %= '大气污染治理'")
+    assert expression.startswith("TI %= '大气污染治理'")
     # 知网要求逻辑运算符前后有空格，否则表达式不被接受
     assert " AND " in expression
     assert "AND(" not in expression and ")AND" not in expression
@@ -116,8 +116,24 @@ def test_expression_budget_stays_under_the_measured_server_limit() -> None:
 
 def test_mcpb_copy_exposes_the_same_behaviour() -> None:
     module = _load_mcpb_professional()
-    assert module.build_expression("碳中和", ["环境科学"]).startswith("SU %= '碳中和'")
+    assert module.build_expression("碳中和", ["环境科学"]).startswith("TI %= '碳中和'")
     assert module.DEFAULT_MAX_EXPRESSION_CHARS == professional.DEFAULT_MAX_EXPRESSION_CHARS
     assert module.build_batches(
         "碳中和", ["环境科学"], source_category="CSSCI"
     )[0].source_category == "CSSCI"
+
+
+def test_all_builders_default_to_title_and_reject_unknown_fields() -> None:
+    assert professional.build_topic_expression("碳中和").startswith("TI %=")
+    assert professional.build_expression("碳中和", ["环境科学"]).startswith("TI %=")
+    assert professional.build_batches("碳中和", ["环境科学"])[0].topic_field == "TI"
+    with pytest.raises(ValueError, match="TI、SU、KY、TKA"):
+        professional.build_topic_expression("碳中和", topic_field="AB")
+
+
+def test_source_category_is_a_closed_pair_not_free_text() -> None:
+    spec = professional.SourceCategorySpec("P0209", "CSSCI")
+    assert spec.code == "P0209"
+    assert professional.SourceCategorySpec("P01", "北大核心").label == "北大核心"
+    with pytest.raises(ValueError):
+        professional.SourceCategorySpec("P01", "CSSCI")

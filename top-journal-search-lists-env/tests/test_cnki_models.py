@@ -25,6 +25,18 @@ def test_record_contract_has_no_url_or_fulltext_fields() -> None:
     }
 
 
+def test_record_exposes_safe_dedup_and_match_metadata() -> None:
+    names = {item.name for item in fields(PaperRecord)}
+    assert {
+        "topic_match_field",
+        "matched_topic_fields",
+        "matched_search_groups",
+    } <= names
+    assert not names & {
+        "doi", "detail_url", "download_url", "pdf_url", "caj_url", "abstract"
+    }
+
+
 def test_search_statuses_match_public_contract() -> None:
     assert {item.value for item in SearchStatus} == {
         "success", "no_results", "partial", "rate_limited",
