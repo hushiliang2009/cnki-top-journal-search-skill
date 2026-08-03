@@ -1495,13 +1495,13 @@ class ProfessionalSearchPage:
         """
         requested = category
         value, label = requested.code, requested.label
-        box = self.page.locator(
-            SOURCE_CATEGORY_SELECTOR.format(value=value)
-        ).first
-        if await await_maybe(box.count()) != 1:
+        # 命中数必须在取 .first 之前判定：.first 恒为 0 或 1，会掩盖多命中的歧义。
+        matches = self.page.locator(SOURCE_CATEGORY_SELECTOR.format(value=value))
+        if await await_maybe(matches.count()) != 1:
             raise WebVpnNavigationError(
-                f"结果页未找到「{label}」来源类别分面；需先完成一次检索"
+                f"结果页未找到唯一的「{label}」来源类别分面；需先完成一次检索"
             )
+        box = matches.first
         await await_maybe(box.check())
         previous: tuple[object, ...] | None = None
         stable = 0
@@ -1569,7 +1569,10 @@ class ProfessionalSearchPage:
             if plan.source_category is not None:
                 try:
                     application = await self.apply_source_category(plan.source_category)
-                    status = application.status
+                    status = (
+                        application.status if application.applied
+                        else SearchStatus.PAGE_CONTRACT_CHANGED
+                    )
                 except WebVpnNavigationError:
                     status = SearchStatus.PAGE_CONTRACT_CHANGED
             if status is SearchStatus.SUCCESS:

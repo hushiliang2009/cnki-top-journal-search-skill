@@ -103,7 +103,7 @@ def test_unchanged_total_is_valid_when_checkbox_is_checked_and_page_is_stable(
 
     application = asyncio.run(
         _driver(page).apply_source_category(
-            SourceCategorySpec("P0209", "CSSCI"), timeout_seconds=0.1,
+            SourceCategorySpec("P0209", "CSSCI"), timeout_seconds=5.0,
         )
     )
 

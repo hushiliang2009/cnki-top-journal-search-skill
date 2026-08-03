@@ -1207,6 +1207,74 @@ def test_missing_or_unchecked_facet_never_returns_unfiltered_html() -> None:
     assert "page_size:50" not in events
 
 
+class AmbiguousFacetLocator:
+    """同一 value 命中多个复选框：结构已变，不能任选其一。"""
+
+    def __init__(self, count: int) -> None:
+        self._count = count
+        self.checked = False
+
+    @property
+    def first(self) -> "AmbiguousFacetLocator":
+        return AmbiguousFacetLocator(1)
+
+    async def count(self) -> int:
+        return self._count
+
+    async def check(self) -> None:
+        self.checked = True
+
+    async def is_checked(self) -> bool:
+        return self.checked
+
+
+class AmbiguousFacetPlanPage(PlanPage):
+    def locator(self, selector: str) -> AmbiguousFacetLocator:
+        if selector.startswith("input[type=checkbox]"):
+            return AmbiguousFacetLocator(2)
+        return AmbiguousFacetLocator(1)
+
+    async def evaluate(self, _script: str, _arg=None) -> str:
+        return "50"
+
+
+def test_duplicate_source_category_checkbox_is_a_contract_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`.first` 会掩盖歧义；命中数必须在取 first 之前判定。"""
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(webvpn.asyncio, "sleep", no_wait)
+    events: list[str] = []
+    driver = ControlledFacetPlanDriver(AmbiguousFacetPlanPage(events), events)
+
+    result = asyncio.run(
+        driver.execute_plan(_plan(source_category=SourceCategorySpec("P0209", "CSSCI")))
+    )
+
+    assert result.status == SearchStatus.PAGE_CONTRACT_CHANGED.value
+    assert result.source_category_applied is False
+    assert result.html == ""
+    assert "page_size:50" not in events
+
+
+def test_unapplied_facet_blocks_page_size_even_when_status_is_success() -> None:
+    """状态仍为 success 但分面未真正生效时，同样不得读取未筛选结果。"""
+    events: list[str] = []
+    result = asyncio.run(
+        PostFacetStatusDriver(
+            events, SearchStatus.SUCCESS, applied=False,
+        ).execute_plan(_plan(source_category=SourceCategorySpec("P0209", "CSSCI")))
+    )
+
+    assert result.status == SearchStatus.PAGE_CONTRACT_CHANGED.value
+    assert result.source_category_applied is False
+    assert result.source_category_total is None
+    assert result.html == ""
+    assert "page_size:50" not in events
+
+
 def test_execute_plan_omits_facet_for_chinese_top_plan() -> None:
     events: list[str] = []
     driver = PlanRecorder(events)
