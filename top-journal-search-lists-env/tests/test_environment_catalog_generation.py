@@ -246,22 +246,70 @@ def test_approved_source_counts_intersections_and_aliases() -> None:
     assert bundle.ambiguous_count == 0
 
     by_title = {record.formal_title: record for record in bundle.records}
-    expected_memberships = {
-        "Nature Climate Change": {"SSCI", "SCIE"},
-        "Environmental Science & Technology": {"SCIE"},
-        "中国人口·资源与环境": {"CSSCI"},
-        "WIREs Climate Change": {"SSCI"},
-        "城市规划": {"CSSCI"},
-        "WIREs Energy and Environment": {"SCIE"},
-        "Zeitschrift für Geomorphologie": {"SCIE"},
-        "陆军军医大学学报": {"PKU_CORE"},
-        "中国社会科学": {"PKU_CORE"},
+    expected_records = {
+        "Nature Climate Change": (
+            "ENVJ-000006", 2, 1, {"SSCI", "SCIE"}, {"SSCI:02604", "SCIE:07057"}
+        ),
+        "Environmental Science & Technology": (
+            "ENVJ-000024", 3, None, {"SCIE"}, {"SCIE:02891"}
+        ),
+        "中国人口·资源与环境": (
+            "ENVJ-000169", 7, None, {"CSSCI", "PKU_CORE"},
+            {"CSSCI:0620", "PKU_CORE:natural_sciences:0012"},
+        ),
+        "WIREs Climate Change": (
+            "ENVJ-000549", 8, None, {"SSCI", "SCIE"}, {"SSCI:03485", "SCIE:09329"}
+        ),
+        "城市规划": (
+            "ENVJ-000652", 9, None, {"CSSCI", "PKU_CORE"},
+            {"CSSCI:0035", "PKU_CORE:natural_sciences:0007"},
+        ),
+        "WIREs Energy and Environment": (
+            "ENVJ-002018", 10, None, {"SCIE"}, {"SCIE:09333"}
+        ),
+        "Zeitschrift für Geomorphologie": (
+            "ENVJ-002022", 10, None, {"SCIE"}, {"SCIE:09394"}
+        ),
+        "陆军军医大学学报": (
+            "ENVJ-002335", 11, None, {"PKU_CORE"},
+            {"PKU_CORE:natural_sciences:0005"},
+        ),
+        "中国社会科学": (
+            "ENVJ-003204", 12, None, {"CSSCI", "PKU_CORE"},
+            {"CSSCI:0627", "PKU_CORE:non_natural_sciences:0001"},
+        ),
     }
-    for title, memberships in expected_memberships.items():
-        assert memberships.issubset(set(by_title[title].index_memberships))
-        assert memberships.issubset({
-            membership["index_name"]
-            for membership in by_title[title].source_memberships
-        })
+    for title, (journal_id, level, rank, memberships, source_ids) in expected_records.items():
+        record = by_title[title]
+        assert (record.journal_id, record.priority_level, record.ncs_internal_rank) == (
+            journal_id,
+            level,
+            rank,
+        )
+        assert set(record.index_memberships) == memberships
+        assert {item["index_name"] for item in record.source_memberships} == memberships
+        assert {item["source_record_id"] for item in record.source_memberships} == source_ids
+    assert by_title["Zeitschrift für Geomorphologie"].source_memberships[0][
+        "match_method"
+    ] == "controlled_alias"
+    assert "第三军医大学学报" in by_title["陆军军医大学学报"].aliases
 
     assert all(record.priority_decision["unchanged"] is True for record in bundle.records)
+
+
+def test_match_source_records_marks_expected_catalog_membership_unmatched() -> None:
+    """删除预期索引回连审计时，此测试应失败。"""
+    catalog = _load_catalog_module()
+    record = next(
+        item for item in catalog.parse_v4_baseline(BASELINE) if item.priority_level == 8
+    )
+
+    audit = catalog.match_source_records([record], [], controlled_aliases={})
+
+    assert len(audit) == 1
+    expected = audit[0]
+    assert expected.status == "expected_but_unmatched"
+    assert expected.journal_id == record.journal_id
+    assert expected.match_method == "expected_index_membership"
+    assert expected.manual_review_required is True
+    assert expected.review_reasons == ("SSCI",)
