@@ -115,3 +115,5 @@ def test_source_category_is_a_closed_pair_not_free_text() -> None:
     assert professional.SourceCategorySpec("P01", "北大核心").label == "北大核心"
     with pytest.raises(ValueError):
         professional.SourceCategorySpec("P01", "CSSCI")
+    with pytest.raises(ValueError, match="受控代码与名称"):
+        professional.build_batches("碳中和", ["环境科学"], source_category="CSSCI")

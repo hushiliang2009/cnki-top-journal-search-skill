@@ -93,8 +93,11 @@ def test_batches_carry_the_declared_source_category() -> None:
     """环境版 CSSCI 每批都要带来源类别；缺省时保持 None，不凭空加筛选。"""
     plain = professional.build_batches("碳排放", ["环境科学"])
     assert plain[0].source_category is None
-    faceted = professional.build_batches("碳排放", ["环境科学"], source_category="CSSCI")
-    assert [batch.source_category for batch in faceted] == ["CSSCI"]
+    category = professional.SourceCategorySpec("P0209", "CSSCI")
+    faceted = professional.build_batches("碳排放", ["环境科学"], source_category=category)
+    assert [batch.source_category for batch in faceted] == [category]
+    with pytest.raises(ValueError, match="受控代码与名称"):
+        professional.build_batches("碳排放", ["环境科学"], source_category="CSSCI")
 
 
 def test_batch_page_size_defaults_to_site_ceiling() -> None:
@@ -119,8 +122,10 @@ def test_mcpb_copy_exposes_the_same_behaviour() -> None:
     assert module.build_expression("碳中和", ["环境科学"]).startswith("TI %= '碳中和'")
     assert module.DEFAULT_MAX_EXPRESSION_CHARS == professional.DEFAULT_MAX_EXPRESSION_CHARS
     assert module.build_batches(
-        "碳中和", ["环境科学"], source_category="CSSCI"
-    )[0].source_category == "CSSCI"
+        "碳中和",
+        ["环境科学"],
+        source_category=module.SourceCategorySpec("P0209", "CSSCI"),
+    )[0].source_category == module.SourceCategorySpec("P0209", "CSSCI")
 
 
 def test_all_builders_default_to_title_and_reject_unknown_fields() -> None:
@@ -137,3 +142,5 @@ def test_source_category_is_a_closed_pair_not_free_text() -> None:
     assert professional.SourceCategorySpec("P01", "北大核心").label == "北大核心"
     with pytest.raises(ValueError):
         professional.SourceCategorySpec("P01", "CSSCI")
+    with pytest.raises(ValueError, match="受控代码与名称"):
+        professional.build_batches("碳中和", ["环境科学"], source_category="CSSCI")

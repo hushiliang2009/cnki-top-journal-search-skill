@@ -70,6 +70,14 @@ class SourceCategorySpec:
             raise ValueError("来源类别代码与名称不匹配")
 
 
+def validate_source_category(
+    value: SourceCategorySpec | None,
+) -> SourceCategorySpec | None:
+    if value is not None and not isinstance(value, SourceCategorySpec):
+        raise ValueError("来源类别必须使用受控代码与名称")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class SearchGroupPolicy:
     scope_id: str
@@ -204,6 +212,7 @@ def build_batches(topic: str, journals: list[str], *,
     """
     if not journals:
         raise ValueError("期刊列表不能为空")
+    category = validate_source_category(source_category)
     groups: list[list[str]] = []
     current: list[str] = []
     for title in journals:
@@ -233,7 +242,7 @@ def build_batches(topic: str, journals: list[str], *,
             scope_id=scope_id,
             catalog_version=catalog_version,
             topic_field=topic_field,
-            source_category=source_category,
+            source_category=category,
         )
         for position, group in enumerate(groups, start=1)
     ]
