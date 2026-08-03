@@ -1104,3 +1104,33 @@ def test_attended_e2e_summary_keeps_only_safe_release_diagnostics(
     serialized = json.dumps(summary, ensure_ascii=False).casefold()
     for forbidden in ("cookie", "token", "html", "url", "password", "download"):
         assert forbidden not in serialized
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["topic_fields_tried", "source_category_code", "source_category_applied",
+     "eligible_record_count", "first_page_only", "complete",
+     "human_intervention_required"],
+)
+def test_attended_e2e_summary_requires_every_diagnostic_key(
+    skill_root: Path, missing: str,
+) -> None:
+    """漏发字段与"本组无分面"必须可区分，不得静默当成 None。"""
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    result = {
+        "status": "success",
+        "batches_completed": 1,
+        "batches_total": 1,
+        "topic_fields_tried": ["TI"],
+        "source_category_code": None,
+        "source_category_applied": False,
+        "eligible_record_count": 0,
+        "first_page_only": True,
+        "complete": True,
+        "human_intervention_required": False,
+        "records": [],
+    }
+    del result[missing]
+
+    with pytest.raises(helper.UnsafeOutputError):
+        helper._summary(result, "group")

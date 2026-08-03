@@ -132,16 +132,21 @@ ALLOWED_TOPIC_FIELDS = ("TI", "SU", "KY", "TKA")
 ALLOWED_SOURCE_CATEGORY_CODES = (None, "P0209", "P01")
 
 
-def _controlled_topic_fields(value: object) -> list[str]:
-    if type(value) is not list:
-        _reject_unsafe_output()
+def _controlled_topic_fields(mapping: dict[str, Any], key: str) -> list[str]:
+    value = _required_value(mapping, key, list)
     for item in value:
         if type(item) is not str or item not in ALLOWED_TOPIC_FIELDS:
             _reject_unsafe_output()
     return list(value)
 
 
-def _controlled_source_category_code(value: object) -> str | None:
+def _controlled_source_category_code(
+    mapping: dict[str, Any], key: str,
+) -> str | None:
+    # 缺键与"本组无分面"必须可区分：服务漏发字段属契约破坏，不得静默当成 None。
+    if key not in mapping:
+        _reject_unsafe_output()
+    value = mapping[key]
     if value is not None and (
         type(value) is not str or value not in ALLOWED_SOURCE_CATEGORY_CODES
     ):
@@ -164,10 +169,10 @@ def _summary(result: object, group: str) -> dict[str, Any]:
         "batches_completed": batches_completed,
         "batches_total": batches_total,
         "topic_fields_tried": _controlled_topic_fields(
-            result.get("topic_fields_tried")
+            result, "topic_fields_tried"
         ),
         "source_category_code": _controlled_source_category_code(
-            result.get("source_category_code")
+            result, "source_category_code"
         ),
         "source_category_applied": _required_value(
             result, "source_category_applied", bool

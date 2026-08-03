@@ -940,3 +940,60 @@ def test_legacy_tuple_executor_never_claims_an_unverified_facet() -> None:
     assert result["source_category_applied"] is False
     # 分面未经证实 => 结果页来源类别筛选的分组不得产出任何"合格"记录。
     assert result["records"] == []
+
+
+def test_empty_batch_results_never_claim_the_facet_was_applied() -> None:
+    """断点持久化失败等路径会把 results 清空；all([]) 为真会凭空上报已筛选。"""
+    async def execute(_plan: ExpressionBatch) -> PlanExecutionResult:
+        return PlanExecutionResult(
+            status=SearchStatus.CONFIGURATION_ERROR.value,
+            html="",
+            url="",
+            source_category_applied=False,
+        )
+
+    service = CnkiProfessionalSearchService(execute)
+    result = asyncio.run(service.search_group("主题", service_module.ENVIRONMENT_CSSCI_GROUP, limit=1))
+
+    assert result["source_category_applied"] is False
+    assert result["records"] == []
+
+
+def test_facet_evidence_requires_every_batch_to_confirm_it() -> None:
+    """只要有一个批次没证实分面，整组就不得上报已筛选。"""
+    seen: list[int] = []
+
+    async def execute(plan: ExpressionBatch) -> PlanExecutionResult:
+        seen.append(plan.index)
+        return PlanExecutionResult(
+            status=SearchStatus.SUCCESS.value,
+            html=RESULT_TEMPLATE.format(title="某文", journal="环境科学学报"),
+            url="https://example.invalid/",
+            source_category_applied=len(seen) > 1,
+        )
+
+    service = CnkiProfessionalSearchService(execute)
+    result = asyncio.run(service.search_group("主题", service_module.ENVIRONMENT_CSSCI_GROUP, limit=1))
+
+    assert result["source_category_applied"] is False
+
+
+def test_abandoned_first_batch_challenge_never_claims_the_facet() -> None:
+    """首批即遭安全验证且人工放弃：一批未跑完，不得声称分面已生效。"""
+    async def execute(_plan: ExpressionBatch) -> PlanExecutionResult:
+        return PlanExecutionResult(
+            status=SearchStatus.CHALLENGE_DETECTED.value,
+            html="",
+            url="",
+            source_category_applied=False,
+        )
+
+    async def give_up(_plan: ExpressionBatch) -> bool:
+        return False
+
+    service = CnkiProfessionalSearchService(execute, on_challenge=give_up)
+    result = asyncio.run(service.search_group("主题", service_module.ENVIRONMENT_CSSCI_GROUP, limit=1))
+
+    assert result["source_category_applied"] is False
+    assert result["human_intervention_required"] is True
+    assert result["records"] == []

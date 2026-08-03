@@ -132,7 +132,8 @@ class CnkiProfessionalSearchService:
         terminal_status: str | None = None
         terminal_detail: str | None = None
         human_intervention_required = False
-        source_category_applied = False
+        # 分面证据取合取：任一字段或批次未证实，整组都不得声称已筛选。
+        source_category_applied = policy.source_category is not None
         source_category_total: int | None = None
         batches_completed = batches_total = total_rows = excluded_non_journal_rows = 0
         stopped_at_batch: int | None = None
@@ -156,7 +157,7 @@ class CnkiProfessionalSearchService:
             total_rows += outcome.total_rows
             excluded_non_journal_rows += outcome.excluded_non_journal_rows
             stopped_at_batch = outcome.stopped_at_batch
-            source_category_applied |= outcome.source_category_applied
+            source_category_applied &= outcome.source_category_applied
             if outcome.source_category_total is not None:
                 source_category_total = outcome.source_category_total
             human_intervention_required |= outcome.human_intervention_required
@@ -259,7 +260,9 @@ class CnkiProfessionalSearchService:
                 record for item in results for record in item.get("records", ())
             )
             annotated = annotate_and_sort_records(records, catalog=self.catalog)
-            source_applied = (all(item.get("source_category_applied", False) for item in results)
+            source_applied = (bool(results)
+                              and all(item.get("source_category_applied", False)
+                                      for item in results)
                               if policy.source_category else False)
             qualified, _excluded = _partition_eligible(
                 annotated, policy, source_category_applied=source_applied
@@ -274,7 +277,9 @@ class CnkiProfessionalSearchService:
             record for item in schedule["results"] for record in item.get("records", ())
         )
         annotated = annotate_and_sort_records(records, catalog=self.catalog)
-        source_applied = (all(item.get("source_category_applied", False) for item in schedule["results"])
+        source_applied = (bool(schedule["results"])
+                          and all(item.get("source_category_applied", False)
+                                  for item in schedule["results"])
                           if policy.source_category else False)
         eligible, excluded = _partition_eligible(
             annotated, policy, source_category_applied=source_applied
