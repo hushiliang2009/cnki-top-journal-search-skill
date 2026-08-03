@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass, field
+import hashlib
+import json
 from pathlib import Path
 import re
 from typing import Literal, Mapping
@@ -58,6 +60,79 @@ _DOCUMENT_EVIDENCE_IDS = {
     "中国环境科学学会 T1": "csees_t1",
     "中国环境科学学会 T2": "csees_t2",
     "中国环境科学学会 T3": "csees_t3",
+}
+
+_SOURCE_ARTIFACTS = (
+    (
+        "CSSCI_2025_2026.md",
+        "CSSCI",
+        "2025-2026",
+        32269,
+        "09f48b9c38e6bf9644c0e7bcc1bd82ababb60474e8cba86b2eba93db654c766a",
+    ),
+    (
+        "北大中文核心期刊目录_2023_自然科学版.md",
+        "PKU_CORE_NATURAL",
+        "2023",
+        64392,
+        "f2e807aa64acb850872be23d05b4eda411903d3c6efc6ff80d99cff01f3ef8de",
+    ),
+    (
+        "北大中文核心期刊目录_2023_.md",
+        "PKU_CORE_NON_NATURAL",
+        "2023",
+        37043,
+        "6ef7d9832844a36dc12e318e586f8942b951c068a2a4ac3f8297824a5be3b891",
+    ),
+    (
+        "Social Sciences Citation Index_20260715.md",
+        "SSCI_DISPLAY",
+        "2026-07-15",
+        188504,
+        "0c1c63386f53ce88f03a75cc4caefb5bb2dd5944573e5b9819948d0545e57c55",
+    ),
+    (
+        "Social Sciences Citation Index (SSCI).csv",
+        "SSCI",
+        "2026-07-15",
+        635202,
+        "8436b3e9bd90cecba335490199ab917d6eb7732623824692d53e0b3efd1ab986",
+    ),
+    (
+        "Science Citation Index Expanded_20260715.md",
+        "SCIE_DISPLAY",
+        "2026-07-15",
+        560466,
+        "40984893b8f50a6d4f9dd12553fbc33fc933ddabb93d967086b6e0c81e78f273",
+    ),
+    (
+        "Science Citation Index Expanded (SCIE).csv",
+        "SCIE",
+        "2026-07-15",
+        1758382,
+        "4cb2ff6458bb426c94aaf58e27d7e1291d0169b51b235ab5f6be4bec448b8b36",
+    ),
+)
+
+_SOURCE_FILE_ORDER = {artifact[0]: position for position, artifact in enumerate(_SOURCE_ARTIFACTS)}
+_INDEX_MEMBERSHIP_ORDER = {"CSSCI": 0, "PKU_CORE": 1, "SSCI": 2, "SCIE": 3}
+_LEVEL_SEVEN_CHINESE_IDS = tuple(f"ENVJ-{number:06d}" for number in range(169, 229))
+
+CNKI_SCOPE_RULES = {
+    "chinese_environment_top": ("exact_titles", None, [6], None),
+    "other_formally_recognized_chinese": ("exact_titles", None, [7], None),
+    "environment_cssci": (
+        "exact_titles",
+        {"code": "P0209", "label": "CSSCI"},
+        [9],
+        "CSSCI",
+    ),
+    "pku_core": (
+        "topic_only",
+        {"code": "P01", "label": "北大核心"},
+        list(range(1, 13)),
+        "PKU_CORE",
+    ),
 }
 
 
@@ -660,6 +735,245 @@ class CatalogBundle:
     controlled_alias_count: int
     expected_but_unmatched_count: int
     ambiguous_count: int
+    catalog_payload: dict[str, object]
+    source_registry: dict[str, object]
+
+
+def _nfkc_text_key(value: str) -> tuple[str, str]:
+    return (unicodedata.normalize("NFKC", value), value)
+
+
+def _contains_float(value: object) -> bool:
+    if isinstance(value, float):
+        return True
+    if isinstance(value, Mapping):
+        return any(_contains_float(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_float(item) for item in value)
+    return False
+
+
+def _canonicalize(value: object) -> object:
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("规范 JSON 的对象键必须为字符串")
+        return {key: _canonicalize(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize(item) for item in value]
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    raise TypeError(f"规范 JSON 不支持 {type(value).__name__}")
+
+
+def canonical_json_bytes(value: object) -> bytes:
+    """Return the UTF-8, LF-terminated canonical JSON representation."""
+    if _contains_float(value):
+        raise TypeError("规范目录不得包含浮点数")
+    text = json.dumps(
+        _canonicalize(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def compute_data_sha256(payload: Mapping[str, object]) -> str:
+    draft = dict(payload)
+    draft["data_sha256"] = "{{DATA_SHA256}}"
+    return hashlib.sha256(canonical_json_bytes(draft)).hexdigest()
+
+
+def _sorted_strings(values: list[str]) -> list[str]:
+    return sorted(set(values), key=_nfkc_text_key)
+
+
+def _source_membership_key(value: Mapping[str, object]) -> tuple[int, int, str]:
+    filename = str(value["source_file"])
+    return (
+        _SOURCE_FILE_ORDER[filename],
+        int(value["source_line"]),
+        str(value["source_record_id"]),
+    )
+
+
+def _record_payload(record: CatalogRecord) -> dict[str, object]:
+    source_memberships = sorted(record.source_memberships, key=_source_membership_key)
+    index_memberships = sorted(
+        record.index_memberships,
+        key=lambda value: (_INDEX_MEMBERSHIP_ORDER[value], value),
+    )
+    return {
+        "journal_id": record.journal_id,
+        "formal_title": record.formal_title,
+        "formal_title_evidence_ids": _sorted_strings(record.formal_title_evidence_ids),
+        "aliases": _sorted_strings(record.aliases),
+        "issn": _sorted_strings(record.issn),
+        "eissn": _sorted_strings(record.eissn),
+        "priority_level": record.priority_level,
+        "priority_group": record.priority_group,
+        "priority_decision": dict(record.priority_decision),
+        "ncs_internal_rank": record.ncs_internal_rank,
+        "environment_subfields": _sorted_strings(record.environment_subfields),
+        "subject_categories": _sorted_strings(record.subject_categories),
+        "formal_evidence": _sorted_strings(record.formal_evidence),
+        "evidence_ids": _sorted_strings(record.evidence_ids),
+        "index_memberships": index_memberships,
+        "index_subject_categories": {
+            key: _sorted_strings(value)
+            for key, value in sorted(record.index_subject_categories.items())
+        },
+        "source_memberships": [
+            {
+                **membership,
+                "subject_categories": _sorted_strings(
+                    list(membership["subject_categories"])
+                ),
+            }
+            for membership in source_memberships
+        ],
+        "source_catalogs": sorted(
+            set(record.source_catalogs),
+            key=lambda value: (_INDEX_MEMBERSHIP_ORDER[value], value),
+        ),
+        "catalog_version": record.catalog_version,
+        "catalog_date": record.catalog_date,
+        "revision_date": record.revision_date,
+        "manual_review_required": record.manual_review_required,
+        "review_reasons": _sorted_strings(record.review_reasons),
+        "cnki_routing": dict(record.cnki_routing),
+    }
+
+
+def _build_cnki_scopes(records: list[CatalogRecord]) -> dict[str, object]:
+    by_id = {record.journal_id: record for record in records}
+    scopes: dict[str, object] = {}
+    for scope_id, (selector, source_category, levels, membership) in CNKI_SCOPE_RULES.items():
+        if scope_id == "other_formally_recognized_chinese":
+            selected = [by_id[journal_id] for journal_id in _LEVEL_SEVEN_CHINESE_IDS]
+        else:
+            selected = [
+                record
+                for record in records
+                if record.priority_level in levels
+                and (membership is None or membership in record.index_memberships)
+            ]
+        selected.sort(key=lambda record: record.journal_id)
+        scopes[scope_id] = {
+            "scope_id": scope_id,
+            "journal_selector": selector,
+            "source_category": source_category,
+            "journal_titles": [record.formal_title for record in selected],
+            "eligible_journal_ids": [record.journal_id for record in selected],
+            "eligible_priority_levels": list(levels),
+            "required_index_membership": membership,
+            "result_filter": "matched_journal_id",
+        }
+    expected_counts = {
+        "chinese_environment_top": 6,
+        "other_formally_recognized_chinese": 60,
+        "environment_cssci": 241,
+        "pku_core": 1987,
+    }
+    actual_counts = {
+        scope_id: len(scope["eligible_journal_ids"])
+        for scope_id, scope in scopes.items()
+    }
+    if actual_counts != expected_counts:
+        raise ValueError(f"CNKI 范围数量错误：{actual_counts}")
+    return scopes
+
+
+def _source_registry(paths: SourcePaths) -> dict[str, object]:
+    path_by_name = {
+        path.name: path
+        for path in (
+            paths.cssci_markdown,
+            paths.pku_natural,
+            paths.pku_non_natural,
+            paths.ssci_markdown,
+            paths.ssci_csv,
+            paths.scie_markdown,
+            paths.scie_csv,
+        )
+    }
+    artifacts: list[dict[str, object]] = []
+    for filename, source_name, version, expected_bytes, expected_sha256 in _SOURCE_ARTIFACTS:
+        path = path_by_name.get(filename)
+        if path is None:
+            raise ValueError(f"缺少批准的来源快照：{filename}")
+        content = path.read_bytes()
+        actual_sha256 = hashlib.sha256(content).hexdigest()
+        if len(content) != expected_bytes or actual_sha256 != expected_sha256:
+            raise ValueError(f"来源快照未通过字节或 SHA-256 校验：{filename}")
+        artifacts.append(
+            {
+                "filename": filename,
+                "source_name": source_name,
+                "version": version,
+                "bytes": expected_bytes,
+                "sha256": expected_sha256,
+            }
+        )
+    evidence_registry = [
+        {"evidence_id": evidence_id, "evidence_text": evidence_text}
+        for evidence_text, evidence_id in _DOCUMENT_EVIDENCE_IDS.items()
+    ]
+    return {"artifacts": artifacts, "evidence_registry": evidence_registry}
+
+
+def _catalog_payload(records: list[CatalogRecord]) -> dict[str, object]:
+    journals = [_record_payload(record) for record in sorted(records, key=lambda item: item.journal_id)]
+    return {
+        "schema_version": "1.0",
+        "catalog_version": "4.0",
+        "catalog_date": "2026-07-29",
+        "revision_date": "2026-07-31",
+        "data_sha256": "{{DATA_SHA256}}",
+        "level_counts": list(_EXPECTED_LEVEL_COUNTS),
+        "priority_groups": list(PRIORITY_GROUPS),
+        "journals": journals,
+        "cnki_scopes": _build_cnki_scopes(records),
+    }
+
+
+def validate_generated_bundle(
+    bundle: CatalogBundle,
+    audit: list[AuditRecord],
+) -> dict[str, object]:
+    payload = bundle.catalog_payload
+    if payload["data_sha256"] != compute_data_sha256(payload):
+        raise ValueError("目录 JSON 哈希校验失败")
+    if len(payload["journals"]) != 3764:
+        raise ValueError("目录 JSON 期刊数量错误")
+    if tuple(payload["level_counts"]) != _EXPECTED_LEVEL_COUNTS:
+        raise ValueError("目录 JSON 层级数量错误")
+    if priority_signature(bundle.records) != priority_signature(
+        sorted(bundle.records, key=lambda item: item.journal_id)
+    ):
+        raise ValueError("目录优先级签名顺序错误")
+    registry = bundle.source_registry
+    artifacts = registry["artifacts"]
+    evidence = registry["evidence_registry"]
+    if len(artifacts) != 7 or len({item["filename"] for item in artifacts}) != 7:
+        raise ValueError("来源登记表必须包含七份唯一快照")
+    evidence_ids = [item["evidence_id"] for item in evidence]
+    if len(evidence_ids) != len(set(evidence_ids)):
+        raise ValueError("文档证据 ID 必须唯一")
+    referenced = {
+        evidence_id
+        for record in payload["journals"]
+        for evidence_id in record["evidence_ids"] + record["formal_title_evidence_ids"]
+    }
+    if not referenced <= set(evidence_ids):
+        raise ValueError("期刊证据 ID 未在来源登记表中解析")
+    if audit != bundle.audit:
+        raise ValueError("目录审计记录必须与构建产物一致")
+    return {
+        "data_sha256": payload["data_sha256"],
+        "journal_count": len(payload["journals"]),
+        "audit_count": len(audit),
+    }
 
 
 def _conservative_key(value: str) -> str:
@@ -1006,7 +1320,10 @@ def build_catalog_bundle(baseline: Path, sources: SourcePaths) -> CatalogBundle:
     zero_intersections = {
         key: value for key, value in all_intersections.items() if not value
     }
-    return CatalogBundle(
+    source_registry = _source_registry(sources)
+    catalog_payload = _catalog_payload(records)
+    catalog_payload["data_sha256"] = compute_data_sha256(catalog_payload)
+    bundle = CatalogBundle(
         records,
         audit,
         match_counts,
@@ -1015,4 +1332,8 @@ def build_catalog_bundle(baseline: Path, sources: SourcePaths) -> CatalogBundle:
         len(controlled_aliases),
         sum(item.status == "expected_but_unmatched" for item in audit),
         sum(item.status == "ambiguous" for item in audit),
+        catalog_payload,
+        source_registry,
     )
+    validate_generated_bundle(bundle, audit)
+    return bundle
