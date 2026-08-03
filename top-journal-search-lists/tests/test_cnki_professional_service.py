@@ -6,8 +6,11 @@ import pytest
 
 from cnki_search import professional_service as service_module
 from cnki_search.models import SearchStatus
-from cnki_search.professional import ExpressionBatch
-from cnki_search.professional_service import CnkiProfessionalSearchService, preview_expressions
+from cnki_search.professional import ExpressionBatch, SourceCategorySpec
+from cnki_search.professional_service import (
+    CnkiProfessionalSearchService,
+    preview_expressions,
+)
 from cnki_search.webvpn import BatchCheckpoint
 
 
@@ -69,6 +72,46 @@ def _executor(pages: list[tuple[str, str]], seen: list[ExpressionBatch] | None =
     return execute
 
 
+def _field_of(expression: str) -> str:
+    return expression.split(" ", 1)[0]
+
+
+def _service_yielding_by_field(
+    records_by_field: dict[str, list[tuple[str, str]]],
+) -> tuple[CnkiProfessionalSearchService, list[ExpressionBatch]]:
+    seen: list[ExpressionBatch] = []
+
+    async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
+        seen.append(plan)
+        html = "".join(
+            _result_page(title=title, journal=journal)
+            for title, journal in records_by_field.get(_field_of(plan.expression), [])
+        )
+        return SearchStatus.SUCCESS.value, html, "https://example.invalid/"
+
+    return CnkiProfessionalSearchService(execute), seen
+
+
+def _service_with_terminal_by_field(
+    successful: dict[str, list[tuple[str, str]]],
+    terminal_field: str,
+    terminal_status: SearchStatus,
+) -> tuple[CnkiProfessionalSearchService, list[ExpressionBatch]]:
+    seen: list[ExpressionBatch] = []
+
+    async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
+        seen.append(plan)
+        if _field_of(plan.expression) == terminal_field:
+            return terminal_status.value, "", "https://example.invalid/"
+        html = "".join(
+            _result_page(title=title, journal=journal)
+            for title, journal in successful.get(_field_of(plan.expression), [])
+        )
+        return SearchStatus.SUCCESS.value, html, "https://example.invalid/"
+
+    return CnkiProfessionalSearchService(execute), seen
+
+
 def test_chinese_top_plan_uses_exact_journals_without_facet() -> None:
     plans = service_module.preview_plans("数字经济", service_module.CHINESE_TOP_GROUP)
     assert len(plans) == 1
@@ -84,6 +127,107 @@ def test_cssci_plan_uses_one_topic_expression_and_result_facet() -> None:
     assert "LY=" not in plans[0].expression
     assert plans[0].source_category == "CSSCI"
     assert plans[0].page_size == 50
+
+
+def test_fields_accumulate_unique_eligible_records_until_limit() -> None:
+    service, seen = _service_yielding_by_field(
+        {
+            "TI": [("甲", "管理世界")],
+            "SU": [("甲", "管理世界"), ("乙", "管理世界")],
+        }
+    )
+
+    result = asyncio.run(
+        service.search_group("碳中和", service_module.CHINESE_TOP_GROUP, limit=2)
+    )
+
+    assert [record["title"] for record in result["records"]] == ["甲", "乙"]
+    assert result["topic_fields_tried"] == ["TI", "SU"]
+    assert [record["topic_match_field"] for record in result["records"]] == ["TI", "SU"]
+    assert [_field_of(plan.expression) for plan in seen] == ["TI", "SU"]
+
+
+def test_out_of_scope_rows_do_not_consume_limit() -> None:
+    service, _seen = _service_yielding_by_field(
+        {
+            "TI": [
+                ("近似刊物", "管理学报"),
+                ("合格刊物", "管理世界"),
+            ],
+        }
+    )
+
+    result = asyncio.run(
+        service.search_group("生态", service_module.CHINESE_TOP_GROUP, limit=1)
+    )
+
+    assert result["eligible_record_count"] == 1
+    assert result["excluded_out_of_scope_count"] == 1
+    assert result["records"][0]["journal_matched_title"] == "管理世界"
+    assert result["records"][0]["title"] == "合格刊物"
+
+
+def test_all_fields_short_return_accumulated_unique_records_not_largest_field() -> None:
+    service, seen = _service_yielding_by_field(
+        {
+            "TI": [("甲", "管理世界")],
+            "SU": [("乙", "管理世界")],
+            "KY": [("甲", "管理世界"), ("丙", "管理世界")],
+            "TKA": [("丁", "管理世界")],
+        }
+    )
+
+    result = asyncio.run(
+        service.search_group("碳中和", service_module.CHINESE_TOP_GROUP, limit=10)
+    )
+
+    assert [record["title"] for record in result["records"]] == ["甲", "乙", "丙", "丁"]
+    assert result["topic_fields_tried"] == ["TI", "SU", "KY", "TKA"]
+    assert [_field_of(plan.expression) for plan in seen] == ["TI", "SU", "KY", "TKA"]
+    assert result["complete"] is False
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [
+        SearchStatus.CHALLENGE_DETECTED,
+        SearchStatus.LOGIN_REQUIRED,
+        SearchStatus.FORBIDDEN,
+        SearchStatus.RATE_LIMITED,
+        SearchStatus.PAGE_CONTRACT_CHANGED,
+    ],
+)
+def test_blocking_field_keeps_qualified_partial_and_stops_later_fields(
+    terminal_status: SearchStatus,
+) -> None:
+    service, seen = _service_with_terminal_by_field(
+        successful={"TI": [("已取得", "管理世界")], "SU": []},
+        terminal_field="SU",
+        terminal_status=terminal_status,
+    )
+
+    result = asyncio.run(
+        service.search_group("环境治理", service_module.CHINESE_TOP_GROUP, limit=10)
+    )
+
+    assert [record["title"] for record in result["records"]] == ["已取得"]
+    assert result["status"] == SearchStatus.PARTIAL.value
+    assert result["terminal_status"] == terminal_status.value
+    assert result["human_intervention_required"] is True
+    assert result["topic_fields_tried"] == ["TI", "SU"]
+    assert [_field_of(plan.expression) for plan in seen] == ["TI", "SU"]
+
+
+def test_generic_cssci_uses_topic_only_plus_result_facet() -> None:
+    policy = service_module.build_group_policy(service_module.CSSCI_GROUP)
+    plans = service_module.build_group_plans(
+        "环境治理", policy=policy, topic_field="TI"
+    )
+
+    assert len(plans) == 1
+    assert plans[0].expression == "TI %= '环境治理'"
+    assert "CSSCI" not in plans[0].expression
+    assert plans[0].source_category == SourceCategorySpec("P0209", "CSSCI")
 
 
 def test_chinese_top_group_fits_one_batch_and_is_annotated_at_level_six() -> None:
