@@ -1135,3 +1135,25 @@ def test_attended_e2e_summary_requires_every_diagnostic_key(
 
     with pytest.raises(helper.UnsafeOutputError):
         helper._summary(result, "group")
+
+
+def test_professional_documentation_states_field_and_facet_contract(
+    skill_root: Path,
+) -> None:
+    """文档不得再声称"取记录最多的字段"或把来源类别写成检索字段。"""
+    for relative in ("SKILL.md", "README.md", "references/cnki-search-reference.md"):
+        text = (skill_root / relative).read_text(encoding="utf-8")
+        assert "TI → SU → KY → TKA" in text, relative
+        assert "累计" in text, relative
+        assert "来源类别不是专业检索字段" in text, relative
+        assert "P0209" in text, relative
+        assert "first_page_only" in text, relative
+
+
+def test_professional_documentation_drops_the_best_field_wording(
+    skill_root: Path,
+) -> None:
+    for relative in ("SKILL.md", "README.md", "references/cnki-search-reference.md"):
+        text = (skill_root / relative).read_text(encoding="utf-8")
+        for stale in ("取有效记录最多的那个字段", "逐级替换"):
+            assert stale not in text, (relative, stale)

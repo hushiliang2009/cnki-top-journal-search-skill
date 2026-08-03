@@ -2,16 +2,22 @@
 
 `Top Environmental Journal Search` 是环境科学与工程专用文献检索 Skill。
 它以 ai4scholar 为主要来源，按
-《环境科学与工程学科顶尖期刊目录 v3.0》的十级顺序整理文献，并可通过独立的
+《环境科学与工程学科顶尖期刊目录 v4.0》的十二级顺序整理文献，并可通过独立的
 `cnki-search-env` MCP 补充中国知网公开首页中文期刊结果。调用方式为
 `$top-journal-search-lists-env`，MCP 工具为 `cnki_search_env(query, limit)`。
 `limit` 最大为 20。
 
 另有一个可选的第二模式：`cnki_professional_search_env`，由使用者本人经所在
 机构官方 WebVPN 完成统一身份认证后，用知网专业检索按环境期刊目录定向检索
-中文期刊论文。覆盖 `chinese_environment_top`（6 本，`LY=` **精确**枚举）与
-`environment_cssci`（241 本，精确枚举并逐批附结果页「来源类别」= CSSCI），
-`limit` 为 1 至 50。
+中文期刊论文。覆盖四个受控范围：`chinese_environment_top`（第6级 6 本，`LY=`
+**精确**枚举）、`other_formally_recognized_chinese`（第7级中文 60 本，精确枚举）、
+`environment_cssci`（第9级 241 本，精确枚举并逐批附结果页「来源类别」= CSSCI，
+代码 `P0209`）与 `pku_core`（第11—12级 1987 本，只提交主题与年份表达式并勾选
+「来源类别」= 北大核心，代码 `P01`，不生成 `LY=`）。`limit` 为 1 至 50。
+
+完整工作流按 **第6级、第7级中文期刊、第9级CSSCI、第11—12级北大核心** 的顺序
+依次检索，跨组总量只计全局去重后的新增论文。**第11级和第12级不得分别重复检索**——
+两级同属一个 `pku_core` 范围，一次分面检索即可覆盖。
 
 该模式属**机构授权**的正常访问路径，与检测规避有本质区别：**不伪造**
 User-Agent、**不轮换代理**、不抹除自动化标志、**不自动破解**验证码。它
@@ -23,10 +29,19 @@ User-Agent、**不轮换代理**、不抹除自动化标志、**不自动破解*
 返回 `no_data_retry_later` 表示知网临时拒绝，**不等于空结果**；其他层级不在
 覆盖范围内，应改用 ai4scholar。
 
-检索字段按 **TI → SU → KY → TKA** 的优先序逐级替换：篇名最准，主题次之，
-关键词第三，篇关摘兜底。**有效记录数达到 `limit` 就停止**，都不够用时取有效
-记录最多的那个字段。返回值里的 `topic_field` 与 `topic_fields_tried` 如实
-说明最终用了哪个、试过哪些。
+分组检索依次执行 **TI → SU → KY → TKA**，并**累计**此前字段尚未取得的合格
+唯一记录；达到 `limit` 即停。四个字段互相补充，不是从中挑一个"最好的"。
+`topic_fields_tried` 如实列出试过哪些字段。
+
+**来源类别不是专业检索字段**：CSSCI（`P0209`）与北大核心（`P01`）只在首次
+检索成功后的结果页来源类别中勾选，不写入表达式，也不进 `LY=`。分面未证实
+生效时返回 `page_contract_changed`，不会退回未筛选结果。
+
+`first_page_only=true` 表示每条表达式只读当前页最多 50 条；`complete=false`
+时不得当作完整检索。组外记录不占限额，进 `excluded_out_of_scope_records`；
+单组调用的 `already_covered_higher_priority_count` 恒为 0（跨组去重属完整
+工作流职责）；`source_category_applied` 取全部已执行批次与字段的合取，可能
+保守低报。
 
 ⚠ 每多试一个字段就是一次真实检索，而批次间强制 ≥30 秒节流。窄主题可能一路
 试到 TKA：单组最坏为 4 × 批次数 次请求，`environment_cssci` 两批即 8 次、
