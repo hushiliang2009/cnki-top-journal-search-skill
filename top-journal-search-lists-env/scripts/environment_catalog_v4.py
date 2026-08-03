@@ -8,7 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Literal, Mapping, Sequence
+from typing import Literal, Mapping, Sequence, cast
 import unicodedata
 
 
@@ -835,7 +835,7 @@ def _source_membership_key(value: Mapping[str, object]) -> tuple[int, int, str]:
     filename = str(value["source_file"])
     return (
         _SOURCE_FILE_ORDER[filename],
-        int(value["source_line"]),
+        int(cast(int | str, value["source_line"])),
         str(value["source_record_id"]),
     )
 
@@ -870,7 +870,7 @@ def _record_payload(record: CatalogRecord) -> dict[str, object]:
             {
                 **membership,
                 "subject_categories": _sorted_strings(
-                    list(membership["subject_categories"])
+                    list(cast(Sequence[str], membership["subject_categories"]))
                 ),
             }
             for membership in source_memberships
@@ -919,7 +919,12 @@ def _build_cnki_scopes(records: list[CatalogRecord]) -> dict[str, object]:
         "pku_core": 1987,
     }
     actual_counts = {
-        scope_id: len(scope["eligible_journal_ids"])
+        scope_id: len(
+            cast(
+                Sequence[str],
+                cast(Mapping[str, object], scope)["eligible_journal_ids"],
+            )
+        )
         for scope_id, scope in scopes.items()
     }
     if actual_counts != expected_counts:
@@ -987,26 +992,31 @@ def validate_generated_bundle(
     payload = bundle.catalog_payload
     if payload["data_sha256"] != compute_data_sha256(payload):
         raise ValueError("目录 JSON 哈希校验失败")
-    if len(payload["journals"]) != 3764:
+    journals = cast(list[Mapping[str, object]], payload["journals"])
+    level_counts = cast(Sequence[int], payload["level_counts"])
+    if len(journals) != 3764:
         raise ValueError("目录 JSON 期刊数量错误")
-    if tuple(payload["level_counts"]) != _EXPECTED_LEVEL_COUNTS:
+    if tuple(level_counts) != _EXPECTED_LEVEL_COUNTS:
         raise ValueError("目录 JSON 层级数量错误")
     if priority_signature(bundle.records) != priority_signature(
         sorted(bundle.records, key=lambda item: item.journal_id)
     ):
         raise ValueError("目录优先级签名顺序错误")
     registry = bundle.source_registry
-    artifacts = registry["artifacts"]
-    evidence = registry["evidence_registry"]
+    artifacts = cast(list[Mapping[str, object]], registry["artifacts"])
+    evidence = cast(list[Mapping[str, object]], registry["evidence_registry"])
     if len(artifacts) != 7 or len({item["filename"] for item in artifacts}) != 7:
         raise ValueError("来源登记表必须包含七份唯一快照")
-    evidence_ids = [item["evidence_id"] for item in evidence]
+    evidence_ids = [str(item["evidence_id"]) for item in evidence]
     if len(evidence_ids) != len(set(evidence_ids)):
         raise ValueError("文档证据 ID 必须唯一")
     referenced = {
         evidence_id
-        for record in payload["journals"]
-        for evidence_id in record["evidence_ids"] + record["formal_title_evidence_ids"]
+        for record in journals
+        for evidence_id in (
+            list(cast(Sequence[str], record["evidence_ids"]))
+            + list(cast(Sequence[str], record["formal_title_evidence_ids"]))
+        )
     }
     if not referenced <= set(evidence_ids):
         raise ValueError("期刊证据 ID 未在来源登记表中解析")
@@ -1014,7 +1024,7 @@ def validate_generated_bundle(
         raise ValueError("目录审计记录必须与构建产物一致")
     return {
         "data_sha256": payload["data_sha256"],
-        "journal_count": len(payload["journals"]),
+        "journal_count": len(journals),
         "audit_count": len(audit),
     }
 
@@ -1290,8 +1300,8 @@ def _source_groups(paths: SourcePaths) -> list[tuple[str, list[SourceRecord]]]:
 def _record_source_groups(record: CatalogRecord) -> set[str]:
     groups: set[str] = set()
     for membership in record.source_memberships:
-        index_name = membership["index_name"]
-        source_id = membership["source_record_id"]
+        index_name = str(membership["index_name"])
+        source_id = str(membership["source_record_id"])
         if index_name == "PKU_CORE":
             groups.add(
                 "PKU_CORE_NATURAL"
@@ -1361,7 +1371,7 @@ def build_catalog_bundle(baseline: Path, sources: SourcePaths) -> CatalogBundle:
     intersections = {
         key: value for key, value in all_intersections.items() if value
     }
-    zero_intersections = {
+    zero_intersections: dict[str, int] = {
         key: value for key, value in all_intersections.items() if not value
     }
     source_registry = _source_registry(sources)

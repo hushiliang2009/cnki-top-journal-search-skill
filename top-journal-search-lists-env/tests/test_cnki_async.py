@@ -16,7 +16,7 @@ from cnki_search_env.session import PublicCnkiSession
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CATALOG = ROOT / "references" / "环境科学与工程学科顶尖期刊目录_v3.0.md"
+CATALOG = ROOT / "references" / "environment_journal_catalog_v4.0.json"
 
 
 def test_async_gate_serializes_actual_start_times_without_real_sleep() -> None:

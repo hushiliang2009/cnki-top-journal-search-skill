@@ -103,7 +103,7 @@ def test_outcome_rejects_formal_records_with_unverifiable_year(year: int) -> Non
 def test_service_rejects_invalid_arguments_instead_of_faking_page_contract_change() -> None:
     from cnki_search_env.service import CnkiPublicSearchService
 
-    catalog = Path(__file__).resolve().parents[1] / "references" / "环境科学与工程学科顶尖期刊目录_v3.0.md"
+    catalog = Path(__file__).resolve().parents[1] / "references" / "environment_journal_catalog_v4.0.json"
     service = CnkiPublicSearchService(catalog=catalog)
     for query, limit in (("   ", 20), ("topic", 0), ("topic", 21)):
         with pytest.raises(ValueError):

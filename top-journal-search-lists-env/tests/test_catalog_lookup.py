@@ -134,7 +134,7 @@ def test_validate_rejects_record_type_and_version_drift_even_after_rehash(tmp_pa
     module = _load_module()
     payload = json.loads(CATALOG_JSON.read_text(encoding="utf-8"))
     payload["journals"][0]["source_memberships"] = {}
-    payload["journals"][1]["catalog_version"] = "3.0"
+    payload["journals"][1]["catalog_version"] = "9.9"
     path = tmp_path / "invalid-record-contract.json"
     _write_rehashed_catalog(path, payload)
     with pytest.raises(ValueError, match="记录"):
