@@ -76,8 +76,15 @@ def test_outcome_accepts_incomplete_records_only_in_incomplete_collection() -> N
     assert outcome.incomplete_records == [incomplete]
 
 
-def test_catalog_version_is_fixed_and_not_a_constructor_argument() -> None:
-    assert _record().catalog_version == "3.0"
+def test_catalog_version_and_v4_metadata_are_fixed_and_not_constructor_arguments() -> None:
+    record = _record()
+    assert record.catalog_version == "4.0"
+    assert record.catalog_date == "2026-07-29"
+    assert record.revision_date == "2026-07-31"
+    assert record.journal_id is None
+    assert record.aliases == []
+    assert record.index_subject_categories == {}
+    assert record.source_memberships == []
     with pytest.raises(TypeError):
         PaperRecord(
             title="Example", authors=[], journal_raw="Journal", publication_date="2026",

@@ -5,7 +5,7 @@ from cnki_search_env.ranking import annotate_and_sort_records
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CATALOG = ROOT / "references" / "环境科学与工程学科顶尖期刊目录_v3.0.md"
+CATALOG_JSON = ROOT / "references" / "environment_journal_catalog_v4.0.json"
 
 
 def record(journal: str, rank: int) -> PaperRecord:
@@ -16,16 +16,23 @@ def record(journal: str, rank: int) -> PaperRecord:
     )
 
 
-def test_annotation_uses_catalog_and_preserves_unmatched() -> None:
-    records = [record("未知期刊", 1), record("中国环境科学", 2)]
-    ranked = annotate_and_sort_records(records, catalog=CATALOG)
-    assert [item.journal_raw for item in ranked] == ["中国环境科学", "未知期刊"]
-    assert ranked[0].priority_level == 6
-    assert "环境科学与环境化学" in ranked[0].environment_subfields
-    assert ranked[0].subject_categories == ranked[0].environment_subfields
-    assert "中国环境科学学会 T1" in ranked[0].formal_evidence
-    assert ranked[0].index_memberships == []
-    assert ranked[0].catalog_version == "3.0"
-    assert ranked[0].catalog_date == "2026-07-26"
-    assert ranked[1].journal_match_status == "unmatched"
-    assert ranked[1].manual_review_required is True
+def test_annotation_propagates_v4_record_identity_and_source_evidence() -> None:
+    ranked = annotate_and_sort_records([record("城市规划", 1)], catalog=CATALOG_JSON)
+    item = ranked[0]
+    assert item.journal_id and item.journal_id.startswith("ENVJ-")
+    assert item.catalog_version == "4.0"
+    assert item.catalog_date == "2026-07-29"
+    assert item.revision_date == "2026-07-31"
+    assert set(item.index_memberships) == {"CSSCI", "PKU_CORE"}
+    assert "CSSCI" in item.index_subject_categories
+    assert item.source_memberships
+
+
+def test_annotation_preserves_empty_v4_metadata_for_unmatched_records() -> None:
+    item = annotate_and_sort_records([record("未知期刊", 1)], catalog=CATALOG_JSON)[0]
+    assert item.journal_match_status == "unmatched"
+    assert item.journal_id is None
+    assert item.aliases == []
+    assert item.index_subject_categories == {}
+    assert item.source_memberships == []
+    assert item.manual_review_required is True
