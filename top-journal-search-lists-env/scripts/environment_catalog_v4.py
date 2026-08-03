@@ -96,6 +96,10 @@ class ControlledAlias:
     source: str
 
 
+def _exact_key(value: str) -> str:
+    return unicodedata.normalize("NFKC", value).strip().casefold()
+
+
 _WOS_COLUMNS = frozenset(
     {
         "Journal title",
@@ -124,6 +128,45 @@ _DATABASE_TITLE_MAPPINGS = {
         "Zeitschrift der Deutschen Gesellschaft für Geowissenschaften"
     ),
     "Zeitschrift fur Geomorphologie": "Zeitschrift für Geomorphologie",
+}
+
+
+CONTROLLED_ALIASES = {
+    _exact_key("Wiley Interdisciplinary Reviews-Climate Change"): ControlledAlias(
+        "ENVJ-000549",
+        "Wiley Interdisciplinary Reviews-Climate Change",
+        "database_title_mapping",
+    ),
+    _exact_key("Wiley Interdisciplinary Reviews-Energy and Environment"): ControlledAlias(
+        "ENVJ-002018",
+        "Wiley Interdisciplinary Reviews-Energy and Environment",
+        "database_title_mapping",
+    ),
+    _exact_key("Wiley Interdisciplinary Reviews-Water"): ControlledAlias(
+        "ENVJ-000168", "Wiley Interdisciplinary Reviews-Water", "database_title_mapping"
+    ),
+    _exact_key("地理学报（北京）"): ControlledAlias(
+        "ENVJ-000646", "地理学报（北京）", "database_title_mapping"
+    ),
+    _exact_key("Archiv fur Molluskenkunde"): ControlledAlias(
+        "ENVJ-000902", "Archiv fur Molluskenkunde", "database_title_mapping"
+    ),
+    _exact_key("ArcheoSciences-Revue d Archeometrie"): ControlledAlias(
+        "ENVJ-000910", "ArcheoSciences-Revue d Archeometrie", "database_title_mapping"
+    ),
+    _exact_key("Journal of Food Safety and Food Quality-Archiv fur Lebensmittelhygiene"): ControlledAlias(
+        "ENVJ-001510",
+        "Journal of Food Safety and Food Quality-Archiv fur Lebensmittelhygiene",
+        "database_title_mapping",
+    ),
+    _exact_key("Zeitschrift der Deutschen Gesellschaft fur Geowissenschaften"): ControlledAlias(
+        "ENVJ-002021",
+        "Zeitschrift der Deutschen Gesellschaft fur Geowissenschaften",
+        "database_title_mapping",
+    ),
+    _exact_key("Zeitschrift fur Geomorphologie"): ControlledAlias(
+        "ENVJ-002022", "Zeitschrift fur Geomorphologie", "database_title_mapping"
+    ),
 }
 
 
@@ -567,4 +610,390 @@ def priority_signature(
             record.ncs_internal_rank,
         )
         for record in records
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MatchIndexes:
+    by_identifier: dict[str, tuple[CatalogRecord, ...]]
+    by_exact_title: dict[str, tuple[CatalogRecord, ...]]
+    by_conservative_title: dict[str, tuple[CatalogRecord, ...]]
+    by_journal_id: dict[str, CatalogRecord]
+
+
+@dataclass(frozen=True, slots=True)
+class MatchDecision:
+    record: CatalogRecord | None
+    match_method: str
+    candidates: tuple[CatalogRecord, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AuditRecord:
+    index_name: str
+    index_version: str
+    source_file: str
+    source_line: int
+    source_record_id: str
+    source_title: str
+    formal_title: str
+    candidate_journal_ids: tuple[str, ...]
+    match_method: str
+    status: Literal[
+        "matched", "out_of_scope", "ambiguous", "expected_but_unmatched"
+    ]
+    journal_id: str | None
+    added_index_membership: bool
+    priority_before: int | None
+    priority_after: int | None
+    manual_review_required: bool
+    review_reasons: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class CatalogBundle:
+    records: list[CatalogRecord]
+    audit: list[AuditRecord]
+    match_counts: dict[str, tuple[int, int, int]]
+    intersections: dict[str, int]
+    zero_intersections: dict[str, int]
+    controlled_alias_count: int
+    expected_but_unmatched_count: int
+    ambiguous_count: int
+
+
+def _conservative_key(value: str) -> str:
+    normalized = _exact_key(value)
+    if normalized.startswith("the "):
+        normalized = normalized[4:]
+    normalized = normalized.replace("&", " and ")
+    return re.sub(r"[\s.,:;·()\[\]{}'\"/\\-]+", "", normalized)
+
+
+def _index_records(records: list[CatalogRecord]) -> MatchIndexes:
+    by_identifier: dict[str, list[CatalogRecord]] = {}
+    by_exact_title: dict[str, list[CatalogRecord]] = {}
+    by_conservative_title: dict[str, list[CatalogRecord]] = {}
+    by_journal_id = {record.journal_id: record for record in records}
+    for record in records:
+        by_exact_title.setdefault(_exact_key(record.formal_title), []).append(record)
+        by_conservative_title.setdefault(_conservative_key(record.formal_title), []).append(
+            record
+        )
+        for identifier in (*record.issn, *record.eissn):
+            by_identifier.setdefault(identifier, []).append(record)
+    return MatchIndexes(
+        by_identifier={key: tuple(value) for key, value in by_identifier.items()},
+        by_exact_title={key: tuple(value) for key, value in by_exact_title.items()},
+        by_conservative_title={
+            key: tuple(value) for key, value in by_conservative_title.items()
+        },
+        by_journal_id=by_journal_id,
+    )
+
+
+def _match_one(
+    indexes: MatchIndexes,
+    source: SourceRecord,
+    controlled_aliases: Mapping[str, ControlledAlias],
+) -> MatchDecision:
+    for identifier in (*source.issn, *source.eissn):
+        candidates = indexes.by_identifier.get(identifier, ())
+        if len(candidates) == 1:
+            return MatchDecision(candidates[0], "identifier")
+        if len(candidates) > 1:
+            return MatchDecision(None, "identifier_conflict", candidates)
+    candidates = indexes.by_exact_title.get(_exact_key(source.formal_title), ())
+    if len(candidates) == 1:
+        return MatchDecision(candidates[0], "formal_title_exact")
+    alias = controlled_aliases.get(_exact_key(source.formal_title))
+    if alias is not None:
+        return MatchDecision(indexes.by_journal_id[alias.journal_id], "controlled_alias")
+    candidates = indexes.by_conservative_title.get(_conservative_key(source.formal_title), ())
+    if len(candidates) == 1:
+        return MatchDecision(candidates[0], "conservative_normalized")
+    return MatchDecision(None, "ambiguous" if candidates else "out_of_scope", candidates)
+
+
+def _build_controlled_aliases(
+    records: list[CatalogRecord], source_records: list[SourceRecord]
+) -> dict[str, ControlledAlias]:
+    by_title = {_exact_key(record.formal_title): record for record in records}
+    aliases = dict(CONTROLLED_ALIASES)
+    for source in source_records:
+        if source.index_name != "PKU_CORE" or not source.aliases:
+            continue
+        target = by_title[_exact_key(source.formal_title)]
+        for original_title in source.aliases:
+            aliases[_exact_key(original_title)] = ControlledAlias(
+                target.journal_id, original_title, "pku_original_title"
+            )
+    if len(aliases) != 26:
+        raise ValueError(f"受控别名数应为26，实际为{len(aliases)}")
+    for alias in aliases.values():
+        target = next(record for record in records if record.journal_id == alias.journal_id)
+        if alias.alias not in target.aliases:
+            target.aliases.append(alias.alias)
+    return aliases
+
+
+def _bind_source_membership(
+    record: CatalogRecord, source: SourceRecord, match_method: str
+) -> bool:
+    membership = {
+        "index_name": source.index_name,
+        "index_version": source.index_version,
+        "source_title": source.source_title,
+        "source_record_id": source.source_record_id,
+        "source_file": source.source_file,
+        "source_line": source.source_line,
+        "subject_categories": list(source.subject_categories),
+        "match_method": match_method,
+    }
+    if membership in record.source_memberships:
+        return False
+    added_index = source.index_name not in record.index_memberships
+    if added_index:
+        record.index_memberships.append(source.index_name)
+    record.index_subject_categories.setdefault(source.index_name, [])
+    for category in source.subject_categories:
+        if category not in record.index_subject_categories[source.index_name]:
+            record.index_subject_categories[source.index_name].append(category)
+    record.source_memberships.append(membership)
+    if source.index_name not in record.source_catalogs:
+        record.source_catalogs.append(source.index_name)
+    for identifier in source.issn:
+        if identifier not in record.issn:
+            record.issn.append(identifier)
+    for identifier in source.eissn:
+        if identifier not in record.eissn:
+            record.eissn.append(identifier)
+    return added_index
+
+
+def _register_identifiers(
+    indexes: MatchIndexes, record: CatalogRecord, source: SourceRecord
+) -> None:
+    for identifier in (*source.issn, *source.eissn):
+        candidates = indexes.by_identifier.get(identifier, ())
+        if record not in candidates:
+            indexes.by_identifier[identifier] = (*candidates, record)
+
+
+def match_source_records(
+    records: list[CatalogRecord],
+    source_records: list[SourceRecord],
+    *,
+    controlled_aliases: Mapping[str, ControlledAlias],
+) -> list[AuditRecord]:
+    """按批准顺序匹配来源记录，并只在无标识符冲突时补充元数据。"""
+    audit: list[AuditRecord] = []
+    indexes = _index_records(records)
+    for source in source_records:
+        decision = _match_one(indexes, source, controlled_aliases)
+        if decision.record is None:
+            status: Literal[
+                "matched", "out_of_scope", "ambiguous", "expected_but_unmatched"
+            ] = "ambiguous" if decision.match_method != "out_of_scope" else "out_of_scope"
+            audit.append(
+                AuditRecord(
+                    source.index_name,
+                    source.index_version,
+                    source.source_file,
+                    source.source_line,
+                    source.source_record_id,
+                    source.source_title,
+                    source.formal_title,
+                    tuple(candidate.journal_id for candidate in decision.candidates),
+                    decision.match_method,
+                    status,
+                    None,
+                    False,
+                    None,
+                    None,
+                    status == "ambiguous",
+                    (decision.match_method,) if status == "ambiguous" else (),
+                )
+            )
+            continue
+
+        record = decision.record
+        conflicting = [
+            identifier
+            for identifier in (*source.issn, *source.eissn)
+            if identifier in indexes.by_identifier
+            and record not in indexes.by_identifier[identifier]
+        ]
+        if conflicting:
+            audit.append(
+                AuditRecord(
+                    source.index_name,
+                    source.index_version,
+                    source.source_file,
+                    source.source_line,
+                    source.source_record_id,
+                    source.source_title,
+                    source.formal_title,
+                    (record.journal_id,),
+                    "identifier_conflict",
+                    "ambiguous",
+                    None,
+                    False,
+                    None,
+                    None,
+                    True,
+                    tuple(conflicting),
+                )
+            )
+            continue
+        before = record.priority_level
+        added_index = _bind_source_membership(record, source, decision.match_method)
+        _register_identifiers(indexes, record, source)
+        audit.append(
+            AuditRecord(
+                source.index_name,
+                source.index_version,
+                source.source_file,
+                source.source_line,
+                source.source_record_id,
+                source.source_title,
+                source.formal_title,
+                (record.journal_id,),
+                decision.match_method,
+                "matched",
+                record.journal_id,
+                added_index,
+                before,
+                record.priority_level,
+                False,
+                (),
+            )
+        )
+    return audit
+
+
+def _source_groups(paths: SourcePaths) -> list[tuple[str, list[SourceRecord]]]:
+    return [
+        ("CSSCI", parse_cssci_markdown(paths.cssci_markdown)),
+        ("PKU_CORE_NATURAL", parse_pku_markdown(paths.pku_natural, "natural_sciences")),
+        (
+            "PKU_CORE_NON_NATURAL",
+            parse_pku_markdown(paths.pku_non_natural, "non_natural_sciences"),
+        ),
+        (
+            "SSCI",
+            parse_wos_csv(
+                paths.ssci_csv,
+                "SSCI",
+                display_titles=parse_wos_markdown(paths.ssci_markdown),
+            ),
+        ),
+        (
+            "SCIE",
+            parse_wos_csv(
+                paths.scie_csv,
+                "SCIE",
+                display_titles=parse_wos_markdown(paths.scie_markdown),
+            ),
+        ),
+    ]
+
+
+def _record_source_groups(record: CatalogRecord) -> set[str]:
+    groups: set[str] = set()
+    for membership in record.source_memberships:
+        index_name = membership["index_name"]
+        source_id = membership["source_record_id"]
+        if index_name == "PKU_CORE":
+            groups.add(
+                "PKU_CORE_NATURAL"
+                if ":natural_sciences:" in source_id
+                else "PKU_CORE_NON_NATURAL"
+            )
+        else:
+            groups.add(index_name)
+    return groups
+
+
+def _audit_matches_group(audit_record: AuditRecord, group_name: str) -> bool:
+    if group_name == "PKU_CORE_NATURAL":
+        return ":natural_sciences:" in audit_record.source_record_id
+    if group_name == "PKU_CORE_NON_NATURAL":
+        return ":non_natural_sciences:" in audit_record.source_record_id
+    return audit_record.index_name == group_name
+
+
+def build_catalog_bundle(baseline: Path, sources: SourcePaths) -> CatalogBundle:
+    records = parse_v4_baseline(baseline)
+    signature = priority_signature(records)
+    source_groups = _source_groups(sources)
+    source_records = [record for _, group in source_groups for record in group]
+    controlled_aliases = _build_controlled_aliases(records, source_records)
+    audit = match_source_records(
+        records,
+        source_records,
+        controlled_aliases=controlled_aliases,
+    )
+    if priority_signature(records) != signature:
+        raise ValueError("来源增补不得改变期刊身份或层级签名")
+    for record in records:
+        record.priority_decision["unchanged"] = True
+
+    by_group = {
+        group_name: {
+            item.journal_id
+            for item in records
+            if group_name in _record_source_groups(item)
+        }
+        for group_name, _ in source_groups
+    }
+    match_counts = {
+        group_name: (
+            len(source),
+            sum(
+                item.status == "matched"
+                and _audit_matches_group(item, group_name)
+                for item in audit
+            ),
+            sum(
+                item.status == "out_of_scope"
+                and _audit_matches_group(item, group_name)
+                for item in audit
+            ),
+        )
+        for group_name, source in source_groups
+    }
+    group_names = tuple(by_group)
+    all_intersections = {
+        f"{left}&{right}": len(by_group[left] & by_group[right])
+        for position, left in enumerate(group_names)
+        for right in group_names[position + 1 :]
+    }
+    intersections = {
+        key: value for key, value in all_intersections.items() if value
+    }
+    zero_intersections = {
+        key: value for key, value in all_intersections.items() if not value
+    }
+    expected_index_by_level = {
+        8: "SSCI",
+        9: "CSSCI",
+        10: "SCIE",
+        11: "PKU_CORE",
+        12: "PKU_CORE",
+    }
+    expected_but_unmatched_count = sum(
+        expected_index_by_level.get(record.priority_level) not in record.index_memberships
+        for record in records
+        if record.priority_level in expected_index_by_level
+    )
+    return CatalogBundle(
+        records,
+        audit,
+        match_counts,
+        intersections,
+        zero_intersections,
+        len(controlled_aliases),
+        expected_but_unmatched_count,
+        sum(item.status == "ambiguous" for item in audit),
     )
