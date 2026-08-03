@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from typing import Literal
 
 from .models import MAX_RESULTS_PER_PAGE
 
@@ -31,7 +32,8 @@ from .models import MAX_RESULTS_PER_PAGE
 # "该主题在这些期刊上没有文献"——所以宁可多分一批，也不要贴着上限走。
 DEFAULT_MAX_EXPRESSION_CHARS = 3000
 
-TOPIC_FIELD = "SU"
+TOPIC_FIELD_PRIORITY: tuple[str, ...] = ("TI", "SU", "KY", "TKA")
+TOPIC_FIELD = TOPIC_FIELD_PRIORITY[0]
 JOURNAL_FIELD = "LY"
 RELEVANCE_OPERATOR = "%="
 EXACT_OPERATOR = "="
@@ -42,6 +44,47 @@ _HALFWIDTH_TO_FULLWIDTH = {"(": "（", ")": "）", "[": "［", "]": "］"}
 
 class ExpressionTooLong(ValueError):
     """单个期刊的条件本身就超过长度上限，无法通过分批解决。"""
+
+
+def validate_topic_field(value: str) -> str:
+    if value not in TOPIC_FIELD_PRIORITY:
+        raise ValueError("检索字段只允许 TI、SU、KY、TKA")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class SourceCategorySpec:
+    code: Literal["P0209", "P01"]
+    label: Literal["CSSCI", "北大核心"]
+
+    def __post_init__(self) -> None:
+        if (self.code, self.label) not in {
+            ("P0209", "CSSCI"),
+            ("P01", "北大核心"),
+        }:
+            raise ValueError("来源类别代码与名称不匹配")
+
+
+@dataclass(frozen=True, slots=True)
+class SearchGroupPolicy:
+    scope_id: str
+    catalog_version: str
+    journal_selector: Literal["exact_titles", "topic_only"]
+    source_category: SourceCategorySpec | None
+    journal_titles: tuple[str, ...]
+    eligible_journal_ids: frozenset[str]
+    eligible_priority_levels: frozenset[int]
+    required_index_membership: str | None
+    result_filter: Literal["matched_title", "matched_journal_id", "source_category"]
+
+
+@dataclass(frozen=True, slots=True)
+class PlanExecutionResult:
+    status: str
+    html: str
+    url: str
+    source_category_applied: bool = False
+    source_category_total: int | None = None
 
 
 def _to_halfwidth(value: str) -> str:
@@ -105,8 +148,10 @@ def build_topic_expression(
     *,
     year_from: int | None = None,
     year_to: int | None = None,
+    topic_field: str = TOPIC_FIELD,
 ) -> str:
-    clauses = [f"{TOPIC_FIELD} {RELEVANCE_OPERATOR} {quote_value(topic)}"]
+    field = validate_topic_field(topic_field)
+    clauses = [f"{field} {RELEVANCE_OPERATOR} {quote_value(topic)}"]
     if year_from is not None and year_to is not None:
         clauses.append(year_clause(year_from, year_to))
     elif (year_from is None) != (year_to is None):
@@ -118,7 +163,8 @@ def build_expression(topic: str, journals: list[str], *,
                      year_from: int | None = None, year_to: int | None = None,
                      topic_field: str = TOPIC_FIELD) -> str:
     """构造一条完整的专业检索表达式。"""
-    clauses = [f"{topic_field} {RELEVANCE_OPERATOR} {quote_value(topic)}", journal_clause(journals)]
+    field = validate_topic_field(topic_field)
+    clauses = [f"{field} {RELEVANCE_OPERATOR} {quote_value(topic)}", journal_clause(journals)]
     if year_from is not None and year_to is not None:
         clauses.append(year_clause(year_from, year_to))
     elif (year_from is None) != (year_to is None):
@@ -133,12 +179,19 @@ class ExpressionBatch:
     journals: tuple[str, ...]
     expression: str
     page_size: int = MAX_RESULTS_PER_PAGE
-    source_category: str | None = None
+    scope_id: str = ""
+    catalog_version: str = ""
+    topic_field: str | None = None
+    source_category: SourceCategorySpec | None = None
 
 
 def build_batches(topic: str, journals: list[str], *,
                   year_from: int | None = None, year_to: int | None = None,
-                  max_chars: int = DEFAULT_MAX_EXPRESSION_CHARS) -> list[ExpressionBatch]:
+                  max_chars: int = DEFAULT_MAX_EXPRESSION_CHARS,
+                  topic_field: str = TOPIC_FIELD,
+                  scope_id: str = "",
+                  catalog_version: str = "",
+                  source_category: SourceCategorySpec | None = None) -> list[ExpressionBatch]:
     """按字符上限把期刊集合切成多条表达式。
 
     只切 ``LY=`` 列表；主题与年份条件在每批中重复出现。
@@ -149,7 +202,9 @@ def build_batches(topic: str, journals: list[str], *,
     current: list[str] = []
     for title in journals:
         probe = current + [title]
-        if len(build_expression(topic, probe, year_from=year_from, year_to=year_to)) <= max_chars:
+        if len(build_expression(
+            topic, probe, year_from=year_from, year_to=year_to, topic_field=topic_field
+        )) <= max_chars:
             current = probe
             continue
         if not current:
@@ -165,7 +220,13 @@ def build_batches(topic: str, journals: list[str], *,
             index=position,
             total=len(groups),
             journals=tuple(group),
-            expression=build_expression(topic, group, year_from=year_from, year_to=year_to),
+            expression=build_expression(
+                topic, group, year_from=year_from, year_to=year_to, topic_field=topic_field
+            ),
+            scope_id=scope_id,
+            catalog_version=catalog_version,
+            topic_field=topic_field,
+            source_category=source_category,
         )
         for position, group in enumerate(groups, start=1)
     ]

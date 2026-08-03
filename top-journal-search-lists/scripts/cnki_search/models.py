@@ -65,6 +65,9 @@ class PaperRecord:
     result_rank: int
     source_database: str
     search_query: str
+    topic_match_field: str | None = None
+    matched_topic_fields: list[str] = field(default_factory=list)
+    matched_search_groups: list[str] = field(default_factory=list)
     journal_matched_title: str | None = None
     journal_match_status: str = "unmatched"
     journal_match_method: str | None = None
