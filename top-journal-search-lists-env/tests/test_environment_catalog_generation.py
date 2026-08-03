@@ -13,6 +13,26 @@ BASELINE = REFERENCES / "环境科学与工程学科顶尖期刊目录_v4.0.md"
 SCRIPT = ROOT / "scripts" / "environment_catalog_v4.py"
 
 
+def output_paths(
+    root: Path,
+    *,
+    baseline: Path = BASELINE,
+    sources: object | None = None,
+):
+    """构造隔离的生成目标，以验证生成器不依赖既有派生文件。"""
+    catalog = _load_catalog_module()
+    if sources is None:
+        sources = catalog.SourcePaths.from_references(REFERENCES)
+    return catalog.OutputPaths(
+        baseline=baseline,
+        sources=sources,
+        skill_references=root / "skill",
+        mcpb_references=root / "mcpb",
+        audit_jsonl=root / "audits" / "environment_journal_match_audit_v4.0.jsonl",
+        audit_markdown=root / "audits" / "environment_journal_match_audit_v4.0.md",
+    )
+
+
 def _load_catalog_module():
     assert SCRIPT.is_file(), "环境 v4.0 来源解析器尚未实现"
     spec = importlib.util.spec_from_file_location("environment_catalog_v4", SCRIPT)
@@ -49,7 +69,9 @@ def _write_generated_baseline(
             if include_baseline_title:
                 reordered_headers.append("基线题名")
             reordered_headers.extend(
-                header for header in headers if header not in {"期刊名称"}
+                header
+                for header in headers
+                if header not in {"期刊名称", "正式题名", "期刊ID", "基线题名"}
             )
             rendered.append("| " + " | ".join(reordered_headers) + " |")
             rendered.append("|" + "|".join("---" for _ in reordered_headers) + "|")
@@ -57,14 +79,18 @@ def _write_generated_baseline(
             while line_index < len(lines) and lines[line_index].startswith("|"):
                 values = dict(zip(headers, _table_cells(lines[line_index]), strict=True))
                 ordinal += 1
-                baseline_title = values["期刊名称"]
+                baseline_title = values.get("基线题名", values.get("期刊名称", ""))
                 formal_title = (
-                    "Cell normalized title" if ordinal == 1 else baseline_title
+                    "Cell normalized title" if ordinal == 1 else values.get("正式题名", baseline_title)
                 )
                 row = [formal_title, f"ENVJ-LOCKED-{ordinal:06d}"]
                 if include_baseline_title:
                     row.append(baseline_title)
-                row.extend(values[header] for header in headers if header != "期刊名称")
+                row.extend(
+                    values[header]
+                    for header in headers
+                    if header not in {"期刊名称", "正式题名", "期刊ID", "基线题名"}
+                )
                 rendered.append("| " + " | ".join(row) + " |")
                 line_index += 1
             continue
@@ -158,7 +184,7 @@ def test_v4_generated_baseline_reuses_ids_and_original_baseline_titles(
     replayed = catalog.parse_v4_baseline(generated)
 
     assert records[0].journal_id == "ENVJ-LOCKED-000001"
-    assert records[0].formal_title == "Cell normalized title"
+    assert records[0].formal_title == "Cell"
     assert records[0].priority_decision["baseline_title"] == "Cell"
     assert catalog.priority_signature(records) == catalog.priority_signature(replayed)
     assert catalog.priority_signature(records)[0] == (
@@ -401,3 +427,95 @@ def test_source_registry_has_seven_verified_artifacts_and_resolves_evidence_ids(
         + record["formal_title_evidence_ids"]
     }
     assert referenced <= registered
+
+
+def test_generated_outputs_are_deterministic_hashed_and_mirrored(tmp_path: Path) -> None:
+    """删去确定性渲染、哈希回填或镜像写入时，此测试应失败。"""
+    catalog = _load_catalog_module()
+
+    first = catalog.generate_outputs(output_paths(tmp_path / "one"), check=False)
+    second = catalog.generate_outputs(output_paths(tmp_path / "two"), check=False)
+
+    assert first == second
+    for name in catalog.MIRRORED_REFERENCE_FILES:
+        assert (tmp_path / "one" / "skill" / name).read_bytes() == (
+            tmp_path / "one" / "mcpb" / name
+        ).read_bytes()
+    for name in catalog.SOURCE_REFERENCE_FILES:
+        expected = (REFERENCES / name).read_bytes()
+        assert (tmp_path / "one" / "skill" / name).read_bytes() == expected
+        assert (tmp_path / "one" / "mcpb" / name).read_bytes() == expected
+    markdown = (
+        tmp_path / "one" / "skill" / "环境科学与工程学科顶尖期刊目录_v4.0.md"
+    ).read_text("utf-8")
+    assert 'revision_date: "2026-07-31"' in markdown
+    assert "{{CONTENT_SHA256}}" not in markdown
+    for statistic in (
+        "前十级唯一期刊数：2022",
+        "北大核心原始记录：1987",
+        "排除前十级重复：245",
+        "第十一、十二级净新增：1742",
+        "受控别名：26",
+    ):
+        assert statistic in markdown
+
+
+def test_generated_catalog_preserves_structured_scie_and_v2_appendices() -> None:
+    """若生成器丢弃 SCIE 分类或 v2.0 处置附录，此测试应失败。"""
+    catalog = _load_catalog_module()
+    bundle = catalog.build_catalog_bundle(
+        BASELINE,
+        catalog.SourcePaths.from_references(REFERENCES),
+    )
+
+    assert bundle.scie_appendix_markdown.startswith(
+        "## 附录一：环境相关SCIE分类目录\n"
+    )
+    assert "### 第十级子规则一：直接相关类别完整纳入" in (
+        bundle.scie_appendix_markdown
+    )
+    assert bundle.v2_disposition_appendix_markdown.startswith(
+        "## 附录二：v2.0期刊处置记录\n"
+    )
+    assert "| 原序号 | v2.0名称 | v3.0正式名称 |" in (
+        bundle.v2_disposition_appendix_markdown
+    )
+
+
+def test_generated_markdown_cannot_feed_derived_fields_back_into_matching(
+    tmp_path: Path,
+) -> None:
+    """若派生字段重新参与匹配，生成目录作为输入时将产生不同结果。"""
+    catalog = _load_catalog_module()
+
+    first_paths = output_paths(tmp_path / "first")
+    catalog.generate_outputs(first_paths, check=False)
+    second_paths = output_paths(
+        tmp_path / "second",
+        baseline=(
+            first_paths.skill_references / "环境科学与工程学科顶尖期刊目录_v4.0.md"
+        ),
+        sources=catalog.SourcePaths.from_references(first_paths.skill_references),
+    )
+    catalog.generate_outputs(second_paths, check=False)
+
+    for name in catalog.MIRRORED_REFERENCE_FILES:
+        assert (first_paths.skill_references / name).read_bytes() == (
+            second_paths.skill_references / name
+        ).read_bytes()
+    assert first_paths.audit_jsonl.read_bytes() == second_paths.audit_jsonl.read_bytes()
+    assert first_paths.audit_markdown.read_bytes() == second_paths.audit_markdown.read_bytes()
+
+
+def test_check_mode_reports_stale_output_without_writing(tmp_path: Path) -> None:
+    """若检查模式改写失配文件或未报告失配，此测试应失败。"""
+    catalog = _load_catalog_module()
+    paths = output_paths(tmp_path / "output")
+    catalog.generate_outputs(paths, check=False)
+    catalog_path = paths.skill_references / "environment_journal_catalog_v4.0.json"
+    catalog_path.write_bytes(b"stale\n")
+
+    with pytest.raises(ValueError, match="生成文件不一致"):
+        catalog.generate_outputs(paths, check=True)
+
+    assert catalog_path.read_bytes() == b"stale\n"
