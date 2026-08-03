@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -393,6 +394,52 @@ def test_run_batches_uses_the_full_identity_token(tmp_path: Path) -> None:
 
     payload = json.loads(state.read_text(encoding="utf-8"))
     assert payload["token"] == webvpn._checkpoint_token(batches)
+
+
+def test_checkpoint_token_matches_a_pinned_digest() -> None:
+    """钉死 canonical JSON 的序列化参数。
+
+    ensure_ascii、separators 或 sort_keys 任一漂移都会让同一次检索算出不同摘要，
+    表现为跨版本断点静默失效，而其余断点测试都发现不了。
+    """
+    token = webvpn._checkpoint_token([
+        _identity_batch(
+            "TI %= '气候治理'", "cssci", "TI",
+            SourceCategorySpec("P0209", "CSSCI"),
+        )
+    ])
+    assert token == (
+        "4d2823f67d76d4f1c54fc712231211385f934e126eff5ea41257b7c490362136"
+    )
+
+
+def test_checkpoint_is_discarded_when_only_the_facet_changes(tmp_path: Path) -> None:
+    """端到端锚点：表达式一字未改、只换来源类别，旧断点不得复用。"""
+    state = tmp_path / "progress.json"
+    plain = _batches(2)
+    faceted = [
+        replace(batch, source_category=SourceCategorySpec("P0209", "CSSCI"))
+        for batch in plain
+    ]
+
+    async def interrupted(batch):
+        return _challenge(batch) if batch.index == 2 else _ok(batch)
+
+    asyncio.run(webvpn.run_batches(
+        plain, interrupted, checkpoint=webvpn.BatchCheckpoint(state),
+    ))
+    assert json.loads(state.read_text(encoding="utf-8"))["completed"].keys() == {"1"}
+
+    seen: list[int] = []
+
+    async def rerun(batch):
+        seen.append(batch.index)
+        return _ok(batch)
+
+    asyncio.run(webvpn.run_batches(
+        faceted, rerun, checkpoint=webvpn.BatchCheckpoint(state),
+    ))
+    assert seen == [1, 2]        # 换了分面即换了检索，第 1 批必须重跑
 
 
 def test_checkpoint_record_whitelist_carries_field_and_group_matches() -> None:
