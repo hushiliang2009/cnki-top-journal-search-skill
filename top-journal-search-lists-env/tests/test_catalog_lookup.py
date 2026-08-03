@@ -103,6 +103,14 @@ def test_partial_explicit_companion_set_is_rejected(tmp_path: Path) -> None:
         module.validate_catalog(standalone, markdown=ROOT / "references" / "环境科学与工程学科顶尖期刊目录_v4.0.md")
 
 
+def test_explicit_mirror_without_companions_is_rejected(tmp_path: Path) -> None:
+    module = _load_module()
+    standalone = tmp_path / "custom-environment-catalog.json"
+    standalone.write_bytes(CATALOG_JSON.read_bytes())
+    with pytest.raises(ValueError, match="完整"):
+        module.validate_catalog(standalone, mirror_references=MCPB_REFERENCES)
+
+
 def test_cli_validate_reports_default_full_and_explicit_json_only(tmp_path: Path) -> None:
     default_run = subprocess.run(
         [sys.executable, str(SCRIPT), "validate"],
