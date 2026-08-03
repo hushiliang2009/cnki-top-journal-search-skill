@@ -209,3 +209,59 @@ def test_v4_baseline_reads_columns_by_header_after_reordering(tmp_path: Path) ->
     assert records[0].formal_evidence == [
         "上海交通大学环境科学与工程学院 AAAAA+（U5）"
     ]
+
+
+def test_approved_source_counts_intersections_and_aliases() -> None:
+    """删除受控匹配或来源审计时，此测试应失败。"""
+    catalog = _load_catalog_module()
+
+    bundle = catalog.build_catalog_bundle(
+        BASELINE,
+        catalog.SourcePaths.from_references(REFERENCES),
+    )
+
+    assert bundle.match_counts == {
+        "CSSCI": (674, 592, 82),
+        "PKU_CORE_NATURAL": (1247, 1247, 0),
+        "PKU_CORE_NON_NATURAL": (740, 740, 0),
+        "SSCI": (3538, 348, 3190),
+        "SCIE": (9430, 1499, 7931),
+    }
+    assert bundle.intersections == {
+        "CSSCI&PKU_CORE_NATURAL": 22,
+        "CSSCI&PKU_CORE_NON_NATURAL": 520,
+        "SSCI&SCIE": 149,
+    }
+    assert bundle.zero_intersections == {
+        "CSSCI&SSCI": 0,
+        "CSSCI&SCIE": 0,
+        "PKU_CORE_NATURAL&PKU_CORE_NON_NATURAL": 0,
+        "PKU_CORE_NATURAL&SSCI": 0,
+        "PKU_CORE_NATURAL&SCIE": 0,
+        "PKU_CORE_NON_NATURAL&SSCI": 0,
+        "PKU_CORE_NON_NATURAL&SCIE": 0,
+    }
+    assert bundle.controlled_alias_count == 26
+    assert bundle.expected_but_unmatched_count == 0
+    assert bundle.ambiguous_count == 0
+
+    by_title = {record.formal_title: record for record in bundle.records}
+    expected_memberships = {
+        "Nature Climate Change": {"SSCI", "SCIE"},
+        "Environmental Science & Technology": {"SCIE"},
+        "中国人口·资源与环境": {"CSSCI"},
+        "WIREs Climate Change": {"SSCI"},
+        "城市规划": {"CSSCI"},
+        "WIREs Energy and Environment": {"SCIE"},
+        "Zeitschrift für Geomorphologie": {"SCIE"},
+        "陆军军医大学学报": {"PKU_CORE"},
+        "中国社会科学": {"PKU_CORE"},
+    }
+    for title, memberships in expected_memberships.items():
+        assert memberships.issubset(set(by_title[title].index_memberships))
+        assert memberships.issubset({
+            membership["index_name"]
+            for membership in by_title[title].source_memberships
+        })
+
+    assert all(record.priority_decision["unchanged"] is True for record in bundle.records)
