@@ -945,7 +945,7 @@ def test_catalog_resolves_under_both_distribution_layouts(
     assert completed.returncode == 0, completed.stderr
     found, resolved = completed.stdout.splitlines()[:2]
     assert found == "True", f"{module_dir} 布局下未能定位综合期刊目录：{resolved}"
-    assert Path(resolved).is_file()
+    assert Path(resolved).name == "environment_journal_catalog_v4.0.json"
 
 
 def test_skill_uses_ai4scholar_as_primary_and_cnki_as_supplement(skill_root: Path) -> None:
