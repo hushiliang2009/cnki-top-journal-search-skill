@@ -16,7 +16,7 @@ from typing import Any
 
 from .browser import await_maybe
 from .models import SearchStatus
-from .professional import ExpressionBatch
+from .professional import ExpressionBatch, PlanExecutionResult
 from .professional_service import CnkiProfessionalSearchService
 from .webvpn import (
     CAPTCHA_TEXT_MARKERS,
@@ -102,7 +102,7 @@ class ProfessionalBatchExecutor:
 
     async def __call__(
         self, plan: ExpressionBatch
-    ) -> tuple[str, str, str]:
+    ) -> PlanExecutionResult:
         self.session.ensure_open()
         home_page = self.session.page
         driver = ProfessionalSearchPage(home_page)
@@ -113,11 +113,22 @@ class ProfessionalBatchExecutor:
                 self.session.context, preserve_home=True
             )
             await driver.switch_to_professional()
-            status, html, _url = await driver.execute_plan(plan)
-            if status == SearchStatus.CHALLENGE_DETECTED.value:
+            executed = await driver.execute_plan(plan)
+            result = (
+                executed
+                if isinstance(executed, PlanExecutionResult)
+                else PlanExecutionResult(*executed)
+            )
+            if result.status == SearchStatus.CHALLENGE_DETECTED.value:
                 self.active_challenge_page = result_page
                 retain_challenge = True
-            return status, html, ""
+            return PlanExecutionResult(
+                status=result.status,
+                html=result.html,
+                url="",
+                source_category_applied=result.source_category_applied,
+                source_category_total=result.source_category_total,
+            )
         finally:
             if (
                 result_page is not None

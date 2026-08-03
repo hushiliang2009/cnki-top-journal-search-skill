@@ -9,6 +9,7 @@ import asyncio
 import pytest
 
 from cnki_search import webvpn
+from cnki_search.professional import SourceCategorySpec
 
 
 class FacetLocator:
@@ -60,6 +61,17 @@ def test_cssci_facet_value_matches_the_observed_page() -> None:
 def test_applying_the_facet_narrows_the_result_count() -> None:
     page = FacetPage(before="2,378", after="2,270")
     total = asyncio.run(_driver(page).apply_source_category("CSSCI"))
+    assert total == "2,270"
+    selector = webvpn.SOURCE_CATEGORY_SELECTOR.format(value="P0209")
+    assert page.locators[selector].checked is True
+
+
+def test_applying_controlled_category_uses_its_cnki_code() -> None:
+    page = FacetPage(before="2,378", after="2,270")
+    category = SourceCategorySpec("P0209", "CSSCI")
+
+    total = asyncio.run(_driver(page).apply_source_category(category))
+
     assert total == "2,270"
     selector = webvpn.SOURCE_CATEGORY_SELECTOR.format(value="P0209")
     assert page.locators[selector].checked is True

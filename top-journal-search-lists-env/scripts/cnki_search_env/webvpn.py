@@ -45,7 +45,7 @@ from .models import (
     SearchStatus,
     is_verifiable_publication_year,
 )
-from .professional import ExpressionBatch
+from .professional import ExpressionBatch, PlanExecutionResult, SourceCategorySpec
 
 #: 实测：连续 4 次快速请求即触发安全验证，冷却约 75 秒后恢复。30 秒是据此取的
 #: 保守值，**不是**二分测试得出的安全阈值，长时间高频使用仍可能触发风控。
@@ -1479,21 +1479,25 @@ class ProfessionalSearchPage:
             return await await_maybe(self.page.evaluate(TOTAL_COUNT_JS))
         return None
 
-    async def apply_source_category(self, name: str, *,
+    async def apply_source_category(self, category: SourceCategorySpec | str, *,
                                     timeout_seconds: float = 20.0) -> str | None:
         """在结果页勾选来源类别分面，返回筛选后的结果总数。
 
         必须先完成一次检索——分面不在高级检索输入页上，只在结果页出现。
         """
-        value = SOURCE_CATEGORY_VALUES.get(name)
+        if isinstance(category, SourceCategorySpec):
+            value, label = category.code, category.label
+        else:
+            value = SOURCE_CATEGORY_VALUES.get(category)
+            label = category
         if value is None:
             raise ValueError(
-                f"未知的来源类别 {name!r}，可选：{sorted(SOURCE_CATEGORY_VALUES)}"
+                f"未知的来源类别 {category!r}，可选：{sorted(SOURCE_CATEGORY_VALUES)}"
             )
         box = self.page.locator(SOURCE_CATEGORY_SELECTOR.format(value=value))
         if await await_maybe(box.count()) < 1:
             raise WebVpnNavigationError(
-                f"结果页未找到「{name}」来源类别分面；需先完成一次检索"
+                f"结果页未找到「{label}」来源类别分面；需先完成一次检索"
             )
         before = await self.total_results()
         await await_maybe(box.first.check())
@@ -1543,17 +1547,29 @@ class ProfessionalSearchPage:
                 return status
             await sleep(poll_seconds)
 
-    async def execute_plan(self, plan: ExpressionBatch) -> tuple[str, str, str]:
+    async def execute_plan(self, plan: ExpressionBatch) -> PlanExecutionResult:
+        source_category_applied = False
+        source_category_total: int | None = None
         await self.fill_expression(plan.expression)
         await self.submit()
         status = await self.wait_for_outcome()
         if status is SearchStatus.SUCCESS:
             if plan.source_category is not None:
-                await self.apply_source_category(plan.source_category)
+                total = await self.apply_source_category(plan.source_category)
+                source_category_applied = True
+                if total is not None:
+                    compact = total.replace(",", "").strip()
+                    source_category_total = int(compact) if compact.isdecimal() else None
             await self.set_page_size(plan.page_size)
             status = await self.wait_for_outcome()
         html = await await_maybe(self.page.content()) if status is SearchStatus.SUCCESS else ""
-        return status.value, html, str(getattr(self.page, "url", ""))
+        return PlanExecutionResult(
+            status=status.value,
+            html=html,
+            url=str(getattr(self.page, "url", "")),
+            source_category_applied=source_category_applied,
+            source_category_total=source_category_total,
+        )
 
 
 class _EphemeralContextFactory:

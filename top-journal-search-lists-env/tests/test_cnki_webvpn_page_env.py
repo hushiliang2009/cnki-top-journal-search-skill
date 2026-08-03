@@ -9,7 +9,7 @@ import pytest
 
 from cnki_search_env import webvpn
 from cnki_search_env.models import SearchStatus
-from cnki_search_env.professional import ExpressionBatch
+from cnki_search_env.professional import ExpressionBatch, PlanExecutionResult, SourceCategorySpec
 
 
 class FakeLocator:
@@ -946,9 +946,10 @@ class PlanRecorder(webvpn.ProfessionalSearchPage):
         self.events.append("classify")
         return SearchStatus.SUCCESS
 
-    async def apply_source_category(self, name: str, *,
+    async def apply_source_category(self, category: SourceCategorySpec | str, *,
                                     timeout_seconds: float = 20.0) -> str | None:
-        self.events.append(f"facet:{name}")
+        label = category.label if isinstance(category, SourceCategorySpec) else category
+        self.events.append(f"facet:{label}")
         return "10"
 
     async def set_page_size(self, size: int = 50, *,
@@ -957,7 +958,7 @@ class PlanRecorder(webvpn.ProfessionalSearchPage):
         return size
 
 
-def _plan(*, source_category: str | None) -> ExpressionBatch:
+def _plan(*, source_category: SourceCategorySpec | str | None) -> ExpressionBatch:
     return ExpressionBatch(
         index=1,
         total=1,
@@ -968,16 +969,90 @@ def _plan(*, source_category: str | None) -> ExpressionBatch:
     )
 
 
+class ControlledFacetLocator:
+    def __init__(self) -> None:
+        self.checked = False
+
+    @property
+    def first(self) -> "ControlledFacetLocator":
+        return self
+
+    async def count(self) -> int:
+        return 1
+
+    async def check(self) -> None:
+        self.checked = True
+
+
+class ControlledFacetPlanPage(PlanPage):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(events)
+        self.facet = ControlledFacetLocator()
+        self.facet_selector: str | None = None
+
+    def locator(self, selector: str) -> ControlledFacetLocator:
+        self.facet_selector = selector
+        return self.facet
+
+    async def evaluate(self, _script: str) -> str:
+        return "2,270" if self.facet.checked else "2,378"
+
+
+class ControlledFacetPlanDriver(webvpn.ProfessionalSearchPage):
+    def __init__(self, page: ControlledFacetPlanPage, events: list[str]) -> None:
+        super().__init__(page)
+        self.events = events
+
+    async def fill_expression(self, expression: str) -> None:
+        assert expression == "SU %= '数字经济'"
+        self.events.append("fill")
+
+    async def submit(self) -> None:
+        self.events.append("submit")
+
+    async def wait_for_outcome(self, timeout_seconds: float = 30) -> SearchStatus:
+        self.events.append("classify")
+        return SearchStatus.SUCCESS
+
+    async def set_page_size(self, size: int = 50, *,
+                            timeout_seconds: float = 20.0) -> int:
+        self.events.append(f"page_size:{size}")
+        return size
+
+
+def test_real_execute_plan_uses_controlled_facet_code_and_reports_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(webvpn.asyncio, "sleep", no_wait)
+    events: list[str] = []
+    page = ControlledFacetPlanPage(events)
+    driver = ControlledFacetPlanDriver(page, events)
+
+    result = asyncio.run(
+        driver.execute_plan(
+            _plan(source_category=SourceCategorySpec("P0209", "CSSCI"))
+        )
+    )
+
+    assert page.facet_selector == webvpn.SOURCE_CATEGORY_SELECTOR.format(
+        value="P0209"
+    )
+    assert result.source_category_applied is True
+    assert result.source_category_total == 2270
+
+
 def test_execute_plan_applies_post_result_options_before_final_render() -> None:
     events: list[str] = []
     driver = PlanRecorder(events)
 
-    status, html, url = asyncio.run(driver.execute_plan(_plan(source_category="CSSCI")))
+    result = asyncio.run(driver.execute_plan(_plan(source_category="CSSCI")))
 
-    assert (status, html, url) == (
-        "success",
-        "<table class='result-table-list'></table>",
-        "https://webvpn.example.edu.cn/result",
+    assert result == PlanExecutionResult(
+        "success", "<table class='result-table-list'></table>",
+        "https://webvpn.example.edu.cn/result", True, 10,
     )
     assert events == [
         "fill", "submit", "classify",
@@ -989,9 +1064,11 @@ def test_execute_plan_omits_facet_for_chinese_top_plan() -> None:
     events: list[str] = []
     driver = PlanRecorder(events)
 
-    status, _html, _url = asyncio.run(driver.execute_plan(_plan(source_category=None)))
+    result = asyncio.run(driver.execute_plan(_plan(source_category=None)))
 
-    assert status == SearchStatus.SUCCESS.value
+    assert result.status == SearchStatus.SUCCESS.value
+    assert result.source_category_applied is False
+    assert result.source_category_total is None
     assert all(not event.startswith("facet:") for event in events)
 
 
