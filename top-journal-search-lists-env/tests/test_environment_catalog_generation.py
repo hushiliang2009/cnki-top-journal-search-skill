@@ -313,3 +313,91 @@ def test_match_source_records_marks_expected_catalog_membership_unmatched() -> N
     assert expected.match_method == "expected_index_membership"
     assert expected.manual_review_required is True
     assert expected.review_reasons == ("SSCI",)
+
+
+def test_catalog_json_is_canonical_and_cnki_scopes_are_explicit() -> None:
+    """Changing the canonical payload or fixed CNKI policies must fail here."""
+    catalog = _load_catalog_module()
+    bundle = catalog.build_catalog_bundle(
+        BASELINE,
+        catalog.SourcePaths.from_references(REFERENCES),
+    )
+
+    payload = bundle.catalog_payload
+    assert set(payload) == {
+        "schema_version",
+        "catalog_version",
+        "catalog_date",
+        "revision_date",
+        "data_sha256",
+        "level_counts",
+        "priority_groups",
+        "journals",
+        "cnki_scopes",
+    }
+    assert len(payload["journals"]) == 3764
+    assert payload["data_sha256"] == catalog.compute_data_sha256(payload)
+    assert catalog.canonical_json_bytes({"z": "last", "a": "first"}) == (
+        b'{"a":"first","z":"last"}\n'
+    )
+    with pytest.raises(TypeError):
+        catalog.canonical_json_bytes({"value": 1.0})
+
+    journals = payload["journals"]
+    pku_members = [record for record in journals if "PKU_CORE" in record["index_memberships"]]
+    assert len(pku_members) == 1987
+    assert sum(record["priority_level"] <= 10 for record in pku_members) == 245
+    assert sum(record["priority_level"] >= 11 for record in pku_members) == 1742
+    cssci_members = [record for record in journals if "CSSCI" in record["index_memberships"]]
+    assert len(cssci_members) == 592
+    assert sum(record["priority_group"] == "environment_cssci" for record in cssci_members) == 241
+    assert sum(record["priority_group"] != "environment_cssci" for record in cssci_members) == 351
+
+    scopes = payload["cnki_scopes"]
+    assert len(scopes["chinese_environment_top"]["eligible_journal_ids"]) == 6
+    assert len(scopes["other_formally_recognized_chinese"]["eligible_journal_ids"]) == 60
+    assert len(scopes["environment_cssci"]["eligible_journal_ids"]) == 241
+    assert len(scopes["pku_core"]["eligible_journal_ids"]) == 1987
+    assert scopes["environment_cssci"]["source_category"] == {
+        "code": "P0209",
+        "label": "CSSCI",
+    }
+    assert scopes["pku_core"]["journal_selector"] == "topic_only"
+    assert scopes["pku_core"]["source_category"] == {
+        "code": "P01",
+        "label": "北大核心",
+    }
+
+
+def test_source_registry_has_seven_verified_artifacts_and_resolves_evidence_ids() -> None:
+    """Removing an approved snapshot or orphaning evidence IDs must fail here."""
+    catalog = _load_catalog_module()
+    bundle = catalog.build_catalog_bundle(
+        BASELINE,
+        catalog.SourcePaths.from_references(REFERENCES),
+    )
+
+    registry = bundle.source_registry
+    artifacts = registry["artifacts"]
+    assert len(artifacts) == 7
+    assert {item["filename"] for item in artifacts} == {
+        "CSSCI_2025_2026.md",
+        "北大中文核心期刊目录_2023_自然科学版.md",
+        "北大中文核心期刊目录_2023_.md",
+        "Social Sciences Citation Index_20260715.md",
+        "Social Sciences Citation Index (SSCI).csv",
+        "Science Citation Index Expanded_20260715.md",
+        "Science Citation Index Expanded (SCIE).csv",
+    }
+    assert all(item["bytes"] > 0 and len(item["sha256"]) == 64 for item in artifacts)
+
+    evidence_ids = [item["evidence_id"] for item in registry["evidence_registry"]]
+    assert len(evidence_ids) == len(set(evidence_ids))
+    registered = set(evidence_ids)
+    referenced = {
+        evidence_id
+        for record in bundle.catalog_payload["journals"]
+        for evidence_id in record["evidence_ids"]
+        + record["formal_title_evidence_ids"]
+    }
+    assert referenced <= registered
