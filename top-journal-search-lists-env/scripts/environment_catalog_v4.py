@@ -8,7 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Literal, Mapping
+from typing import Literal, Mapping, Sequence
 import unicodedata
 
 
@@ -117,6 +117,14 @@ _SOURCE_ARTIFACTS = (
 _SOURCE_FILE_ORDER = {artifact[0]: position for position, artifact in enumerate(_SOURCE_ARTIFACTS)}
 _INDEX_MEMBERSHIP_ORDER = {"CSSCI": 0, "PKU_CORE": 1, "SSCI": 2, "SCIE": 3}
 _LEVEL_SEVEN_CHINESE_IDS = tuple(f"ENVJ-{number:06d}" for number in range(169, 229))
+
+MIRRORED_REFERENCE_FILES = (
+    "环境科学与工程学科顶尖期刊目录_v4.0.md",
+    "environment_journal_catalog_v4.0.json",
+    "environment_catalog_sources_v4.0.json",
+    "environment_journal_match_audit_v4.0.md",
+)
+SOURCE_REFERENCE_FILES = tuple(item[0] for item in _SOURCE_ARTIFACTS)
 
 CNKI_SCOPE_RULES = {
     "chinese_environment_top": ("exact_titles", None, [6], None),
@@ -281,6 +289,18 @@ class SourcePaths:
             scie_markdown=references / "Science Citation Index Expanded_20260715.md",
             scie_csv=references / "Science Citation Index Expanded (SCIE).csv",
         )
+
+
+@dataclass(frozen=True, slots=True)
+class OutputPaths:
+    """生成目录、审计和镜像文件的显式目标位置。"""
+
+    baseline: Path
+    sources: SourcePaths
+    skill_references: Path
+    mcpb_references: Path
+    audit_jsonl: Path
+    audit_markdown: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,6 +570,26 @@ def _baseline_region(path: Path) -> list[tuple[int, str]]:
     return [(index + 1, line) for index, line in enumerate(lines[start:end], start)]
 
 
+def _structured_appendices(path: Path) -> tuple[str, str]:
+    """读取基线中两项锁定附录，供每次确定性渲染原样保留。"""
+    lines = _read_lines(path)
+    scie_heading = "## 附录一：环境相关SCIE分类目录"
+    v2_heading = "## 附录二：v2.0期刊处置记录"
+    try:
+        scie_start = lines.index(scie_heading)
+        v2_start = lines.index(v2_heading, scie_start + 1)
+        source_start = next(
+            index
+            for index in range(v2_start + 1, len(lines))
+            if lines[index].startswith("## 正式来源")
+        )
+    except (ValueError, StopIteration) as exc:
+        raise ValueError(f"{path} 缺少锁定的 SCIE 或 v2.0 结构化附录") from exc
+    scie_appendix = "\n".join(lines[scie_start:v2_start]).rstrip() + "\n"
+    v2_appendix = "\n".join(lines[v2_start:source_start]).rstrip() + "\n"
+    return scie_appendix, v2_appendix
+
+
 def _baseline_tables(path: Path) -> list[tuple[int, list[_MarkdownRow]]]:
     region = _baseline_region(path)
     tables: list[tuple[int, list[_MarkdownRow]]] = []
@@ -629,7 +669,8 @@ def parse_v4_baseline(path: Path) -> list[CatalogRecord]:
                 )
             baseline_cell = values.get("基线题名", values.get("期刊名称", ""))
             baseline_title, ncs_internal_rank = _baseline_title(baseline_cell)
-            formal_title = values.get("正式题名", baseline_title).strip() or baseline_title
+            # 正式题名、别名和索引数据均为派生字段，不能在重跑时反馈到匹配输入。
+            formal_title = baseline_title
             journal_id = values.get("期刊ID", "").strip() or f"ENVJ-{len(records) + 1:06d}"
             if journal_id in seen_ids:
                 raise ValueError(f"{path}:{row.line_number} 的期刊ID重复：{journal_id}")
@@ -737,6 +778,8 @@ class CatalogBundle:
     ambiguous_count: int
     catalog_payload: dict[str, object]
     source_registry: dict[str, object]
+    scie_appendix_markdown: str
+    v2_disposition_appendix_markdown: str
 
 
 def _nfkc_text_key(value: str) -> tuple[str, str]:
@@ -1269,6 +1312,7 @@ def _audit_matches_group(audit_record: AuditRecord, group_name: str) -> bool:
 
 
 def build_catalog_bundle(baseline: Path, sources: SourcePaths) -> CatalogBundle:
+    scie_appendix, v2_disposition_appendix = _structured_appendices(baseline)
     records = parse_v4_baseline(baseline)
     signature = priority_signature(records)
     source_groups = _source_groups(sources)
@@ -1334,6 +1378,273 @@ def build_catalog_bundle(baseline: Path, sources: SourcePaths) -> CatalogBundle:
         sum(item.status == "ambiguous" for item in audit),
         catalog_payload,
         source_registry,
+        scie_appendix,
+        v2_disposition_appendix,
     )
     validate_generated_bundle(bundle, audit)
     return bundle
+
+
+def _markdown_value(value: object) -> str:
+    if isinstance(value, (list, tuple)):
+        text = "<br>".join(str(item) for item in value)
+    else:
+        text = str(value)
+    return text.replace("|", "\\|").replace("\n", "<br>") or "—"
+
+
+def _record_markdown_row(record: CatalogRecord, ordinal: int) -> str:
+    source_categories = [
+        f"{index_name}：{'；'.join(categories)}"
+        for index_name, categories in sorted(record.index_subject_categories.items())
+    ]
+    baseline_title = str(record.priority_decision["baseline_title"])
+    if record.ncs_internal_rank is not None:
+        baseline_title += f"<br>内部顺序：{record.ncs_internal_rank}"
+    values = (
+        ordinal,
+        record.journal_id,
+        baseline_title,
+        record.formal_title,
+        record.aliases,
+        record.environment_subfields,
+        record.formal_evidence,
+        record.index_memberships,
+        source_categories,
+        record.source_catalogs,
+    )
+    return "| " + " | ".join(_markdown_value(value) for value in values) + " |"
+
+
+def _priority_signature_sha256(records: list[CatalogRecord]) -> str:
+    return hashlib.sha256(canonical_json_bytes(priority_signature(records))).hexdigest()
+
+
+def render_catalog_markdown(bundle: CatalogBundle) -> str:
+    """渲染人读目录，并以占位符反算其自引用内容哈希。"""
+    payload = bundle.catalog_payload
+    records_by_level = {
+        level: [record for record in bundle.records if record.priority_level == level]
+        for level in range(1, 13)
+    }
+    pku_members = [record for record in bundle.records if "PKU_CORE" in record.index_memberships]
+    pre_pku_count = sum(record.priority_level <= 10 for record in bundle.records)
+    pku_high_level_duplicates = sum(
+        record.priority_level <= 10 for record in pku_members
+    )
+    pku_net_additions = sum(record.priority_level >= 11 for record in pku_members)
+    source_registry_sha256 = hashlib.sha256(
+        canonical_json_bytes(bundle.source_registry)
+    ).hexdigest()
+
+    lines = [
+        "# 环境科学与工程学科顶尖期刊目录 v4.0",
+        "",
+        "```yaml",
+        'catalog_version: "4.0"',
+        'catalog_date: "2026-07-29"',
+        'revision_date: "2026-07-31"',
+        f'data_sha256: "{payload["data_sha256"]}"',
+        'content_sha256: "{{CONTENT_SHA256}}"',
+        f'priority_signature_sha256: "{_priority_signature_sha256(bundle.records)}"',
+        f'source_registry_sha256: "{source_registry_sha256}"',
+        "```",
+        "",
+        "本目录以十二级基线为唯一判级依据，来源快照只补充正式题名、别名和索引元数据。",
+        "",
+        "## 统计与校验",
+        "",
+        f"- 前十级唯一期刊数：{pre_pku_count}",
+        f"- 北大核心原始记录：{len(pku_members)}",
+        f"- 排除前十级重复：{pku_high_level_duplicates}",
+        f"- 第十一、十二级净新增：{pku_net_additions}",
+        f"- 受控别名：{bundle.controlled_alias_count}",
+        f"- 未匹配预期索引：{bundle.expected_but_unmatched_count}",
+        f"- 歧义记录：{bundle.ambiguous_count}",
+        "",
+        "| 来源交集 | 数量 |",
+        "|---|---:|",
+    ]
+    for name, count in sorted({**bundle.intersections, **bundle.zero_intersections}.items()):
+        lines.append(f"| {name} | {count} |")
+
+    lines.extend(["", "## 四、十二级主目录"])
+
+    for level, heading in enumerate(_LEVEL_HEADINGS, start=1):
+        lines.extend(
+            [
+                "",
+                f"### {heading}",
+                "",
+                "| 序号 | 期刊ID | 基线题名 | 正式题名 | 受控别名 | 环境细分领域 | 正式证据 | 索引收录 | 原始索引学科类别 | 来源目录 |",
+                "|---:|---|---|---|---|---|---|---|---|---|",
+            ]
+        )
+        lines.extend(
+            _record_markdown_row(record, ordinal)
+            for ordinal, record in enumerate(records_by_level[level], start=1)
+        )
+
+    lines.extend(
+        [
+            "",
+            bundle.scie_appendix_markdown.rstrip(),
+            "",
+            bundle.v2_disposition_appendix_markdown.rstrip(),
+            "",
+            "## 正式来源与审计说明",
+            "",
+            "北大核心来源使用本目录同级文件：[自然科学版](北大中文核心期刊目录_2023_自然科学版.md)；[非自然科学版](北大中文核心期刊目录_2023_.md)。",
+            "",
+            "目录与来源登记表均为 UTF-8、LF 换行的确定性生成文件。",
+            "",
+        ]
+    )
+    draft = "\n".join(lines)
+    content_sha256 = hashlib.sha256(draft.encode("utf-8")).hexdigest()
+    return draft.replace("{{CONTENT_SHA256}}", content_sha256)
+
+
+def _audit_payload(record: AuditRecord) -> dict[str, object]:
+    return {
+        "index_name": record.index_name,
+        "index_version": record.index_version,
+        "source_file": record.source_file,
+        "source_line": record.source_line,
+        "source_record_id": record.source_record_id,
+        "source_title": record.source_title,
+        "formal_title": record.formal_title,
+        "candidate_journal_ids": list(record.candidate_journal_ids),
+        "match_method": record.match_method,
+        "status": record.status,
+        "journal_id": record.journal_id,
+        "added_index_membership": record.added_index_membership,
+        "priority_before": record.priority_before,
+        "priority_after": record.priority_after,
+        "manual_review_required": record.manual_review_required,
+        "review_reasons": list(record.review_reasons),
+    }
+
+
+def render_audit_jsonl(audit: Sequence[AuditRecord]) -> str:
+    """以固定字段顺序和 UTF-8 规范 JSON 输出逐条来源审计。"""
+    return "".join(
+        canonical_json_bytes(_audit_payload(record)).decode("utf-8")
+        for record in audit
+    )
+
+
+def render_audit_summary(bundle: CatalogBundle, audit: Sequence[AuditRecord]) -> str:
+    """渲染可复算的来源匹配审计摘要。"""
+    status_counts = {
+        status: sum(record.status == status for record in audit)
+        for status in ("matched", "out_of_scope", "ambiguous", "expected_but_unmatched")
+    }
+    lines = [
+        "# 环境期刊目录 v4.0 来源匹配审计摘要",
+        "",
+        f"- 目录数据哈希：`{bundle.catalog_payload['data_sha256']}`",
+        f"- 审计记录数：{len(audit)}",
+        f"- 受控别名：{bundle.controlled_alias_count}",
+        "",
+        "| 审计状态 | 记录数 |",
+        "|---|---:|",
+    ]
+    lines.extend(f"| {status} | {count} |" for status, count in status_counts.items())
+    lines.extend(["", "| 来源 | 原始记录 | 匹配 | 范围外 |", "|---|---:|---:|---:|"])
+    lines.extend(
+        f"| {name} | {source_count} | {matched_count} | {out_of_scope_count} |"
+        for name, (source_count, matched_count, out_of_scope_count) in sorted(
+            bundle.match_counts.items()
+        )
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _verify_or_write_bytes(path: Path, expected: bytes, *, check: bool) -> None:
+    actual = path.read_bytes() if path.is_file() else None
+    if check:
+        if actual != expected:
+            raise ValueError(f"生成文件不一致：{path}")
+        return
+    if actual == expected:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        temporary.write_bytes(expected)
+        temporary.replace(path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _verify_or_write(path: Path, content: str, *, check: bool) -> None:
+    _verify_or_write_bytes(path, content.encode("utf-8"), check=check)
+
+
+def _verify_or_write_mirrors(
+    paths: OutputPaths,
+    outputs: Mapping[str, str],
+    *,
+    check: bool,
+) -> None:
+    for name in MIRRORED_REFERENCE_FILES:
+        content = outputs[name]
+        _verify_or_write(paths.skill_references / name, content, check=check)
+        _verify_or_write(paths.mcpb_references / name, content, check=check)
+
+
+def _verify_or_write_source_mirrors(paths: OutputPaths, *, check: bool) -> None:
+    source_paths = (
+        paths.sources.cssci_markdown,
+        paths.sources.pku_natural,
+        paths.sources.pku_non_natural,
+        paths.sources.ssci_markdown,
+        paths.sources.ssci_csv,
+        paths.sources.scie_markdown,
+        paths.sources.scie_csv,
+    )
+    for source_path in source_paths:
+        if source_path.name not in SOURCE_REFERENCE_FILES:
+            raise ValueError(f"不受支持的来源快照：{source_path.name}")
+        content = source_path.read_bytes()
+        _verify_or_write_bytes(
+            paths.skill_references / source_path.name,
+            content,
+            check=check,
+        )
+        _verify_or_write_bytes(
+            paths.mcpb_references / source_path.name,
+            content,
+            check=check,
+        )
+
+
+def generate_outputs(paths: OutputPaths, *, check: bool) -> dict[str, str]:
+    """构建、校验并原子写入完整的 v4.0 目录产物。"""
+    bundle = build_catalog_bundle(paths.baseline, paths.sources)
+    audit = bundle.audit
+    validate_generated_bundle(bundle, audit)
+    outputs = {
+        "环境科学与工程学科顶尖期刊目录_v4.0.md": render_catalog_markdown(bundle),
+        "environment_journal_catalog_v4.0.json": canonical_json_bytes(
+            bundle.catalog_payload
+        ).decode("utf-8"),
+        "environment_catalog_sources_v4.0.json": canonical_json_bytes(
+            bundle.source_registry
+        ).decode("utf-8"),
+        "environment_journal_match_audit_v4.0.md": render_audit_summary(bundle, audit),
+    }
+    _verify_or_write_mirrors(paths, outputs, check=check)
+    _verify_or_write_source_mirrors(paths, check=check)
+    _verify_or_write(paths.audit_jsonl, render_audit_jsonl(audit), check=check)
+    _verify_or_write(
+        paths.audit_markdown,
+        outputs["environment_journal_match_audit_v4.0.md"],
+        check=check,
+    )
+    return {
+        name: hashlib.sha256(content.encode("utf-8")).hexdigest()
+        for name, content in outputs.items()
+    }
