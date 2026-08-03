@@ -27,6 +27,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time
 import unicodedata
@@ -45,7 +46,12 @@ from .models import (
     SearchStatus,
     is_verifiable_publication_year,
 )
-from .professional import ExpressionBatch, PlanExecutionResult, SourceCategorySpec
+from .professional import (
+    TOPIC_FIELD_PRIORITY,
+    ExpressionBatch,
+    PlanExecutionResult,
+    SourceCategorySpec,
+)
 
 #: 实测：连续 4 次快速请求即触发安全验证，冷却约 75 秒后恢复。30 秒是据此取的
 #: 保守值，**不是**二分测试得出的安全阈值，长时间高频使用仍可能触发风控。
@@ -452,7 +458,68 @@ _CHECKPOINT_RECORD_FIELDS = (
     "is_online_first",
     "result_rank",
     "source_database",
+    "topic_match_field",
+    "matched_topic_fields",
+    "matched_search_groups",
 )
+
+#: 分组标识是受控枚举值，不是自由文本；只允许小写标识符字符，含控制字符即拒绝。
+_SEARCH_GROUP_PATTERN = re.compile(r"^[a-z0-9_]{1,64}$")
+_MAX_MATCHED_SEARCH_GROUPS = 8
+
+
+def _checkpoint_match_metadata(source: Mapping[str, Any]) -> dict[str, Any] | None:
+    """校验字段与分组命中元数据。字段名和分组名都是受控枚举，越界即整条丢弃。"""
+    topic_match_field = source.get("topic_match_field")
+    if topic_match_field is not None and topic_match_field not in TOPIC_FIELD_PRIORITY:
+        return None
+    matched_topic_fields = source.get("matched_topic_fields", [])
+    if not isinstance(matched_topic_fields, list) or any(
+        item not in TOPIC_FIELD_PRIORITY for item in matched_topic_fields
+    ):
+        return None
+    if len(matched_topic_fields) > len(TOPIC_FIELD_PRIORITY):
+        return None
+    matched_search_groups = source.get("matched_search_groups", [])
+    if not isinstance(matched_search_groups, list) or any(
+        not isinstance(item, str) or not _SEARCH_GROUP_PATTERN.fullmatch(item)
+        for item in matched_search_groups
+    ):
+        return None
+    if len(matched_search_groups) > _MAX_MATCHED_SEARCH_GROUPS:
+        return None
+    return {
+        "topic_match_field": topic_match_field,
+        "matched_topic_fields": list(matched_topic_fields),
+        "matched_search_groups": list(matched_search_groups),
+    }
+
+
+def _checkpoint_token(batches: Sequence[ExpressionBatch]) -> str:
+    """断点身份摘要。
+
+    只哈希表达式会让"同一表达式 + 不同分面、字段、范围或目录版本"共用断点，
+    续跑时把上一次的结果冒充成本次结果。这里摘要完整身份，且仍只落盘摘要。
+    """
+    identity = [
+        {
+            "expression": batch.expression,
+            "scope_id": batch.scope_id,
+            "catalog_version": batch.catalog_version,
+            "topic_field": batch.topic_field,
+            "source_category": (
+                None if batch.source_category is None else {
+                    "code": batch.source_category.code,
+                    "label": batch.source_category.label,
+                }
+            ),
+            "page_size": batch.page_size,
+        }
+        for batch in batches
+    ]
+    canonical = json.dumps(identity, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _checkpoint_text(value: str) -> str | None:
@@ -618,6 +685,10 @@ def _checkpoint_record(
         if not isinstance(value, bool):
             return None
         safe[name] = value
+    matches = _checkpoint_match_metadata(source)
+    if matches is None:
+        return None
+    safe.update(matches)
     return {
         name: safe[name]
         for name in _CHECKPOINT_RECORD_FIELDS
@@ -761,9 +832,7 @@ async def run_batches(
     """
     if not batches:
         raise ValueError("批次列表不能为空")
-    token = hashlib.sha256(
-        "\n".join(batch.expression for batch in batches).encode("utf-8")
-    ).hexdigest()
+    token = _checkpoint_token(batches)
     if checkpoint is not None:
         try:
             checkpoint.load(token)

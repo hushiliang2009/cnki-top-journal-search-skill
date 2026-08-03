@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -8,7 +7,12 @@ import pytest
 
 from cnki_search_env import webvpn
 from cnki_search_env.models import PaperRecord, SearchStatus
-from cnki_search_env.professional import build_batches, build_expression
+from cnki_search_env.professional import (
+    ExpressionBatch,
+    SourceCategorySpec,
+    build_batches,
+    build_expression,
+)
 
 
 def _batches(count: int):
@@ -323,6 +327,177 @@ def test_checkpoint_is_discarded_when_the_query_changes(tmp_path: Path) -> None:
     assert summary["complete"] is True
 
 
+# ── 断点身份 ────────────────────────────────────────────────────────────────
+
+def _identity_batch(expression: str, scope_id: str, topic_field: str,
+                    category: SourceCategorySpec | None, *,
+                    catalog_version: str = "2026-07-15") -> ExpressionBatch:
+    return ExpressionBatch(
+        index=1,
+        total=1,
+        journals=(),
+        expression=expression,
+        scope_id=scope_id,
+        catalog_version=catalog_version,
+        topic_field=topic_field,
+        source_category=category,
+    )
+
+
+def test_same_expression_with_cssci_and_pku_facets_has_distinct_tokens() -> None:
+    """同一表达式配不同分面是两次不同检索，断点不得互相复用。"""
+    cssci = _identity_batch(
+        "TI %= '气候'", "cssci", "TI", SourceCategorySpec("P0209", "CSSCI"),
+    )
+    pku = _identity_batch(
+        "TI %= '气候'", "pku_core", "TI", SourceCategorySpec("P01", "北大核心"),
+    )
+    assert webvpn._checkpoint_token([cssci]) != webvpn._checkpoint_token([pku])
+
+
+def test_same_expression_in_different_fields_or_scopes_has_distinct_tokens() -> None:
+    assert webvpn._checkpoint_token([_identity_batch("X", "scope-a", "TI", None)]) != \
+        webvpn._checkpoint_token([_identity_batch("X", "scope-a", "SU", None)])
+    assert webvpn._checkpoint_token([_identity_batch("X", "scope-a", "TI", None)]) != \
+        webvpn._checkpoint_token([_identity_batch("X", "scope-b", "TI", None)])
+
+
+def test_same_scope_and_expression_in_different_catalog_versions_has_distinct_tokens() -> None:
+    assert webvpn._checkpoint_token(
+        [_identity_batch("X", "scope-a", "TI", None, catalog_version="3.0")]
+    ) != webvpn._checkpoint_token(
+        [_identity_batch("X", "scope-a", "TI", None, catalog_version="4.0")]
+    )
+
+
+def test_checkpoint_token_is_a_sha256_digest_and_never_leaks_the_expression() -> None:
+    token = webvpn._checkpoint_token(
+        [_identity_batch("TI %= '气候'", "cssci", "TI", None)]
+    )
+    assert len(token) == 64
+    assert set(token) <= set("0123456789abcdef")
+    assert "气候" not in token
+
+
+def test_run_batches_uses_the_full_identity_token(tmp_path: Path) -> None:
+    """run_batches 不得再内联只哈希表达式的旧算法。"""
+    state = tmp_path / "progress.json"
+    batches = _batches(2)
+
+    async def execute(batch):
+        return _challenge(batch) if batch.index == 2 else _ok(batch)
+
+    asyncio.run(webvpn.run_batches(
+        batches, execute, checkpoint=webvpn.BatchCheckpoint(state),
+    ))
+
+    payload = json.loads(state.read_text(encoding="utf-8"))
+    assert payload["token"] == webvpn._checkpoint_token(batches)
+
+
+def test_checkpoint_record_whitelist_carries_field_and_group_matches() -> None:
+    """字段与分组命中信息属于可安全落盘的检索身份，链接与 DOI 仍禁止。"""
+    assert {
+        "topic_match_field", "matched_topic_fields", "matched_search_groups",
+    } <= set(webvpn._CHECKPOINT_RECORD_FIELDS)
+    for forbidden in ("doi", "detail_url", "download_url", "pdf_url", "html",
+                      "result_url", "search_query"):
+        assert forbidden not in webvpn._CHECKPOINT_RECORD_FIELDS
+
+
+def _matched_record(batch) -> dict:
+    record = _record(batch)
+    record["topic_match_field"] = "SU"
+    record["matched_topic_fields"] = ["TI", "SU"]
+    record["matched_search_groups"] = ["cssci"]
+    return record
+
+
+def test_match_metadata_survives_a_checkpoint_round_trip(tmp_path: Path) -> None:
+    state = tmp_path / "progress.json"
+    batches = _batches(2)
+
+    async def interrupted(batch):
+        if batch.index == 2:
+            return _challenge(batch)
+        return {
+            "status": SearchStatus.SUCCESS.value,
+            "index": batch.index,
+            "total_rows": 1,
+            "excluded_non_journal_rows": 0,
+            "records": [_matched_record(batch)],
+            "incomplete_records": [],
+        }
+
+    asyncio.run(webvpn.run_batches(
+        batches, interrupted, checkpoint=webvpn.BatchCheckpoint(state),
+    ))
+
+    saved = json.loads(state.read_text(encoding="utf-8"))["completed"]["1"]["records"][0]
+    assert saved["topic_match_field"] == "SU"
+    assert saved["matched_topic_fields"] == ["TI", "SU"]
+    assert saved["matched_search_groups"] == ["cssci"]
+
+    async def resumed(batch):
+        return {
+            "status": SearchStatus.SUCCESS.value,
+            "index": batch.index,
+            "records": [],
+            "incomplete_records": [],
+        }
+
+    summary = asyncio.run(webvpn.run_batches(
+        batches, resumed, checkpoint=webvpn.BatchCheckpoint(state),
+        should_stop=lambda results: len(results) == 1,
+    ))
+    restored = summary["results"][0]["records"][0]
+    assert isinstance(restored, PaperRecord)
+    assert restored.topic_match_field == "SU"
+    assert restored.matched_topic_fields == ["TI", "SU"]
+    assert restored.matched_search_groups == ["cssci"]
+
+
+@pytest.mark.parametrize(
+    "poisoned",
+    [
+        {"topic_match_field": "AB"},
+        {"topic_match_field": 1},
+        {"matched_topic_fields": ["TI", "AB"]},
+        {"matched_topic_fields": "TI"},
+        {"matched_search_groups": ["cssci\u0007"]},
+        {"matched_search_groups": [{"group": "cssci"}]},
+    ],
+)
+def test_checkpoint_rejects_unsafe_match_metadata(
+    tmp_path: Path, poisoned: dict,
+) -> None:
+    """守卫失败关闭：非受控字段名或含控制字符的分组名不得落盘。"""
+    state = tmp_path / "progress.json"
+    batches = _batches(2)
+
+    async def execute(batch):
+        if batch.index == 2:
+            return _challenge(batch)
+        record = _record(batch)
+        record.update(poisoned)
+        return {
+            "status": SearchStatus.SUCCESS.value,
+            "index": batch.index,
+            "total_rows": 1,
+            "excluded_non_journal_rows": 0,
+            "records": [record],
+            "incomplete_records": [],
+        }
+
+    asyncio.run(webvpn.run_batches(
+        batches, execute, checkpoint=webvpn.BatchCheckpoint(state),
+    ))
+
+    if state.exists():
+        payload = json.loads(state.read_text(encoding="utf-8"))
+        assert payload["completed"] == {}
+
+
 def test_checkpoint_contains_no_expression_url_html_cookie_or_path(
     tmp_path: Path,
 ) -> None:
@@ -355,9 +530,7 @@ def test_checkpoint_contains_no_expression_url_html_cookie_or_path(
 
     text = state.read_text(encoding="utf-8")
     payload = json.loads(text)
-    assert payload["token"] == hashlib.sha256(
-        "\n".join(batch.expression for batch in batches).encode("utf-8")
-    ).hexdigest()
+    assert payload["token"] == webvpn._checkpoint_token(batches)
     assert set(payload["completed"]["1"]) == {
         "status",
         "index",
@@ -426,9 +599,7 @@ def test_checkpoint_records_are_restored_as_paper_records(tmp_path: Path) -> Non
 def test_checkpoint_resave_sanitizes_loaded_completed_payload(tmp_path: Path) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(2)
-    token = hashlib.sha256(
-        "\n".join(batch.expression for batch in batches).encode("utf-8")
-    ).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     state.write_text(
         json.dumps(
             {
@@ -471,7 +642,7 @@ def test_loaded_checkpoint_is_sanitized_before_immediate_limit_return(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(1)
-    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     state.write_text(
         json.dumps(
             {
@@ -574,7 +745,7 @@ def test_checkpoint_replace_failure_never_restores_sensitive_records(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(1)
-    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     state.write_text(
         json.dumps(
             {
@@ -633,9 +804,7 @@ def test_checkpoint_save_failure_discards_already_restored_results(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(2)
-    token = hashlib.sha256(
-        "\n".join(batch.expression for batch in batches).encode("utf-8")
-    ).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     state.write_text(
         json.dumps(
             {
@@ -704,7 +873,7 @@ def test_checkpoint_rejects_non_completed_statuses(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(1)
-    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     state.write_text(
         json.dumps(
             {
@@ -741,7 +910,7 @@ def test_checkpoint_rejects_non_completed_statuses(
 def test_checkpoint_rejects_no_results_with_records(tmp_path: Path) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(1)
-    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     state.write_text(
         json.dumps(
             {
@@ -791,7 +960,7 @@ def test_checkpoint_rejects_malformed_formal_records(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(1)
-    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     record = _record(batches[0], title=title)
     record["publication_year"] = year
     state.write_text(
@@ -833,9 +1002,7 @@ def test_checkpoint_whitelist_drops_sensitive_auxiliary_fields(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(2)
-    token = hashlib.sha256(
-        "\n".join(batch.expression for batch in batches).encode("utf-8")
-    ).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     record = _record(batches[0])
     record.update(
         {
@@ -896,7 +1063,7 @@ def test_checkpoint_rejects_sensitive_text_hidden_in_allowed_record_field(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(1)
-    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     record = _record(batches[0])
     record["source_database"] = "https://example.invalid/<table>cookie"
     state.write_text(
@@ -1013,7 +1180,7 @@ def test_checkpoint_rejects_formal_record_blank_after_control_cleanup(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(1)
-    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     record = _record(batches[0])
     record[field] = "\u200b\x00"
     state.write_text(
@@ -1078,7 +1245,7 @@ def test_checkpoint_rejects_inconsistent_count_semantics(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(1)
-    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     formal = _record(batches[0])
     incomplete_record = _record(batches[0], title="")
     payload_records = [formal] if records else []
@@ -1136,7 +1303,7 @@ def test_checkpoint_rejects_values_outside_record_field_contract(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(1)
-    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     record = _record(batches[0])
     record[field] = value
     state.write_text(
@@ -1180,9 +1347,7 @@ def test_checkpoint_count_lower_bound_allows_formal_rows_omitted_by_limit(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(2)
-    token = hashlib.sha256(
-        "\n".join(batch.expression for batch in batches).encode("utf-8")
-    ).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     state.write_text(
         json.dumps(
             {
@@ -1226,7 +1391,7 @@ def test_checkpoint_rejects_formal_record_hidden_in_incomplete_records(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(1)
-    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     state.write_text(
         json.dumps(
             {
@@ -1290,7 +1455,7 @@ def test_checkpoint_path_checks_normalize_nfkc_and_trim_first(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(1)
-    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     record = _record(batches[0])
     record["publication_date"] = unsafe_date
     state.write_text(
@@ -1358,7 +1523,7 @@ def test_checkpoint_rejects_windows_namespace_and_file_uri_variants(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(1)
-    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     record = _record(batches[0])
     record["publication_date"] = unsafe_date
     state.write_text(
@@ -1411,9 +1576,7 @@ def test_checkpoint_allows_internal_backslash_and_ordinary_file_word(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(2)
-    token = hashlib.sha256(
-        "\n".join(batch.expression for batch in batches).encode("utf-8")
-    ).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     record = _record(batches[0], title=title)
     state.write_text(
         json.dumps(
@@ -1454,9 +1617,7 @@ def test_checkpoint_preserves_normal_title_slash_and_saves_normalized_text(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(2)
-    token = hashlib.sha256(
-        "\n".join(batch.expression for batch in batches).encode("utf-8")
-    ).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     record = _record(batches[0], title="Ａ投入／产出分析")
     state.write_text(
         json.dumps(
@@ -1535,7 +1696,7 @@ def test_malformed_checkpoint_entries_are_discarded_without_crashing(
 ) -> None:
     state = tmp_path / "progress.json"
     batches = _batches(1)
-    token = hashlib.sha256(batches[0].expression.encode("utf-8")).hexdigest()
+    token = webvpn._checkpoint_token(batches)
     state.write_text(
         json.dumps(
             {"token": token, "completed": malformed_completed},
