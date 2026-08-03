@@ -27,6 +27,14 @@ class FacetLocator:
     async def check(self) -> None:
         self.checked = True
 
+    async def is_checked(self) -> bool:
+        return self.checked
+
+
+class ResultRowsLocator:
+    async def count(self) -> int:
+        return 1
+
 
 class FacetPage:
     """勾选分面后总数从 before 变成 after。"""
@@ -38,7 +46,9 @@ class FacetPage:
         self.locators: dict[str, FacetLocator] = {}
         self.facet_present = facet_present
 
-    def locator(self, selector: str) -> FacetLocator:
+    def locator(self, selector: str) -> FacetLocator | ResultRowsLocator:
+        if selector.startswith(webvpn.RESULT_TABLE_SELECTOR):
+            return ResultRowsLocator()
         if selector not in self.locators:
             self.locators[selector] = FacetLocator(1 if self.facet_present else 0)
         return self.locators[selector]
@@ -75,6 +85,21 @@ def test_applying_controlled_category_uses_its_cnki_code() -> None:
     assert total == "2,270"
     selector = webvpn.SOURCE_CATEGORY_SELECTOR.format(value="P0209")
     assert page.locators[selector].checked is True
+
+
+def test_unchanged_total_is_valid_when_checkbox_is_checked_and_page_is_stable() -> None:
+    """分面命中全部结果时总数可以不变，不能被误判为未生效。"""
+    page = FacetPage(before="50", after="50")
+
+    application = asyncio.run(
+        _driver(page).apply_source_category(
+            SourceCategorySpec("P0209", "CSSCI"), timeout_seconds=0.1,
+        )
+    )
+
+    assert application.applied is True
+    assert application.total == 50
+    assert application.status is webvpn.SearchStatus.SUCCESS
 
 
 def test_unknown_category_is_rejected_with_the_available_options() -> None:

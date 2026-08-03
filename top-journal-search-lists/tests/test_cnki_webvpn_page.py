@@ -4,6 +4,7 @@
 方式失败，因此固化成测试而不是只写注释。
 """
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -1024,6 +1025,24 @@ class ControlledFacetPlanDriver(webvpn.ProfessionalSearchPage):
         return size
 
 
+class PostFacetStatusDriver(PlanRecorder):
+    def __init__(self, events: list[str], status: SearchStatus, *,
+                 applied: bool = True) -> None:
+        super().__init__(events)
+        self.post_facet_status = status
+        self.applied = applied
+
+    async def apply_source_category(self, category: SourceCategorySpec | str, *,
+                                    timeout_seconds: float = 20.0):
+        label = category.label if isinstance(category, SourceCategorySpec) else category
+        self.events.extend((f"facet:{label}", f"classify:{self.post_facet_status.value}"))
+        return SimpleNamespace(
+            applied=self.applied,
+            total=50 if self.applied else None,
+            status=self.post_facet_status,
+        )
+
+
 def test_real_execute_plan_uses_controlled_facet_code_and_reports_total(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1079,6 +1098,44 @@ def test_execute_plan_reports_controlled_facet_application() -> None:
         "fill", "submit", "classify",
         "facet:CSSCI", "page_size:50", "classify", "content",
     ]
+
+
+@pytest.mark.parametrize(
+    ("after_status", "expected"),
+    [
+        (SearchStatus.NO_RESULTS, "no_results"),
+        (SearchStatus.CHALLENGE_DETECTED, "challenge_detected"),
+        (SearchStatus.PAGE_CONTRACT_CHANGED, "page_contract_changed"),
+    ],
+)
+def test_execute_plan_rechecks_status_after_facet(
+    after_status: SearchStatus, expected: str,
+) -> None:
+    """分面刷新若进入终止状态，严禁再调整页大小或读取未筛选页面。"""
+    events: list[str] = []
+    result = asyncio.run(
+        PostFacetStatusDriver(events, after_status).execute_plan(
+            _plan(source_category=SourceCategorySpec("P0209", "CSSCI"))
+        )
+    )
+
+    assert result.status == expected
+    assert result.html == ""
+    assert "page_size:50" not in events
+
+
+def test_missing_or_unchecked_facet_never_returns_unfiltered_html() -> None:
+    events: list[str] = []
+    result = asyncio.run(
+        PostFacetStatusDriver(
+            events, SearchStatus.PAGE_CONTRACT_CHANGED, applied=False,
+        ).execute_plan(_plan(source_category=SourceCategorySpec("P01", "北大核心")))
+    )
+
+    assert result.status == SearchStatus.PAGE_CONTRACT_CHANGED.value
+    assert result.source_category_applied is False
+    assert result.html == ""
+    assert "page_size:50" not in events
 
 
 def test_execute_plan_omits_facet_for_chinese_top_plan() -> None:
