@@ -193,6 +193,9 @@ class CnkiProfessionalSearchService:
             "records": [record.to_dict() for record in eligible],
             "incomplete_records": [record.to_dict() for record in incomplete],
         }
+        if group == PKU_CORE_GROUP:
+            # 单组 MCP 调用没有 Skill 工作流中已检索高层级分组的上下文。
+            result["already_covered_higher_priority_count"] = 0
         if terminal_status is not None:
             detail = terminal_detail
             if not detail and terminal_status == SearchStatus.PAGE_CONTRACT_CHANGED.value:

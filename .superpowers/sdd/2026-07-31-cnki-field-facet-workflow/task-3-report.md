@@ -5,6 +5,7 @@
 - 环境版专业检索分组固定为中文环境顶刊、其他正式认可中文期刊、环境 CSSCI 和北大核心四个目录范围。
 - `build_group_policy()` 直接消费 `cnki_scope()` 的封闭载荷，保留目录版本、期刊 ID、层级、索引身份和来源类别要求。
 - `pku_core` 仅提交主题表达式并使用北大核心来源类别；不生成 `LY=` 条件。环境 CSSCI 同时保留逐刊 `LY=` 条件与 CSSCI 结果页分面。
+- `pku_core` 的单组结果固定返回 `already_covered_higher_priority_count=0`，明确其不携带 Skill 工作流的高层级去重上下文。
 - 检索按 `TI`、`SU`、`KY`、`TKA` 累计合格唯一记录；先按目录资格过滤，再去重、排序和计算单组限额。
 - 资格判断同时核验期刊 ID、目录层级、必要索引身份和来源类别是否已在结果页生效。组外记录不占限额。
 - 排序在期刊层级和目录内部顺序之后，按最先命中的主题字段排序；重复记录合并字段与分组元数据。
@@ -16,6 +17,7 @@
 - RED 命令：`python -m pytest -q -p no:cacheprovider top-journal-search-lists-env/tests/test_cnki_professional_service_env.py top-journal-search-lists-env/tests/test_cnki_ranking.py`。
 - RED 结果：新增测试因 `build_group_policy` 缺失失败；旧 CSSCI 路径还将自由字符串传入已受控的来源类别接口。
 - GREEN：实现目录驱动策略、字段累计、目录资格过滤、去重元数据与排序后，同一目标测试及目录查找测试通过。
+- 审查修复 RED：`pku_core` 单组结果读取该字段时出现 `KeyError`；修复后服务测试、环境运行时和 MCPB 镜像验证通过。
 
 ## 验证
 

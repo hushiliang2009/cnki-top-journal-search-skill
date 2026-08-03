@@ -796,6 +796,15 @@ def test_pku_core_has_no_ly_and_accepts_members_at_levels_1_to_12() -> None:
     assert policy.eligible_priority_levels == frozenset(range(1, 13))
 
 
+def test_pku_core_direct_group_reports_no_prior_group_overlap() -> None:
+    """单组 MCP 调用不承担 Skill 工作流的高层级去重上下文。"""
+    service = CnkiProfessionalSearchService(
+        _executor([("北大核心论文", "环境科学学报")])
+    )
+    result = asyncio.run(service.search_group("气候治理", "pku_core", limit=1))
+    assert result["already_covered_higher_priority_count"] == 0
+
+
 def test_every_environment_cssci_batch_keeps_exact_titles_and_cssci_facet() -> None:
     """CSSCI 分面不能代替环境目录中的逐刊限定。"""
     policy = service_module.build_group_policy("environment_cssci")
