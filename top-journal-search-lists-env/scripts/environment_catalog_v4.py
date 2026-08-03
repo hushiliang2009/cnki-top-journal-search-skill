@@ -461,7 +461,11 @@ def _baseline_tables(path: Path) -> list[tuple[int, list[_MarkdownRow]]]:
         headers = _table_cells(line)
         if len(headers) != len(set(headers)):
             raise ValueError(f"{path}:{line_number} 的表头包含重复列：{headers}")
-        if "序号" not in headers or not {"期刊名称", "基线题名"}.intersection(headers):
+        if "序号" not in headers or not {
+            "期刊名称",
+            "基线题名",
+            "正式题名",
+        }.intersection(headers):
             line_index += 1
             continue
 

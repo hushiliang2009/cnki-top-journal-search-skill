@@ -4,6 +4,8 @@ import importlib.util
 from pathlib import Path
 import sys
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 REFERENCES = ROOT / "references"
@@ -19,6 +21,59 @@ def _load_catalog_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip()[1:-1].split("|")]
+
+
+def _write_generated_baseline(
+    tmp_path: Path,
+    *,
+    include_baseline_title: bool = True,
+) -> Path:
+    """写入字段已重排的生成目录，以验证重跑不会重新定义基线身份。"""
+    lines = BASELINE.read_text(encoding="utf-8").splitlines()
+    rendered: list[str] = []
+    ordinal = 0
+    line_index = 0
+    while line_index < len(lines):
+        line = lines[line_index]
+        if (
+            line_index + 1 < len(lines)
+            and line.startswith("| 序号 |")
+            and lines[line_index + 1].startswith("|---")
+        ):
+            headers = _table_cells(line)
+            reordered_headers = ["正式题名", "期刊ID"]
+            if include_baseline_title:
+                reordered_headers.append("基线题名")
+            reordered_headers.extend(
+                header for header in headers if header not in {"期刊名称"}
+            )
+            rendered.append("| " + " | ".join(reordered_headers) + " |")
+            rendered.append("|" + "|".join("---" for _ in reordered_headers) + "|")
+            line_index += 2
+            while line_index < len(lines) and lines[line_index].startswith("|"):
+                values = dict(zip(headers, _table_cells(lines[line_index]), strict=True))
+                ordinal += 1
+                baseline_title = values["期刊名称"]
+                formal_title = (
+                    "Cell normalized title" if ordinal == 1 else baseline_title
+                )
+                row = [formal_title, f"ENVJ-LOCKED-{ordinal:06d}"]
+                if include_baseline_title:
+                    row.append(baseline_title)
+                row.extend(values[header] for header in headers if header != "期刊名称")
+                rendered.append("| " + " | ".join(row) + " |")
+                line_index += 1
+            continue
+        rendered.append(line)
+        line_index += 1
+
+    generated = tmp_path / "generated-v4-baseline.md"
+    generated.write_text("\n".join(rendered) + "\n", encoding="utf-8")
+    return generated
 
 
 def test_source_parsers_preserve_approved_counts_and_original_titles() -> None:
@@ -90,3 +145,67 @@ def test_v4_baseline_has_stable_ids_levels_and_priority_signature() -> None:
         "pku_core_natural_sciences",
         "pku_core_non_natural_sciences",
     )
+
+
+def test_v4_generated_baseline_reuses_ids_and_original_baseline_titles(
+    tmp_path: Path,
+) -> None:
+    """若重跑改写期刊ID、误用正式题名或改变签名，此测试应失败。"""
+    catalog = _load_catalog_module()
+    generated = _write_generated_baseline(tmp_path)
+
+    records = catalog.parse_v4_baseline(generated)
+    replayed = catalog.parse_v4_baseline(generated)
+
+    assert records[0].journal_id == "ENVJ-LOCKED-000001"
+    assert records[0].formal_title == "Cell normalized title"
+    assert records[0].priority_decision["baseline_title"] == "Cell"
+    assert catalog.priority_signature(records) == catalog.priority_signature(replayed)
+    assert catalog.priority_signature(records)[0] == (
+        "ENVJ-LOCKED-000001",
+        1,
+        "comprehensive_super_journals",
+        None,
+    )
+    assert catalog.priority_signature(records)[4] == (
+        "ENVJ-LOCKED-000005",
+        2,
+        "ncs_pnas_environment_flagships",
+        1,
+    )
+    assert catalog.priority_signature(records)[-1] == (
+        "ENVJ-LOCKED-003764",
+        12,
+        "pku_core_non_natural_sciences",
+        None,
+    )
+
+
+def test_v4_generated_baseline_requires_explicit_baseline_title(tmp_path: Path) -> None:
+    """若生成目录缺少基线题名仍被接受，此测试应失败。"""
+    catalog = _load_catalog_module()
+    generated = _write_generated_baseline(tmp_path, include_baseline_title=False)
+
+    with pytest.raises(ValueError, match="生成目录缺少基线题名列"):
+        catalog.parse_v4_baseline(generated)
+
+
+def test_v4_baseline_excludes_appendix_only_titles() -> None:
+    """若附录一的期刊进入十二级签名，此测试应失败。"""
+    catalog = _load_catalog_module()
+    records = catalog.parse_v4_baseline(BASELINE)
+
+    assert "Innovation" not in {record.formal_title for record in records}
+
+
+def test_v4_baseline_reads_columns_by_header_after_reordering(tmp_path: Path) -> None:
+    """若解析器按列位置而非表头读取生成目录，此测试应失败。"""
+    catalog = _load_catalog_module()
+    generated = _write_generated_baseline(tmp_path)
+
+    records = catalog.parse_v4_baseline(generated)
+
+    assert records[0].environment_subfields == ["环境科学与工程综合"]
+    assert records[0].formal_evidence == [
+        "上海交通大学环境科学与工程学院 AAAAA+（U5）"
+    ]
