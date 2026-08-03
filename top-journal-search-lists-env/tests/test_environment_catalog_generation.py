@@ -7,6 +7,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 REFERENCES = ROOT / "references"
+BASELINE = REFERENCES / "环境科学与工程学科顶尖期刊目录_v4.0.md"
 SCRIPT = ROOT / "scripts" / "environment_catalog_v4.py"
 
 
@@ -49,3 +50,43 @@ def test_source_parsers_preserve_approved_counts_and_original_titles() -> None:
     ]
     renamed = next(item for item in natural if item.formal_title == "低碳化学与化工")
     assert renamed.aliases == ("天然气化工.C1,化学与化工",)
+
+
+def test_v4_baseline_has_stable_ids_levels_and_priority_signature() -> None:
+    """删除十二级解析、改变顺序或改写稳定编号时，此测试应失败。"""
+    catalog = _load_catalog_module()
+    records = catalog.parse_v4_baseline(BASELINE)
+
+    assert len(records) == 3764
+    assert [sum(record.priority_level == level for record in records) for level in range(1, 13)] == [
+        4,
+        17,
+        5,
+        45,
+        17,
+        6,
+        134,
+        324,
+        241,
+        1229,
+        1181,
+        561,
+    ]
+    assert records[0].journal_id == "ENVJ-000001"
+    assert records[-1].journal_id == "ENVJ-003764"
+    assert len({record.formal_title for record in records}) == 3764
+    assert len(catalog.priority_signature(records)) == 3764
+    assert catalog.PRIORITY_GROUPS == (
+        "comprehensive_super_journals",
+        "ncs_pnas_environment_flagships",
+        "top_university_highest_consensus",
+        "top_university_high_level",
+        "environment_field_top",
+        "chinese_environment_top",
+        "other_formally_recognized",
+        "environment_ssci",
+        "environment_cssci",
+        "environment_scie",
+        "pku_core_natural_sciences",
+        "pku_core_non_natural_sciences",
+    )
