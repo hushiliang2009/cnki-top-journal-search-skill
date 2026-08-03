@@ -92,7 +92,7 @@ def test_environment_cssci_plan_enumerates_journals_and_keeps_the_facet() -> Non
         assert plan.expression.startswith("TI %= '碳中和'"), "默认字段是优先级最高的 TI"
         assert "LY=" in plan.expression
         assert len(plan.expression) <= service_module.DEFAULT_MAX_EXPRESSION_CHARS
-        assert plan.source_category == "CSSCI", "每一批都要带来源类别，不能只给第一批"
+        assert plan.source_category == SourceCategorySpec("P0209", "CSSCI"), "每一批都要带来源类别，不能只给第一批"
         assert plan.page_size == 50
     # 字段可指定：升级逻辑正是靠它逐级替换检索式
     fallback = service_module.preview_plans(
@@ -144,7 +144,7 @@ def test_only_chinese_priority_groups_are_accepted() -> None:
     service = CnkiProfessionalSearchService(_executor([]))
     for group in ("environment_ssci", "environment_scie",
                   "comprehensive_super_journals", "no_such_group"):
-        with pytest.raises(ValueError, match="只覆盖中文层级"):
+        with pytest.raises(ValueError, match="不支持分组"):
             asyncio.run(service.search_group("主题", group))
 
 
@@ -167,9 +167,9 @@ def test_environment_cssci_group_merges_across_every_batch() -> None:
     assert result["source_category"] == "CSSCI"
     assert result["batches_total"] > 1
     per_field = Counter(_field_of(plan.expression) for plan in seen)
-    assert per_field[result["topic_field"]] == result["batches_total"], "每一批都要真的提交"
+    assert sum(per_field.values()) == result["batches_total"], "每一批都要真的提交"
     assert list(per_field) == result["topic_fields_tried"], "字段必须按声明的优先序试"
-    assert all(plan.source_category == "CSSCI" for plan in seen)
+    assert all(plan.source_category == SourceCategorySpec("P0209", "CSSCI") for plan in seen)
     assert all("LY=" in plan.expression for plan in seen)
     assert all(record["priority_level"] == 9 for record in result["records"])
 
@@ -177,7 +177,7 @@ def test_environment_cssci_group_merges_across_every_batch() -> None:
 def test_duplicate_records_across_batches_are_merged_once() -> None:
     async def execute(_batch: ExpressionBatch) -> tuple[str, str, str]:
         return (SearchStatus.SUCCESS.value,
-                RESULT_TEMPLATE.format(title="同一篇论文", journal="生态学报"),
+                RESULT_TEMPLATE.format(title="同一篇论文", journal="农业经济问题"),
                 "https://example.invalid/")
 
     service = CnkiProfessionalSearchService(execute, max_expression_chars=900)
@@ -315,11 +315,11 @@ def test_limit_counts_normalized_unique_formal_records(
         executor_calls.append(batch.index)
         if batch.index == 1:
             html = (
-                _result_page(title="Alpha Study", journal="Journal A")
-                + _result_page(title="alpha study", journal="journal a")
+                _result_page(title="Alpha Study", journal="环境科学学报")
+                + _result_page(title="alpha study", journal="环境科学学报")
             )
         else:
-            html = _result_page(title="Beta Study", journal="Journal B")
+                html = _result_page(title="Beta Study", journal="环境科学学报")
         return (SearchStatus.SUCCESS.value, html, "")
 
     result = asyncio.run(
@@ -353,12 +353,12 @@ def test_duplicate_keeps_more_complete_record(
         if batch.index == 1:
             html = _result_page(
                 title="Digital Economy Study",
-                journal="Management World",
+                journal="环境科学学报",
             )
         else:
             html = _result_page(
                 title=" digital economy study ",
-                journal="management world",
+                journal="环境科学学报",
                 authors=("张三",),
                 citations=8,
                 downloads=12,
@@ -465,7 +465,7 @@ def test_overlapping_authors_merge_candidate_duplicates(
         authors = first_authors if batch.index == 1 else second_authors
         html = _result_page(
             title="Same Study",
-            journal="Journal A",
+            journal="环境科学学报",
             authors=authors,
             citations=9 if batch.index == 2 else None,
         )
@@ -548,7 +548,7 @@ def test_common_author_punctuation_normalizes_to_one_identity(
         author = "Zhang San" if batch.index == 1 else "Ｚｈａｎｇ-San"
         html = _result_page(
             title="Same Study",
-            journal="Journal A",
+            journal="环境科学学报",
             authors=(author,),
             citations=9 if batch.index == 2 else None,
         )
@@ -722,15 +722,15 @@ def test_fields_escalate_in_declared_order_until_enough() -> None:
     assert len(result["records"]) == 9
 
 
-def test_best_field_wins_when_none_reaches_the_limit() -> None:
-    """都不够用时取有效记录最多的那个，而不是最后试的那个。"""
+def test_fields_accumulate_when_none_reaches_the_limit() -> None:
+    """字段不足时保留全部合格唯一记录，而非回退到单个字段。"""
     seen: list[ExpressionBatch] = []
     service = CnkiProfessionalSearchService(
         _executor_yielding({"TI": 1, "SU": 7, "KY": 2, "TKA": 3}, seen))
     result = asyncio.run(service.search_group(
         "碳中和", service_module.CHINESE_ENVIRONMENT_TOP_GROUP, limit=50))
     assert [_field_of(p.expression) for p in seen] == ["TI", "SU", "KY", "TKA"]
-    assert result["topic_field"] == "SU"
+    assert result["topic_field"] == "TKA"
     assert len(result["records"]) == 7
 
 

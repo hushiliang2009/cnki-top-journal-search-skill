@@ -20,12 +20,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .catalog_adapter import DEFAULT_CATALOG, journals_by_group
+from .catalog_adapter import DEFAULT_CATALOG, cnki_scope
 
 from .models import PaperRecord, SearchStatus, is_verifiable_publication_year
 from .professional import (
     DEFAULT_MAX_EXPRESSION_CHARS,
     ExpressionBatch,
+    PlanExecutionResult,
+    SearchGroupPolicy,
+    SourceCategorySpec,
+    TOPIC_FIELD_PRIORITY,
     build_batches,
     build_expression,
     build_topic_expression,
@@ -37,19 +41,19 @@ from .webvpn import BatchCheckpoint, Throttle, run_batches
 
 #: 中文环境顶尖期刊（6 本）——本模式的核心收益，单条表达式即可覆盖。
 CHINESE_ENVIRONMENT_TOP_GROUP = "chinese_environment_top"
-#: 环境 CSSCI 来源期刊（241 本）。那 6 本中文环境顶刊按 highest_priority_wins
-#: 归入 chinese_environment_top，因此这里不含它们。
+#: 其他正式认可中文期刊（60 本）。
+OTHER_FORMALLY_RECOGNIZED_CHINESE_GROUP = "other_formally_recognized_chinese"
+#: 环境 CSSCI 来源期刊（241 本）。
 ENVIRONMENT_CSSCI_GROUP = "environment_cssci"
-SUPPORTED_GROUPS = (CHINESE_ENVIRONMENT_TOP_GROUP, ENVIRONMENT_CSSCI_GROUP)
-#: 结果页左侧「来源类别」分面的取值。环境 CSSCI 只是 CSSCI 的子集，分面单独
-#: 用收不窄到环境学科，因此分面与刊名枚举同时使用，两者都不能省。
-CSSCI_SOURCE_CATEGORY = "CSSCI"
-
-#: 检索字段的优先序：篇名最准，主题次之，关键词第三，篇关摘兜底。
-#: 按此顺序逐个试，**有效记录数够用就停**——每多试一个字段就是一次真实请求，
-#: 而批次间强制 ≥30 秒节流，请求数正是风控最敏感的维度。都不够用时取有效
-#: 记录最多的那个字段，而不是最后试的那个。
-TOPIC_FIELD_PRIORITY = ("TI", "SU", "KY", "TKA")
+#: 北大核心完整目录（1,987 本）。
+PKU_CORE_GROUP = "pku_core"
+SUPPORTED_GROUPS = (
+    CHINESE_ENVIRONMENT_TOP_GROUP,
+    OTHER_FORMALLY_RECOGNIZED_CHINESE_GROUP,
+    ENVIRONMENT_CSSCI_GROUP,
+    PKU_CORE_GROUP,
+)
+CSSCI_SOURCE_CATEGORY = SourceCategorySpec("P0209", "CSSCI")
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +67,24 @@ class BatchOutcome:
     total_rows: int = 0
     excluded_non_journal_rows: int = 0
     detail: str | None = None
+
+
+@dataclass(slots=True)
+class FieldOutcome:
+    topic_field: str
+    eligible_records: list[PaperRecord]
+    excluded_records: list[PaperRecord]
+    incomplete_records: list[PaperRecord]
+    terminal_status: str | None
+    terminal_detail: str | None
+    human_intervention_required: bool
+    source_category_applied: bool
+    source_category_total: int | None
+    batches_completed: int
+    batches_total: int
+    stopped_at_batch: int | None
+    total_rows: int
+    excluded_non_journal_rows: int
 
 
 #: 页面驱动：接收完整执行计划，返回 ``(status, html, url)``。
@@ -87,56 +109,178 @@ class CnkiProfessionalSearchService:
     async def search_group(self, topic: str, group: str, *, limit: int = 20,
                            year_from: int | None = None,
                            year_to: int | None = None) -> dict[str, Any]:
-        """按目录层级检索：期刊清单直接取自综合期刊目录，不手工维护副本。"""
-        if group not in SUPPORTED_GROUPS:
-            raise ValueError(
-                f"CNKI 专业检索只覆盖中文层级 {SUPPORTED_GROUPS}，收到 {group!r}"
-            )
-        summary, field, tried = await self._search_with_field_escalation(
+        """按目录策略累计字段命中，并在目录资格过滤后再限额。"""
+        return await self._search_group_fields(
             topic, group, limit=limit, year_from=year_from, year_to=year_to
         )
-        summary["group"] = group
-        summary["topic_field"] = field
-        summary["topic_fields_tried"] = tried
-        # 两组都是逐本枚举，刊数直接来自环境目录，不写死在代码里。
-        summary["journal_count"] = len(journals_by_group(group, self.catalog))
-        if group == ENVIRONMENT_CSSCI_GROUP:
-            summary["source_category"] = CSSCI_SOURCE_CATEGORY
-        return summary
 
-    async def _search_with_field_escalation(
+    async def _search_group_fields(
         self, topic: str, group: str, *, limit: int,
         year_from: int | None, year_to: int | None,
-    ) -> tuple[dict[str, Any], str, list[str]]:
-        """按 TOPIC_FIELD_PRIORITY 逐个字段试，有效记录数够用就停。
+    ) -> dict[str, Any]:
+        if not 1 <= limit <= 50:
+            raise ValueError("返回数量必须在 1 至 50 之间")
+        policy = build_group_policy(group, catalog=self.catalog)
+        eligible: list[PaperRecord] = []
+        excluded: list[PaperRecord] = []
+        incomplete: list[PaperRecord] = []
+        fields_tried: list[str] = []
+        terminal_status: str | None = None
+        terminal_detail: str | None = None
+        human_intervention_required = False
+        source_category_applied = False
+        source_category_total: int | None = None
+        batches_completed = batches_total = total_rows = excluded_non_journal_rows = 0
+        stopped_at_batch: int | None = None
 
-        命中站点主动阻断（安全验证、登录、限流、拒绝、页面结构变化）时立即
-        停止换字段：继续试探只会把账号推向更严的限制，而且换个字段也不会让
-        风控消失。此时如实上报该次结果。
-        """
-        best: dict[str, Any] | None = None
-        best_field = TOPIC_FIELD_PRIORITY[0]
-        tried: list[str] = []
-        for field in TOPIC_FIELD_PRIORITY:
-            tried.append(field)
+        for topic_field in TOPIC_FIELD_PRIORITY:
+            fields_tried.append(topic_field)
             batches = build_group_plans(
-                topic,
-                group,
-                catalog=self.catalog,
-                max_chars=self.max_expression_chars,
-                year_from=year_from,
+                topic, policy=policy, topic_field=topic_field,
+                max_chars=self.max_expression_chars, year_from=year_from,
                 year_to=year_to,
-                topic_field=field,
             )
-            summary = await self._run(batches, limit)
-            if best is None or len(summary["records"]) > len(best["records"]):
-                best, best_field = summary, field
-            if summary.get("terminal_status") is not None:
-                return summary, field, tried
-            if len(summary["records"]) >= limit:
-                return summary, field, tried
-        assert best is not None
-        return best, best_field, tried
+            outcome = await self._run_field(
+                batches, policy=policy, remaining_limit=limit - len(eligible)
+            )
+            eligible = _merge_candidate_records([*eligible, *outcome.eligible_records])
+            excluded = _merge_candidate_records([*excluded, *outcome.excluded_records])
+            incomplete = _merge_candidate_records([*incomplete, *outcome.incomplete_records])
+            eligible = annotate_and_sort_records(eligible, catalog=self.catalog)[:limit]
+            batches_completed += outcome.batches_completed
+            batches_total += outcome.batches_total
+            total_rows += outcome.total_rows
+            excluded_non_journal_rows += outcome.excluded_non_journal_rows
+            stopped_at_batch = outcome.stopped_at_batch
+            source_category_applied |= outcome.source_category_applied
+            if outcome.source_category_total is not None:
+                source_category_total = outcome.source_category_total
+            human_intervention_required |= outcome.human_intervention_required
+            if outcome.terminal_status is not None:
+                terminal_status = outcome.terminal_status
+                terminal_detail = outcome.terminal_detail
+                human_intervention_required = True
+                break
+            if len(eligible) >= limit:
+                break
+
+        complete = terminal_status is None and len(eligible) >= limit
+        if terminal_status is not None:
+            status = SearchStatus.PARTIAL.value if eligible else terminal_status
+        elif not eligible:
+            status = SearchStatus.NO_RESULTS.value if complete else SearchStatus.PARTIAL.value
+        else:
+            status = SearchStatus.SUCCESS.value if complete and not incomplete else SearchStatus.PARTIAL.value
+        result = {
+            "ok": status in {SearchStatus.SUCCESS.value, SearchStatus.NO_RESULTS.value, SearchStatus.PARTIAL.value},
+            "mode": "webvpn", "status": status, "complete": complete,
+            "group": group,
+            "journal_count": len(policy.journal_titles) if policy.journal_selector == "exact_titles" else None,
+            "source_category": policy.source_category.label if policy.source_category else None,
+            "source_category_applied": source_category_applied,
+            "source_category_total": source_category_total,
+            "batches_completed": batches_completed, "batches_total": batches_total,
+            "stopped_at_batch": stopped_at_batch, "limit_reached": len(eligible) >= limit,
+            "terminal_status": terminal_status,
+            "human_intervention_required": human_intervention_required,
+            "expressions": [], "total_rows": total_rows,
+            "excluded_non_journal_rows": excluded_non_journal_rows,
+            "eligible_record_count": len(eligible),
+            "excluded_out_of_scope_count": len(excluded),
+            "excluded_out_of_scope_records": [record.to_dict() for record in excluded],
+            "topic_fields_tried": fields_tried, "topic_field": fields_tried[-1],
+            "first_page_only": True,
+            "records": [record.to_dict() for record in eligible],
+            "incomplete_records": [record.to_dict() for record in incomplete],
+        }
+        if terminal_status is not None:
+            detail = terminal_detail
+            if not detail and terminal_status == SearchStatus.PAGE_CONTRACT_CHANGED.value:
+                detail = "知网页面结构已变化"
+            if detail:
+                result["terminal_detail"] = detail
+                if status == terminal_status:
+                    result["detail"] = detail
+        return result
+
+    async def _run_field(
+        self, batches: list[ExpressionBatch], *, policy: SearchGroupPolicy,
+        remaining_limit: int,
+    ) -> FieldOutcome:
+        async def execute(batch: ExpressionBatch) -> dict[str, Any]:
+            executed = await self.executor(batch)
+            if isinstance(executed, PlanExecutionResult):
+                status, html = executed.status, executed.html
+                source_applied = executed.source_category_applied
+                source_total = executed.source_category_total
+            else:
+                status, html, _url = executed
+                source_applied = batch.source_category is not None
+                source_total = None
+            if status != SearchStatus.SUCCESS.value:
+                return {"index": batch.index, "status": status,
+                        "source_category_applied": source_applied,
+                        "source_category_total": source_total}
+            try:
+                parsed = parse_public_result_page(html, query=batch.expression, limit=50)
+            except PageContractChanged as exc:
+                return {"index": batch.index,
+                        "status": SearchStatus.PAGE_CONTRACT_CHANGED.value,
+                        "detail": str(exc), "source_category_applied": source_applied,
+                        "source_category_total": source_total}
+            for record in parsed.records:
+                record.topic_match_field = batch.topic_field
+                record.matched_topic_fields = [batch.topic_field] if batch.topic_field else []
+                record.matched_search_groups = [policy.scope_id]
+            return {"index": batch.index, "status": SearchStatus.SUCCESS.value,
+                    "total_rows": parsed.total_rows,
+                    "excluded_non_journal_rows": parsed.excluded_non_journal_rows,
+                    "records": parsed.records, "incomplete_records": parsed.incomplete_records,
+                    "source_category_applied": source_applied,
+                    "source_category_total": source_total}
+
+        def reached_limit(results: list[dict[str, Any]]) -> bool:
+            records = _merge_candidate_records(
+                record for item in results for record in item.get("records", ())
+            )
+            annotated = annotate_and_sort_records(records, catalog=self.catalog)
+            source_applied = (all(item.get("source_category_applied", False) for item in results)
+                              if policy.source_category else False)
+            qualified, _excluded = _partition_eligible(
+                annotated, policy, source_category_applied=source_applied
+            )
+            return len(qualified) >= remaining_limit
+
+        schedule = await run_batches(
+            batches, execute, on_challenge=self.on_challenge, checkpoint=self.checkpoint,
+            throttle=self.throttle, should_stop=reached_limit,
+        )
+        records = _merge_candidate_records(
+            record for item in schedule["results"] for record in item.get("records", ())
+        )
+        annotated = annotate_and_sort_records(records, catalog=self.catalog)
+        source_applied = (all(item.get("source_category_applied", False) for item in schedule["results"])
+                          if policy.source_category else False)
+        eligible, excluded = _partition_eligible(
+            annotated, policy, source_category_applied=source_applied
+        )
+        return FieldOutcome(
+            topic_field=batches[0].topic_field or "", eligible_records=eligible,
+            excluded_records=excluded,
+            incomplete_records=[record for item in schedule["results"]
+                                for record in item.get("incomplete_records", ())],
+            terminal_status=schedule["terminal_status"],
+            terminal_detail=(schedule.get("stopped_result") or {}).get("detail"),
+            human_intervention_required=schedule["human_intervention_required"],
+            source_category_applied=source_applied,
+            source_category_total=next((item["source_category_total"] for item in schedule["results"]
+                                        if item.get("source_category_total") is not None), None),
+            batches_completed=schedule["batches_completed"], batches_total=schedule["batches_total"],
+            stopped_at_batch=schedule["stopped_at_batch"],
+            total_rows=sum(item.get("total_rows", 0) for item in schedule["results"]),
+            excluded_non_journal_rows=sum(item.get("excluded_non_journal_rows", 0)
+                                          for item in schedule["results"]),
+        )
 
     async def search_expression(self, expression: str, *, limit: int = 20) -> dict[str, Any]:
         """直接执行一条使用者自备的专业检索表达式，不做分批。"""
@@ -366,34 +510,116 @@ def _best_record(records: list[PaperRecord]) -> PaperRecord:
             > _record_completeness_score(best)
         ):
             best = record
+    best.topic_match_field = next(
+        (record.topic_match_field for record in records if record.topic_match_field),
+        None,
+    )
+    best.matched_topic_fields = _ordered_metadata(
+        records, "matched_topic_fields", TOPIC_FIELD_PRIORITY
+    )
+    best.matched_search_groups = _ordered_metadata(
+        records, "matched_search_groups", ()
+    )
     return best
+
+
+def _ordered_metadata(
+    records: Iterable[PaperRecord], attribute: str, declared_order: Sequence[str],
+) -> list[str]:
+    encountered: list[str] = []
+    for record in records:
+        for value in getattr(record, attribute):
+            if value and value not in encountered:
+                encountered.append(value)
+    if not declared_order:
+        return encountered
+    return [value for value in declared_order if value in encountered] + [
+        value for value in encountered if value not in declared_order
+    ]
+
+
+def build_group_policy(
+    group: str, *, catalog: Path = DEFAULT_CATALOG,
+) -> SearchGroupPolicy:
+    if group not in SUPPORTED_GROUPS:
+        raise ValueError(f"CNKI 环境专业检索不支持分组 {group!r}")
+    raw = cnki_scope(group, catalog)
+    category = raw["source_category"]
+    return SearchGroupPolicy(
+        scope_id=raw["scope_id"],
+        catalog_version=raw["catalog_version"],
+        journal_selector=raw["journal_selector"],
+        source_category=(
+            None if category is None
+            else SourceCategorySpec(category["code"], category["label"])
+        ),
+        journal_titles=tuple(raw["journal_titles"]),
+        eligible_journal_ids=frozenset(raw["eligible_journal_ids"]),
+        eligible_priority_levels=frozenset(raw["eligible_priority_levels"]),
+        required_index_membership=raw["required_index_membership"],
+        result_filter=raw["result_filter"],
+    )
+
+
+def _partition_eligible(
+    records: Iterable[PaperRecord], policy: SearchGroupPolicy, *,
+    source_category_applied: bool,
+) -> tuple[list[PaperRecord], list[PaperRecord]]:
+    eligible: list[PaperRecord] = []
+    excluded: list[PaperRecord] = []
+    for record in records:
+        matched = (
+            (not policy.source_category or source_category_applied)
+            and record.journal_id in policy.eligible_journal_ids
+            and record.priority_level in policy.eligible_priority_levels
+            and (
+                policy.required_index_membership is None
+                or policy.required_index_membership in record.index_memberships
+            )
+        )
+        (eligible if matched else excluded).append(record)
+    return eligible, excluded
 
 
 def build_group_plans(
     topic: str,
-    group: str,
+    group: str | None = None,
     *,
+    policy: SearchGroupPolicy | None = None,
     catalog: Path = DEFAULT_CATALOG,
     max_chars: int = DEFAULT_MAX_EXPRESSION_CHARS,
     year_from: int | None = None,
     year_to: int | None = None,
     topic_field: str = TOPIC_FIELD_PRIORITY[0],
 ) -> list[ExpressionBatch]:
-    if group in SUPPORTED_GROUPS:
+    resolved_policy = policy or build_group_policy(group or "", catalog=catalog)
+    if resolved_policy.journal_selector == "exact_titles":
         return build_batches(
             topic,
-            journals_by_group(group, catalog),
+            list(resolved_policy.journal_titles),
             year_from=year_from,
             year_to=year_to,
             max_chars=max_chars,
-            source_category=(
-                CSSCI_SOURCE_CATEGORY if group == ENVIRONMENT_CSSCI_GROUP else None
-            ),
             topic_field=topic_field,
+            source_category=resolved_policy.source_category,
+            scope_id=resolved_policy.scope_id,
+            catalog_version=resolved_policy.catalog_version,
         )
-    raise ValueError(
-        f"CNKI 专业检索只覆盖中文层级 {SUPPORTED_GROUPS}，收到 {group!r}"
-    )
+    return [
+        ExpressionBatch(
+            index=1,
+            total=1,
+            journals=(),
+            expression=build_topic_expression(
+                topic, year_from=year_from, year_to=year_to,
+                topic_field=topic_field,
+            ),
+            scope_id=resolved_policy.scope_id,
+            catalog_version=resolved_policy.catalog_version,
+            topic_field=topic_field,
+            source_category=resolved_policy.source_category,
+        )
+    ]
 
 
 def preview_plans(
@@ -437,15 +663,19 @@ def preview_expressions(topic: str, group: str, *, catalog: Path = DEFAULT_CATAL
 
 __all__ = [
     "CHINESE_ENVIRONMENT_TOP_GROUP",
+    "OTHER_FORMALLY_RECOGNIZED_CHINESE_GROUP",
+    "PKU_CORE_GROUP",
     "TOPIC_FIELD_PRIORITY",
     "CSSCI_SOURCE_CATEGORY",
     "ENVIRONMENT_CSSCI_GROUP",
     "SUPPORTED_GROUPS",
     "BatchOutcome",
+    "FieldOutcome",
     "CnkiProfessionalSearchService",
     "ExpressionBatch",
     "ExpressionExecutor",
     "build_group_plans",
+    "build_group_policy",
     "build_expression",
     "build_topic_expression",
     "preview_plans",
