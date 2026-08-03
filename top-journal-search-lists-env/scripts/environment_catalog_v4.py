@@ -3,11 +3,97 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import re
 from typing import Literal, Mapping
 import unicodedata
+
+
+PRIORITY_GROUPS = (
+    "comprehensive_super_journals",
+    "ncs_pnas_environment_flagships",
+    "top_university_highest_consensus",
+    "top_university_high_level",
+    "environment_field_top",
+    "chinese_environment_top",
+    "other_formally_recognized",
+    "environment_ssci",
+    "environment_cssci",
+    "environment_scie",
+    "pku_core_natural_sciences",
+    "pku_core_non_natural_sciences",
+)
+
+_LEVEL_HEADINGS = (
+    "第一级：综合超一流主刊",
+    "第二级：NCS、PNAS及环境旗舰子刊",
+    "第三级：国内顶尖高校最高等级共识期刊",
+    "第四级：国内顶尖高校高等级期刊",
+    "第五级：广义环境学科各细分领域顶尖期刊",
+    "第六级：中文顶尖期刊",
+    "第七级：其他获得正式认可的高水平期刊",
+    "第八级：环境相关SSCI期刊",
+    "第九级：环境相关CSSCI期刊",
+    "第十级：环境相关SCIE期刊",
+    "第十一级：北大中文核心自然科学期刊",
+    "第十二级：北大中文核心非自然科学期刊",
+)
+
+_EXPECTED_LEVEL_COUNTS = (4, 17, 5, 45, 17, 6, 134, 324, 241, 1229, 1181, 561)
+
+_DOCUMENT_EVIDENCE_IDS = {
+    "上海交通大学环境科学与工程学院 AAAAA+（U5）": "sjtu_environment_u5",
+    "上海交通大学环境科学与工程学院 AAAA（U4）": "sjtu_environment_u4",
+    "上海交通大学环境科学与工程学院 AAA（U3）": "sjtu_environment_u3",
+    "上海交通大学环境科学与工程学院 AA（U2）": "sjtu_environment_u2",
+    "上海交通大学环境科学与工程学院 指定中文期刊（U1）": "sjtu_environment_u1",
+    "南京大学环境学院 1区A类（U4）": "nju_environment_u4",
+    "南京大学环境学院 1区B类（U3）": "nju_environment_u3",
+    "南京大学环境学院 2区（U2）": "nju_environment_u2",
+    "复旦大学环境科学与工程系 专业硕士认可期刊（U1）": "fudan_environment_u1",
+    "学术期刊综合目录 内部顺序1": "academic_master_directory_1",
+    "学术期刊综合目录 内部顺序2": "academic_master_directory_2",
+    "学术期刊综合目录 内部顺序3": "academic_master_directory_3",
+    "中国环境科学学会 T1": "csees_t1",
+    "中国环境科学学会 T2": "csees_t2",
+    "中国环境科学学会 T3": "csees_t3",
+}
+
+
+@dataclass(slots=True)
+class CatalogRecord:
+    journal_id: str
+    formal_title: str
+    formal_title_evidence_ids: list[str]
+    aliases: list[str]
+    issn: list[str]
+    eissn: list[str]
+    priority_level: int
+    priority_group: str
+    priority_decision: dict[str, object]
+    ncs_internal_rank: int | None
+    environment_subfields: list[str]
+    subject_categories: list[str]
+    formal_evidence: list[str]
+    evidence_ids: list[str]
+    index_memberships: list[str]
+    index_subject_categories: dict[str, list[str]]
+    source_memberships: list[dict[str, object]]
+    source_catalogs: list[str]
+    catalog_version: str = "4.0"
+    catalog_date: str = "2026-07-29"
+    revision_date: str = "2026-07-31"
+    manual_review_required: bool = False
+    review_reasons: list[str] = field(default_factory=list)
+    cnki_routing: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ControlledAlias:
+    journal_id: str
+    alias: str
+    source: str
 
 
 _WOS_COLUMNS = frozenset(
@@ -310,3 +396,171 @@ def parse_pku_markdown(
     if not records:
         raise ValueError(f"{path} 中没有北大核心期刊记录")
     return records
+
+
+def _split_markdown_breaks(value: str) -> list[str]:
+    return [item.strip() for item in value.split("<br>") if item.strip() and item.strip() != "—"]
+
+
+def _baseline_title(value: str) -> tuple[str, int | None]:
+    parts = _split_markdown_breaks(value)
+    if not parts:
+        raise ValueError("期刊名称不能为空")
+    rank = None
+    for part in parts[1:]:
+        matched = re.fullmatch(r"内部顺序：(\d+)", part)
+        if matched is not None:
+            rank = int(matched.group(1))
+    return parts[0], rank
+
+
+def _baseline_region(path: Path) -> list[tuple[int, str]]:
+    lines = _read_lines(path)
+    try:
+        start = lines.index("## 四、十二级主目录") + 1
+    except ValueError as exc:
+        raise ValueError(f"{path} 缺少十二级主目录") from exc
+
+    try:
+        end = next(
+            index
+            for index in range(start, len(lines))
+            if lines[index].startswith("## 附录一")
+        )
+    except StopIteration as exc:
+        raise ValueError(f"{path} 缺少附录一分界") from exc
+    return [(index + 1, line) for index, line in enumerate(lines[start:end], start)]
+
+
+def _baseline_tables(path: Path) -> list[tuple[int, list[_MarkdownRow]]]:
+    region = _baseline_region(path)
+    tables: list[tuple[int, list[_MarkdownRow]]] = []
+    priority_level: int | None = None
+    line_index = 0
+
+    while line_index < len(region):
+        line_number, line = region[line_index]
+        heading = re.fullmatch(r"###\s+(.+)", line)
+        if heading is not None:
+            try:
+                priority_level = _LEVEL_HEADINGS.index(heading.group(1)) + 1
+            except ValueError as exc:
+                raise ValueError(f"{path}:{line_number} 的分级标题不受支持") from exc
+            line_index += 1
+            continue
+
+        if (
+            priority_level is None
+            or line_index + 1 >= len(region)
+            or not line.lstrip().startswith("|")
+            or not _is_table_separator(region[line_index + 1][1])
+        ):
+            line_index += 1
+            continue
+
+        headers = _table_cells(line)
+        if len(headers) != len(set(headers)):
+            raise ValueError(f"{path}:{line_number} 的表头包含重复列：{headers}")
+        if "序号" not in headers or not {"期刊名称", "基线题名"}.intersection(headers):
+            line_index += 1
+            continue
+
+        rows: list[_MarkdownRow] = []
+        row_index = line_index + 2
+        while row_index < len(region) and region[row_index][1].lstrip().startswith("|"):
+            row_line_number, row_line = region[row_index]
+            cells = _table_cells(row_line)
+            if len(cells) != len(headers):
+                raise ValueError(f"{path}:{row_line_number} 的列数与表头不一致")
+            rows.append(
+                _MarkdownRow(
+                    line_number=row_line_number,
+                    values=dict(zip(headers, cells, strict=True)),
+                )
+            )
+            row_index += 1
+        tables.append((priority_level, rows))
+        line_index = row_index
+
+    return tables
+
+
+def parse_v4_baseline(path: Path) -> list[CatalogRecord]:
+    """解析批准的十二级目录，保留层级、级内顺序和已有稳定编号。"""
+    tables = _baseline_tables(path)
+    table_levels = tuple(level for level, _ in tables)
+    if table_levels != tuple(range(1, 13)):
+        raise ValueError(f"{path} 的十二级表格不完整或顺序错误：{table_levels}")
+
+    records: list[CatalogRecord] = []
+    counts: list[int] = []
+    seen_ids: set[str] = set()
+    seen_titles: set[str] = set()
+    for priority_level, rows in tables:
+        counts.append(len(rows))
+        for row in rows:
+            values = row.values
+            is_generated = "期刊ID" in values or "正式题名" in values
+            if is_generated and "基线题名" not in values:
+                raise ValueError(
+                    f"{path}:{row.line_number} 的生成目录缺少基线题名列"
+                )
+            baseline_cell = values.get("基线题名", values.get("期刊名称", ""))
+            baseline_title, ncs_internal_rank = _baseline_title(baseline_cell)
+            formal_title = values.get("正式题名", baseline_title).strip() or baseline_title
+            journal_id = values.get("期刊ID", "").strip() or f"ENVJ-{len(records) + 1:06d}"
+            if journal_id in seen_ids:
+                raise ValueError(f"{path}:{row.line_number} 的期刊ID重复：{journal_id}")
+            if formal_title in seen_titles:
+                raise ValueError(f"{path}:{row.line_number} 的正式题名重复：{formal_title}")
+            seen_ids.add(journal_id)
+            seen_titles.add(formal_title)
+
+            subfields = _split_markdown_breaks(values.get("环境细分领域", ""))
+            formal_evidence = _split_markdown_breaks(values.get("正式证据", ""))
+            evidence_ids = [
+                _DOCUMENT_EVIDENCE_IDS[item]
+                for item in formal_evidence
+                if item in _DOCUMENT_EVIDENCE_IDS
+            ]
+            records.append(
+                CatalogRecord(
+                    journal_id=journal_id,
+                    formal_title=formal_title,
+                    formal_title_evidence_ids=[],
+                    aliases=[],
+                    issn=[],
+                    eissn=[],
+                    priority_level=priority_level,
+                    priority_group=PRIORITY_GROUPS[priority_level - 1],
+                    priority_decision={"baseline_title": baseline_title},
+                    ncs_internal_rank=ncs_internal_rank,
+                    environment_subfields=subfields,
+                    subject_categories=[],
+                    formal_evidence=formal_evidence,
+                    evidence_ids=evidence_ids,
+                    index_memberships=[],
+                    index_subject_categories={},
+                    source_memberships=[],
+                    source_catalogs=[],
+                )
+            )
+
+    if tuple(counts) != _EXPECTED_LEVEL_COUNTS:
+        raise ValueError(f"{path} 的各级期刊数错误：{tuple(counts)}")
+    return records
+
+
+def priority_signature(
+    records: list[CatalogRecord],
+) -> tuple[tuple[str, int, str, int | None], ...]:
+    """返回用于验证目录身份和判级不可变性的稳定签名。"""
+    return tuple(
+        (
+            record.journal_id,
+            record.priority_level,
+            record.priority_group,
+            record.ncs_internal_rank,
+        )
+        for record in records
+    )
