@@ -869,6 +869,37 @@ def match_source_records(
                 (),
             )
         )
+    expected_index_by_level = {
+        8: "SSCI",
+        9: "CSSCI",
+        10: "SCIE",
+        11: "PKU_CORE",
+        12: "PKU_CORE",
+    }
+    for record in records:
+        expected_index = expected_index_by_level.get(record.priority_level)
+        if expected_index is None or expected_index in record.index_memberships:
+            continue
+        audit.append(
+            AuditRecord(
+                expected_index,
+                "catalog_expectation",
+                "catalog_baseline",
+                0,
+                f"EXPECTED:{expected_index}:{record.journal_id}",
+                record.formal_title,
+                record.formal_title,
+                (record.journal_id,),
+                "expected_index_membership",
+                "expected_but_unmatched",
+                record.journal_id,
+                False,
+                record.priority_level,
+                record.priority_level,
+                True,
+                (expected_index,),
+            )
+        )
     return audit
 
 
@@ -975,18 +1006,6 @@ def build_catalog_bundle(baseline: Path, sources: SourcePaths) -> CatalogBundle:
     zero_intersections = {
         key: value for key, value in all_intersections.items() if not value
     }
-    expected_index_by_level = {
-        8: "SSCI",
-        9: "CSSCI",
-        10: "SCIE",
-        11: "PKU_CORE",
-        12: "PKU_CORE",
-    }
-    expected_but_unmatched_count = sum(
-        expected_index_by_level.get(record.priority_level) not in record.index_memberships
-        for record in records
-        if record.priority_level in expected_index_by_level
-    )
     return CatalogBundle(
         records,
         audit,
@@ -994,6 +1013,6 @@ def build_catalog_bundle(baseline: Path, sources: SourcePaths) -> CatalogBundle:
         intersections,
         zero_intersections,
         len(controlled_aliases),
-        expected_but_unmatched_count,
+        sum(item.status == "expected_but_unmatched" for item in audit),
         sum(item.status == "ambiguous" for item in audit),
     )
