@@ -8,7 +8,7 @@ import pytest
 from cnki_search_env import professional_service as service_module
 from cnki_search_env.catalog_adapter import DEFAULT_CATALOG, lookup_journals
 from cnki_search_env.models import SearchStatus
-from cnki_search_env.professional import ExpressionBatch, SourceCategorySpec
+from cnki_search_env.professional import ExpressionBatch, PlanExecutionResult, SourceCategorySpec
 from cnki_search_env.professional_service import (
     CnkiProfessionalSearchService,
     preview_expressions,
@@ -64,10 +64,25 @@ def _result_page(
 
 
 def _executor(pages: list[tuple[str, str]], seen: list[ExpressionBatch] | None = None):
-    async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
+    """模拟生产执行器：返回 PlanExecutionResult，并如实带上分面已生效的证据。"""
+    async def execute(plan: ExpressionBatch) -> PlanExecutionResult:
         if seen is not None:
             seen.append(plan)
         # 字段升级会多轮执行同一批次，用尽即抛 IndexError 与被测行为无关
+        title, journal = pages[0] if len(pages) == 1 else pages.pop(0)
+        return PlanExecutionResult(
+            status=SearchStatus.SUCCESS.value,
+            html=RESULT_TEMPLATE.format(title=title, journal=journal),
+            url="https://webvpn.example.edu.cn/https/abc/kns8s/defaultresult/index",
+            source_category_applied=plan.source_category is not None,
+            source_category_total=None,
+        )
+    return execute
+
+
+def _tuple_executor(pages: list[tuple[str, str]]):
+    """旧式三元组执行器：没有分面证据，服务只能保守认定分面未生效。"""
+    async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
         title, journal = pages[0] if len(pages) == 1 else pages.pop(0)
         return (SearchStatus.SUCCESS.value,
                 RESULT_TEMPLATE.format(title=title, journal=journal),
@@ -175,10 +190,13 @@ def test_environment_cssci_group_merges_across_every_batch() -> None:
 
 
 def test_duplicate_records_across_batches_are_merged_once() -> None:
-    async def execute(_batch: ExpressionBatch) -> tuple[str, str, str]:
-        return (SearchStatus.SUCCESS.value,
-                RESULT_TEMPLATE.format(title="同一篇论文", journal="农业经济问题"),
-                "https://example.invalid/")
+    async def execute(batch: ExpressionBatch) -> PlanExecutionResult:
+        return PlanExecutionResult(
+            status=SearchStatus.SUCCESS.value,
+            html=RESULT_TEMPLATE.format(title="同一篇论文", journal="农业经济问题"),
+            url="https://example.invalid/",
+            source_category_applied=batch.source_category is not None,
+        )
 
     service = CnkiProfessionalSearchService(execute, max_expression_chars=900)
     result = asyncio.run(service.search_group("碳中和", service_module.ENVIRONMENT_CSSCI_GROUP))
@@ -846,10 +864,11 @@ def test_environment_cssci_excludes_non_level_nine_before_limit() -> None:
                 "<td class='date'>2025-03-11</td><td class='data'>期刊</td></tr>",
             )
         )
-        return (
-            SearchStatus.SUCCESS.value,
-            f"<table class='result-table-list'><tbody>{rows}</tbody></table>",
-            "https://example.invalid/",
+        return PlanExecutionResult(
+            status=SearchStatus.SUCCESS.value,
+            html=f"<table class='result-table-list'><tbody>{rows}</tbody></table>",
+            url="https://example.invalid/",
+            source_category_applied=True,
         )
 
     result = asyncio.run(CnkiProfessionalSearchService(execute).search_group(
@@ -857,3 +876,67 @@ def test_environment_cssci_excludes_non_level_nine_before_limit() -> None:
     ))
     assert [item["priority_level"] for item in result["records"]] == [9]
     assert result["excluded_out_of_scope_count"] == 1
+
+
+PROFESSIONAL_RESULT_KEYS = (
+    "source_category_requested",
+    "source_category_applied",
+    "source_category_total",
+    "source_category_code",
+    "topic_fields_tried",
+    "eligible_record_count",
+    "excluded_out_of_scope_count",
+    "excluded_out_of_scope_records",
+    "already_covered_higher_priority_count",
+    "already_covered_higher_priority_records",
+    "first_page_only",
+    "complete",
+    "human_intervention_required",
+)
+
+
+def test_professional_result_exposes_field_facet_and_scope_counts() -> None:
+    """诊断字段必须恒定存在；缺字段会让调用方把"没筛过"误读成"筛过且为空"。"""
+    service = CnkiProfessionalSearchService(_executor([("某文", "环境科学学报")]))
+    result = asyncio.run(service.search_group("主题", service_module.CHINESE_ENVIRONMENT_TOP_GROUP, limit=1))
+
+    for key in PROFESSIONAL_RESULT_KEYS:
+        assert key in result, key
+    assert result["source_category_requested"] is None
+    assert result["source_category_code"] is None
+    assert result["source_category_applied"] is False
+    assert result["source_category_total"] is None
+    assert result["already_covered_higher_priority_count"] == 0
+    assert result["already_covered_higher_priority_records"] == []
+    assert result["first_page_only"] is True
+
+
+def test_faceted_group_reports_its_requested_source_category() -> None:
+    service = CnkiProfessionalSearchService(_executor([("某文", "环境科学学报")]))
+    result = asyncio.run(service.search_group("主题", service_module.ENVIRONMENT_CSSCI_GROUP, limit=1))
+
+    assert result["source_category_requested"] == "CSSCI"
+    assert result["source_category_code"] == "P0209"
+
+
+def test_custom_expression_reports_no_field_ladder_and_no_facet() -> None:
+    """使用者自备表达式原样单次执行，不套字段阶梯也不加分面。"""
+    service = CnkiProfessionalSearchService(_executor([("某文", "环境科学学报")]))
+    result = asyncio.run(service.search_expression("TI %= '主题'", limit=1))
+
+    for key in PROFESSIONAL_RESULT_KEYS:
+        assert key in result, key
+    assert result["topic_fields_tried"] == []
+    assert result["source_category_requested"] is None
+    assert result["source_category_code"] is None
+    assert result["source_category_applied"] is False
+
+
+def test_legacy_tuple_executor_never_claims_an_unverified_facet() -> None:
+    """三元组执行器拿不到分面证据，只能保守上报未生效。"""
+    service = CnkiProfessionalSearchService(_tuple_executor([("某文", "环境科学学报")]))
+    result = asyncio.run(service.search_group("主题", service_module.ENVIRONMENT_CSSCI_GROUP, limit=1))
+
+    assert result["source_category_applied"] is False
+    # 分面未经证实 => 结果页来源类别筛选的分组不得产出任何"合格"记录。
+    assert result["records"] == []

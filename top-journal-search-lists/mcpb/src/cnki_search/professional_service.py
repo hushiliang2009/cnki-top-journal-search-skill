@@ -107,26 +107,6 @@ class CnkiProfessionalSearchService:
         return await self._search_group_fields(
             topic, group, limit=limit, year_from=year_from, year_to=year_to
         )
-        if group not in SUPPORTED_GROUPS:
-            raise ValueError(
-                f"CNKI 专业检索只覆盖中文层级 {SUPPORTED_GROUPS}，收到 {group!r}"
-            )
-        batches = build_group_plans(
-            topic,
-            group,
-            catalog=self.catalog,
-            max_chars=self.max_expression_chars,
-            year_from=year_from,
-            year_to=year_to,
-        )
-        summary = await self._run(batches, limit)
-        summary["group"] = group
-        if group == CHINESE_TOP_GROUP:
-            summary["journal_count"] = 13
-        else:
-            summary["journal_count"] = None
-            summary["source_category"] = "CSSCI"
-        return summary
 
     async def _search_group_fields(
         self,
@@ -203,6 +183,12 @@ class CnkiProfessionalSearchService:
             "group": group,
             "journal_count": len(policy.journal_titles) if policy.journal_selector == "exact_titles" else None,
             "source_category": policy.source_category.label if policy.source_category else None,
+            "source_category_requested": (
+                policy.source_category.label if policy.source_category else None
+            ),
+            "source_category_code": (
+                policy.source_category.code if policy.source_category else None
+            ),
             "source_category_applied": source_category_applied,
             "source_category_total": source_category_total,
             "batches_completed": batches_completed,
@@ -219,6 +205,10 @@ class CnkiProfessionalSearchService:
             "excluded_out_of_scope_records": [record.to_dict() for record in excluded],
             "topic_fields_tried": fields_tried,
             "topic_field": fields_tried[-1],
+            # 单组 MCP 调用没有 Skill 工作流中"已检索更高层级分组"的上下文，
+            # 因此恒为空；字段仍必须存在，缺字段会被误读成"没有重复项"之外的含义。
+            "already_covered_higher_priority_count": 0,
+            "already_covered_higher_priority_records": [],
             "first_page_only": True,
             "records": [record.to_dict() for record in eligible],
             "incomplete_records": [record.to_dict() for record in incomplete],
@@ -253,7 +243,8 @@ class CnkiProfessionalSearchService:
                 source_total = executed.source_category_total
             else:
                 status, html, _url = executed
-                source_applied = batch.source_category is not None
+                # 三元组执行器不返回分面证据；乐观上报会把未筛选结果说成已筛选。
+                source_applied = False
                 source_total = None
             if status != SearchStatus.SUCCESS.value:
                 return {
@@ -354,7 +345,12 @@ class CnkiProfessionalSearchService:
 
     async def _run(self, batches: list[ExpressionBatch], limit: int) -> dict[str, Any]:
         async def execute(batch: ExpressionBatch) -> dict[str, Any]:
-            status, html, _url = await self.executor(batch)
+            # 生产执行器返回 PlanExecutionResult；只解三元组会在实机直接 TypeError。
+            executed = await self.executor(batch)
+            if isinstance(executed, PlanExecutionResult):
+                status, html = executed.status, executed.html
+            else:
+                status, html, _url = executed
             if status != SearchStatus.SUCCESS.value:
                 return {"index": batch.index, "status": status}
             try:
@@ -441,6 +437,19 @@ class CnkiProfessionalSearchService:
             "expressions": [batch.expression for batch in batches],
             "total_rows": total_rows,
             "excluded_non_journal_rows": excluded,
+            # 自备表达式原样单次执行：不套 TI→SU→KY→TKA 阶梯，也不加来源类别分面。
+            # 诊断字段仍恒定存在，调用方无需按调用形式分支解析。
+            "topic_fields_tried": [],
+            "source_category_requested": None,
+            "source_category_code": None,
+            "source_category_applied": False,
+            "source_category_total": None,
+            "eligible_record_count": len(annotated),
+            "excluded_out_of_scope_count": 0,
+            "excluded_out_of_scope_records": [],
+            "already_covered_higher_priority_count": 0,
+            "already_covered_higher_priority_records": [],
+            "first_page_only": True,
             "records": [record.to_dict() for record in annotated],
             "incomplete_records": [record.to_dict() for record in incomplete],
         }
@@ -703,40 +712,6 @@ def build_group_plans(
             source_category=resolved_policy.source_category,
         )
     ]
-
-
-def _legacy_build_group_plans(
-    topic: str,
-    group: str,
-    *,
-    catalog: Path = DEFAULT_CATALOG,
-    max_chars: int = DEFAULT_MAX_EXPRESSION_CHARS,
-    year_from: int | None = None,
-    year_to: int | None = None,
-) -> list[ExpressionBatch]:
-    if group == CHINESE_TOP_GROUP:
-        return build_batches(
-            topic,
-            journals_by_group(group, catalog),
-            year_from=year_from,
-            year_to=year_to,
-            max_chars=max_chars,
-        )
-    if group == CSSCI_GROUP:
-        return [
-            ExpressionBatch(
-                index=1,
-                total=1,
-                journals=(),
-                expression=build_topic_expression(
-                    topic, year_from=year_from, year_to=year_to
-                ),
-                source_category="CSSCI",
-            )
-        ]
-    raise ValueError(
-        f"CNKI 专业检索只覆盖中文层级 {SUPPORTED_GROUPS}，收到 {group!r}"
-    )
 
 
 def preview_plans(

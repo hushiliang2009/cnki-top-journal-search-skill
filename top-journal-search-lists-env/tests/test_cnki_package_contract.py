@@ -299,6 +299,15 @@ def test_webvpn_e2e_helper_prints_only_the_sanitized_summary(
                 "status": "success",
                 "batches_completed": 1,
                 "batches_total": 1,
+                "topic_fields_tried": ["TI", "SU"],
+                "source_category_code": "P0209",
+                "source_category_applied": True,
+                "source_category_total": 2270,
+                "eligible_record_count": 1,
+                "excluded_out_of_scope_count": 0,
+                "first_page_only": True,
+                "complete": True,
+                "human_intervention_required": False,
                 "records": [{
                     "title": "数字化转型与企业创新",
                     "journal_raw": "管理世界",
@@ -356,6 +365,13 @@ def test_webvpn_e2e_helper_prints_only_the_sanitized_summary(
         "record_count": 1,
         "batches_completed": 1,
         "batches_total": 1,
+        "topic_fields_tried": ["TI", "SU"],
+        "source_category_code": "P0209",
+        "source_category_applied": True,
+        "eligible_record_count": 1,
+        "first_page_only": True,
+        "complete": True,
+        "human_intervention_required": False,
         "sample": [{
             "title": "数字化转型与企业创新",
             "journal_raw": "管理世界",
@@ -1020,3 +1036,71 @@ def test_documentation_describes_only_ephemeral_memory_cache(skill_root: Path) -
     expected = "不持久化缓存，运行期仅24小时内存缓存"
     for relative in ("SKILL.md", "README.md", "references/cnki-search-env-reference.md"):
         assert expected in (skill_root / relative).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "poisoned",
+    [
+        {"topic_fields_tried": ["TI", "AB"]},
+        {"topic_fields_tried": "TI"},
+        {"source_category_code": "P9999"},
+        {"source_category_applied": "true"},
+        {"eligible_record_count": "1"},
+        {"first_page_only": None},
+        {"complete": 1},
+        {"human_intervention_required": "no"},
+    ],
+)
+def test_attended_e2e_summary_rejects_out_of_contract_diagnostics(
+    skill_root: Path, poisoned: dict,
+) -> None:
+    """摘要字段是闭集；越界值必须整体失败关闭，而不是原样透传给发布记录。"""
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    result = {
+        "status": "success",
+        "batches_completed": 1,
+        "batches_total": 1,
+        "topic_fields_tried": ["TI"],
+        "source_category_code": "P0209",
+        "source_category_applied": True,
+        "eligible_record_count": 0,
+        "first_page_only": True,
+        "complete": True,
+        "human_intervention_required": False,
+        "records": [],
+    }
+    result.update(poisoned)
+
+    with pytest.raises(helper.UnsafeOutputError):
+        helper._summary(result, "chinese_environment_top")
+
+
+def test_attended_e2e_summary_keeps_only_safe_release_diagnostics(
+    skill_root: Path,
+) -> None:
+    """字段与分面证据可以进摘要，凭据、链接、HTML 一律不行。"""
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    summary = helper._summary({
+        "status": "success",
+        "batches_completed": 1,
+        "batches_total": 1,
+        "topic_fields_tried": ["TI", "SU"],
+        "source_category_code": "P0209",
+        "source_category_applied": True,
+        "eligible_record_count": 3,
+        "first_page_only": True,
+        "complete": True,
+        "human_intervention_required": False,
+        "records": [],
+    }, "chinese_environment_top")
+
+    assert summary["topic_fields_tried"] == ["TI", "SU"]
+    assert summary["source_category_code"] == "P0209"
+    assert summary["source_category_applied"] is True
+    assert summary["eligible_record_count"] == 3
+    assert summary["first_page_only"] is True
+    assert summary["complete"] is True
+    assert summary["human_intervention_required"] is False
+    serialized = json.dumps(summary, ensure_ascii=False).casefold()
+    for forbidden in ("cookie", "token", "html", "url", "password", "download"):
+        assert forbidden not in serialized

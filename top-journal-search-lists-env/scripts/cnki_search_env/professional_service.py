@@ -87,9 +87,13 @@ class FieldOutcome:
     excluded_non_journal_rows: int
 
 
-#: 页面驱动：接收完整执行计划，返回 ``(status, html, url)``。
+#: 页面驱动：接收完整执行计划，返回 ``PlanExecutionResult``；
+#: 旧式三元组 ``(status, html, url)`` 仍被接受，但拿不到分面证据。
 #: 真实实现驱动浏览器；测试注入假实现即可完全离线。
-ExpressionExecutor = Callable[[ExpressionBatch], Awaitable[tuple[str, str, str]]]
+ExpressionExecutor = Callable[
+    [ExpressionBatch],
+    Awaitable[tuple[str, str, str] | PlanExecutionResult],
+]
 
 
 class CnkiProfessionalSearchService:
@@ -177,6 +181,12 @@ class CnkiProfessionalSearchService:
             "group": group,
             "journal_count": len(policy.journal_titles) if policy.journal_selector == "exact_titles" else None,
             "source_category": policy.source_category.label if policy.source_category else None,
+            "source_category_requested": (
+                policy.source_category.label if policy.source_category else None
+            ),
+            "source_category_code": (
+                policy.source_category.code if policy.source_category else None
+            ),
             "source_category_applied": source_category_applied,
             "source_category_total": source_category_total,
             "batches_completed": batches_completed, "batches_total": batches_total,
@@ -189,13 +199,14 @@ class CnkiProfessionalSearchService:
             "excluded_out_of_scope_count": len(excluded),
             "excluded_out_of_scope_records": [record.to_dict() for record in excluded],
             "topic_fields_tried": fields_tried, "topic_field": fields_tried[-1],
+            # 单组 MCP 调用没有 Skill 工作流中"已检索更高层级分组"的上下文，
+            # 因此恒为空；字段仍必须存在，缺字段会被误读成"没有重复项"之外的含义。
+            "already_covered_higher_priority_count": 0,
+            "already_covered_higher_priority_records": [],
             "first_page_only": True,
             "records": [record.to_dict() for record in eligible],
             "incomplete_records": [record.to_dict() for record in incomplete],
         }
-        if group == PKU_CORE_GROUP:
-            # 单组 MCP 调用没有 Skill 工作流中已检索高层级分组的上下文。
-            result["already_covered_higher_priority_count"] = 0
         if terminal_status is not None:
             detail = terminal_detail
             if not detail and terminal_status == SearchStatus.PAGE_CONTRACT_CHANGED.value:
@@ -218,7 +229,8 @@ class CnkiProfessionalSearchService:
                 source_total = executed.source_category_total
             else:
                 status, html, _url = executed
-                source_applied = batch.source_category is not None
+                # 三元组执行器不返回分面证据；乐观上报会把未筛选结果说成已筛选。
+                source_applied = False
                 source_total = None
             if status != SearchStatus.SUCCESS.value:
                 return {"index": batch.index, "status": status,
@@ -292,7 +304,12 @@ class CnkiProfessionalSearchService:
 
     async def _run(self, batches: list[ExpressionBatch], limit: int) -> dict[str, Any]:
         async def execute(batch: ExpressionBatch) -> dict[str, Any]:
-            status, html, _url = await self.executor(batch)
+            # 生产执行器返回 PlanExecutionResult；只解三元组会在实机直接 TypeError。
+            executed = await self.executor(batch)
+            if isinstance(executed, PlanExecutionResult):
+                status, html = executed.status, executed.html
+            else:
+                status, html, _url = executed
             if status != SearchStatus.SUCCESS.value:
                 return {"index": batch.index, "status": status}
             try:
@@ -379,6 +396,19 @@ class CnkiProfessionalSearchService:
             "expressions": [batch.expression for batch in batches],
             "total_rows": total_rows,
             "excluded_non_journal_rows": excluded,
+            # 自备表达式原样单次执行：不套 TI→SU→KY→TKA 阶梯，也不加来源类别分面。
+            # 诊断字段仍恒定存在，调用方无需按调用形式分支解析。
+            "topic_fields_tried": [],
+            "source_category_requested": None,
+            "source_category_code": None,
+            "source_category_applied": False,
+            "source_category_total": None,
+            "eligible_record_count": len(annotated),
+            "excluded_out_of_scope_count": 0,
+            "excluded_out_of_scope_records": [],
+            "already_covered_higher_priority_count": 0,
+            "already_covered_higher_priority_records": [],
+            "first_page_only": True,
             "records": [record.to_dict() for record in annotated],
             "incomplete_records": [record.to_dict() for record in incomplete],
         }
