@@ -77,20 +77,40 @@ def test_skill_and_packaging_texts_use_only_relative_portable_paths(
         assert "/home/" not in text, path
 
 
+ENV_DOCS = ("SKILL.md", "README.md", "references/cnki-search-env-reference.md")
+
+
+def _section_containing(text: str, needle: str) -> str:
+    """取包含 needle 的那个段落，避免关键词分散在全文各处也能凑齐断言。"""
+    assert needle in text, needle
+    blocks = [block for block in text.split("\n\n") if needle in block]
+    return "\n".join(blocks)
+
+
 def test_environment_docs_state_one_pku_scope_and_global_order(
     skill_root: Path,
 ) -> None:
-    text = "\n".join(
-        (skill_root / relative).read_text(encoding="utf-8")
-        for relative in (
-            "SKILL.md", "README.md", "references/cnki-search-env-reference.md",
-        )
-    )
-    assert "other_formally_recognized_chinese" in text
-    assert "pku_core" in text
-    assert "P01" in text
-    assert "第6级、第7级中文期刊、第9级CSSCI、第11—12级北大核心" in text
-    assert "第11级和第12级不得分别重复检索" in text
+    # 逐文件校验：拼接后断言会让"任一份写到就全过"，与四组顺序需处处一致的意图不符。
+    for relative in ENV_DOCS:
+        text = (skill_root / relative).read_text(encoding="utf-8")
+        assert "other_formally_recognized_chinese" in text, relative
+        assert "pku_core" in text, relative
+        assert "P01" in text, relative
+        assert "第6级、第7级中文期刊、第9级CSSCI、第11—12级北大核心" in text, relative
+        assert "第11级和第12级不得分别重复检索" in text, relative
+
+
+def test_environment_docs_state_the_pku_core_membership_span(
+    skill_root: Path,
+) -> None:
+    """1987 横跨 1—12 级；写成"只有第11—12级"会让调用方误判组内合格范围。"""
+    for relative in ENV_DOCS:
+        text = (skill_root / relative).read_text(encoding="utf-8")
+        block = _section_containing(text, "1987")
+        assert "1742" in block, relative
+        assert "245" in block, relative
+        assert "横跨" in block, relative
+        assert "1—12" in block, relative
 
 
 def test_environment_docs_state_the_field_and_facet_contract(
@@ -112,27 +132,38 @@ def test_environment_docs_reference_the_v4_twelve_level_catalog(
     skill_root: Path,
 ) -> None:
     """目录已升到 v4.0 十二级；文档仍写 v3.0 十级会让判级依据对不上。"""
-    for relative in ("SKILL.md", "README.md",
-                     "references/cnki-search-env-reference.md"):
+    # agents/openai.yaml 也在对外描述层级，漏掉它就没人拦得住"十级"回归。
+    for relative in (*ENV_DOCS, "agents/openai.yaml"):
         text = (skill_root / relative).read_text(encoding="utf-8")
         assert "v3.0" not in text, relative
         assert "十级" not in text, relative
+        assert "ten-level" not in text, relative
     skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
     assert "环境科学与工程学科顶尖期刊目录_v4.0.md" in skill
     assert "pku_core_natural_sciences" in skill
     assert "pku_core_non_natural_sciences" in skill
+    assert not (skill_root / "references"
+                / "环境科学与工程学科顶尖期刊目录_v3.0.md").exists()
 
 
 def test_environment_docs_state_the_single_group_diagnostic_boundaries(
     skill_root: Path,
 ) -> None:
-    """单组调用的两个语义边界必须写明，否则调用方会误读诊断字段。"""
-    text = "\n".join(
-        (skill_root / relative).read_text(encoding="utf-8")
-        for relative in (
-            "SKILL.md", "references/cnki-search-env-reference.md",
-        )
-    )
-    assert "already_covered_higher_priority_count" in text
-    assert "excluded_out_of_scope_records" in text
-    assert "source_category_applied" in text
+    """光提到字段名不够：语义写反了照样能通过，所以按段落锚定正反两面。"""
+    for relative in ("SKILL.md", "references/cnki-search-env-reference.md"):
+        text = (skill_root / relative).read_text(encoding="utf-8")
+
+        covered = _section_containing(text, "already_covered_higher_priority_count")
+        assert "单组" in covered, relative
+        assert "恒为 0" in covered, relative
+        assert "不代表" in covered or "不等于" in covered, relative
+
+        excluded = _section_containing(text, "excluded_out_of_scope_records")
+        assert "不占限额" in excluded, relative
+
+        applied = _section_containing(text, "source_category_applied")
+        assert "合取" in applied, relative
+        assert "低报" in applied, relative
+
+        for wrong in ("跨组去重结果", "已扣除重复", "组外记录计入限额", "乐观上报"):
+            assert wrong not in text, (relative, wrong)

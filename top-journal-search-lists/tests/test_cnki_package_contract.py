@@ -1144,10 +1144,12 @@ def test_professional_documentation_states_field_and_facet_contract(
     for relative in ("SKILL.md", "README.md", "references/cnki-search-reference.md"):
         text = (skill_root / relative).read_text(encoding="utf-8")
         assert "TI → SU → KY → TKA" in text, relative
-        assert "累计" in text, relative
+        # 只查"累计"二字太松：写成"累计取最多的那个字段"也能过。
+        assert "累计此前字段尚未取得" in text, relative
         assert "来源类别不是专业检索字段" in text, relative
-        assert "P0209" in text, relative
+        assert "P0209" in text and "不写入" in text, relative
         assert "first_page_only" in text, relative
+        assert "complete" in text, relative
 
 
 def test_professional_documentation_drops_the_best_field_wording(
