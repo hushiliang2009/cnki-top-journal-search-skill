@@ -2,9 +2,9 @@
   "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
   "manifest_version": "0.4",
   "name": "cnki-search",
-  "display_name": "CNKI Public Theme Search",
-  "version": "0.4.2",
-  "description": "Public CNKI theme search with master-journal classification; no login or downloads.",
+  "display_name": "CNKI Journal Search",
+  "version": "0.5.0",
+  "description": "Public CNKI topic search and attended institutional-WebVPN professional search with master-journal classification; no downloads or unattended login.",
   "author": {
     "name": "Top Journal Search Lists"
   },
@@ -17,7 +17,8 @@
     }
   },
   "tools": [
-    {"name": "cnki_search", "description": "Search the public CNKI homepage by topic and rank first-page journal records."}
+    {"name": "cnki_search", "description": "Search the public CNKI homepage by topic and rank first-page journal records."},
+    {"name": "cnki_professional_search", "description": "Run attended CNKI professional journal search through institutional WebVPN; the user must sign in, keep the browser open, and complete security checks."}
   ],
   "compatibility": {
     "platforms": ["darwin", "linux", "win32"],
