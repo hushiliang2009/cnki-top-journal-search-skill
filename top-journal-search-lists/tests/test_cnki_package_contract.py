@@ -1137,25 +1137,44 @@ def test_attended_e2e_summary_requires_every_diagnostic_key(
         helper._summary(result, "group")
 
 
+PROFESSIONAL_DOCS = ("SKILL.md", "README.md", "references/cnki-search-reference.md")
+
+
+def _section_containing(text: str, needle: str) -> str:
+    """取包含 needle 的那个段落，避免关键词分散在全文各处也能凑齐断言。
+
+    依赖 ``Path.read_text`` 的 universal newlines：这些文档是 CRLF，若改用
+    ``read_bytes().decode()``，``\\n\\n`` 永远匹配不到，整篇会退化成一个段落，
+    锚定彻底失效而测试照样全绿。
+    """
+    assert needle in text, needle
+    blocks = [block for block in text.split("\n\n") if needle in block]
+    return "\n".join(blocks)
+
+
 def test_professional_documentation_states_field_and_facet_contract(
     skill_root: Path,
 ) -> None:
     """文档不得再声称"取记录最多的字段"或把来源类别写成检索字段。"""
-    for relative in ("SKILL.md", "README.md", "references/cnki-search-reference.md"):
+    for relative in PROFESSIONAL_DOCS:
         text = (skill_root / relative).read_text(encoding="utf-8")
         assert "TI → SU → KY → TKA" in text, relative
         # 只查"累计"二字太松：写成"累计取最多的那个字段"也能过。
         assert "累计此前字段尚未取得" in text, relative
         assert "来源类别不是专业检索字段" in text, relative
         assert "P0209" in text and "不写入" in text, relative
-        assert "first_page_only" in text, relative
-        assert "complete" in text, relative
+        # 段落锚定：`complete` 是普通英文词，"提到即通过"等于没测。
+        page = _section_containing(text, "first_page_only")
+        assert "只读取当前页" in page or "只读当前页" in page, relative
+        assert "50" in page, relative
+        assert "complete=false" in _section_containing(text, "complete=false"), relative
+        assert "自动翻页" not in text, relative
 
 
 def test_professional_documentation_drops_the_best_field_wording(
     skill_root: Path,
 ) -> None:
-    for relative in ("SKILL.md", "README.md", "references/cnki-search-reference.md"):
+    for relative in PROFESSIONAL_DOCS:
         text = (skill_root / relative).read_text(encoding="utf-8")
         for stale in ("取有效记录最多的那个字段", "逐级替换"):
             assert stale not in text, (relative, stale)

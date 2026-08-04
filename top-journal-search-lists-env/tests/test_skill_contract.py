@@ -81,10 +81,28 @@ ENV_DOCS = ("SKILL.md", "README.md", "references/cnki-search-env-reference.md")
 
 
 def _section_containing(text: str, needle: str) -> str:
-    """取包含 needle 的那个段落，避免关键词分散在全文各处也能凑齐断言。"""
+    """取包含 needle 的那个段落，避免关键词分散在全文各处也能凑齐断言。
+
+    依赖 ``Path.read_text`` 的 universal newlines：这些文档是 CRLF，若改用
+    ``read_bytes().decode()``，``\\n\\n`` 永远匹配不到，整篇会退化成一个段落，
+    锚定彻底失效而测试照样全绿。
+    """
     assert needle in text, needle
     blocks = [block for block in text.split("\n\n") if needle in block]
     return "\n".join(blocks)
+
+
+def _bullet_containing(text: str, needle: str) -> str:
+    """取包含 needle 的那一条列表项。
+
+    同一段里连排三条 bullet 时，段落级锚定退化成"这些短语在这个块里都出现过"，
+    归属写反了抓不到；按 bullet 切开才能真正逐字段锚定。
+    """
+    section = _section_containing(text, needle)
+    for item in section.split("\n- "):
+        if needle in item:
+            return item
+    raise AssertionError(needle)
 
 
 def test_environment_docs_state_one_pku_scope_and_global_order(
@@ -107,8 +125,9 @@ def test_environment_docs_state_the_pku_core_membership_span(
     for relative in ENV_DOCS:
         text = (skill_root / relative).read_text(encoding="utf-8")
         block = _section_containing(text, "1987")
-        assert "1742" in block, relative
-        assert "245" in block, relative
+        # 整句锚定：只查两个数字出现，把 1742 和 245 对调也照样能过。
+        assert "1742 本位于第11—12级" in block, relative
+        assert "245 本已在更高" in block, relative
         assert "横跨" in block, relative
         assert "1—12" in block, relative
 
@@ -149,21 +168,27 @@ def test_environment_docs_reference_the_v4_twelve_level_catalog(
 def test_environment_docs_state_the_single_group_diagnostic_boundaries(
     skill_root: Path,
 ) -> None:
-    """光提到字段名不够：语义写反了照样能通过，所以按段落锚定正反两面。"""
+    """光提到字段名不够：语义写反了照样能通过，所以按 bullet 锚定正反两面。
+
+    三条诊断项连排在同一个列表块里，段落级锚定会退化成"这些短语在块里都出现
+    过"——把「不占限额」挪到别的条目也抓不到，因此必须切到 bullet 粒度。
+    """
     for relative in ("SKILL.md", "references/cnki-search-env-reference.md"):
         text = (skill_root / relative).read_text(encoding="utf-8")
 
-        covered = _section_containing(text, "already_covered_higher_priority_count")
+        covered = _bullet_containing(text, "already_covered_higher_priority_count")
         assert "单组" in covered, relative
         assert "恒为 0" in covered, relative
         assert "不代表" in covered or "不等于" in covered, relative
 
-        excluded = _section_containing(text, "excluded_out_of_scope_records")
+        excluded = _bullet_containing(text, "excluded_out_of_scope_records")
         assert "不占限额" in excluded, relative
+        assert "恒为 0" not in excluded, relative
 
-        applied = _section_containing(text, "source_category_applied")
+        applied = _bullet_containing(text, "source_category_applied")
         assert "合取" in applied, relative
         assert "低报" in applied, relative
+        assert "不占限额" not in applied, relative
 
         for wrong in ("跨组去重结果", "已扣除重复", "组外记录计入限额", "乐观上报"):
             assert wrong not in text, (relative, wrong)
