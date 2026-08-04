@@ -1180,3 +1180,28 @@ def test_professional_documentation_drops_the_best_field_wording(
         text = (skill_root / relative).read_text(encoding="utf-8")
         for stale in ("取有效记录最多的那个字段", "逐级替换"):
             assert stale not in text, (relative, stale)
+
+
+def test_v050_readme_names_exact_release_and_coexistence_contract(
+    skill_root: Path,
+) -> None:
+    text = (skill_root / "README.md").read_text(encoding="utf-8")
+    for value in (
+        "0.5.0",
+        "top-journal-search-lists_Skill.zip",
+        "cnki-search.mcpb",
+        "checksums.sha256",
+        "top-journal-search-lists-env",
+        "cnki-search-env",
+        "互不覆盖",
+    ):
+        assert value in text, value
+
+
+def test_v050_workflow_documentation_from_algorithm_plan_remains_present(
+    skill_root: Path,
+) -> None:
+    text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+    assert "TI → SU → KY → TKA" in text
+    assert "来源类别不是专业检索字段" in text
+    assert "P0209" in text

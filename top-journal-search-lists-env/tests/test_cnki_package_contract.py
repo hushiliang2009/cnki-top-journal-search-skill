@@ -1134,3 +1134,21 @@ def test_attended_e2e_summary_requires_every_diagnostic_key(
 
     with pytest.raises(helper.UnsafeOutputError):
         helper._summary(result, "group")
+
+
+def test_v030_readme_names_exact_release_catalog_and_coexistence_contract(
+    skill_root: Path,
+) -> None:
+    text = (skill_root / "README.md").read_text(encoding="utf-8")
+    for value in (
+        "0.3.0",
+        "top-journal-search-lists-env_Skill.zip",
+        "cnki-search-env.mcpb",
+        "checksums.sha256",
+        "环境科学与工程学科顶尖期刊目录_v4.0.md",
+        "environment_journal_catalog_v4.0.json",
+        "top-journal-search-lists",
+        "cnki-search",
+        "互不覆盖",
+    ):
+        assert value in text, value
