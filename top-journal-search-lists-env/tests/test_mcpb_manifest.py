@@ -338,3 +338,34 @@ def test_release_build_excludes_unlisted_and_state_baits(skill_root: Path, tmp_p
         ]
     with zipfile.ZipFile(mcpb_zip) as archive:
         assert archive.namelist() == list(EXPECTED_MCPB_RELATIVE)
+
+
+RUNTIME_MODULES = (
+    "models.py",
+    "catalog_adapter.py",
+    "professional.py",
+    "professional_service.py",
+    "ranking.py",
+    "webvpn.py",
+    "mcp_server.py",
+)
+
+
+@pytest.mark.parametrize("name", RUNTIME_MODULES)
+def test_modified_runtime_module_matches_mcpb_mirror(
+    skill_root: Path, name: str,
+) -> None:
+    """镜像漂移不会让任何测试变红，只会让发布包与源码行为不同——只能显式钉住。"""
+    source = skill_root / "scripts" / "cnki_search_env" / name
+    mirror = skill_root / "mcpb" / "src" / "cnki_search_env" / name
+    assert source.read_bytes() == mirror.read_bytes(), name
+
+
+def test_runtime_docstrings_do_not_claim_a_ten_level_catalog(
+    skill_root: Path,
+) -> None:
+    """环境目录已是十二级；运行时 docstring 仍写十级会误导后续维护者。"""
+    for base in ("scripts/cnki_search_env", "mcpb/src/cnki_search_env"):
+        for path in sorted((skill_root / base).glob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            assert "十级期刊目录" not in text, path.name

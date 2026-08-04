@@ -5,7 +5,7 @@
 1. :mod:`professional` —— 按知网官方语法构造表达式并分批
 2. :mod:`webvpn` —— 会话、节流、风控暂停与断点续跑
 3. :func:`results.parse_public_result_page` —— 结果页解析（与公开模式同一套契约）
-4. :func:`ranking.annotate_and_sort_records` —— 十级期刊目录标注与排序
+4. :func:`ranking.annotate_and_sort_records` —— 十二级环境期刊目录标注与排序
 
 检索范围**只限中文学术期刊论文**。这一约束靠三层保证，缺一不可：表达式层不使用
 跨库字段；页面层由调用方把检索范围设为学术期刊、语种设为中文；解析层由

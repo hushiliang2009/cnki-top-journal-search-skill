@@ -297,3 +297,23 @@ def test_release_build_excludes_unlisted_and_state_baits(skill_root: Path, tmp_p
         ]
     with zipfile.ZipFile(mcpb_zip) as archive:
         assert archive.namelist() == list(EXPECTED_MCPB_RELATIVE)
+
+
+RUNTIME_MODULES = (
+    "models.py",
+    "professional.py",
+    "professional_service.py",
+    "ranking.py",
+    "webvpn.py",
+    "mcp_server.py",
+)
+
+
+@pytest.mark.parametrize("name", RUNTIME_MODULES)
+def test_modified_runtime_module_matches_mcpb_mirror(
+    skill_root: Path, name: str,
+) -> None:
+    """镜像漂移不会让任何测试变红，只会让发布包与源码行为不同——只能显式钉住。"""
+    source = skill_root / "scripts" / "cnki_search" / name
+    mirror = skill_root / "mcpb" / "src" / "cnki_search" / name
+    assert source.read_bytes() == mirror.read_bytes(), name
