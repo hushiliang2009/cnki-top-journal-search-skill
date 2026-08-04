@@ -142,7 +142,12 @@ def test_environment_docs_state_the_field_and_facet_contract(
         assert "TI → SU → KY → TKA" in text, relative
         assert "累计" in text, relative
         assert "来源类别不是专业检索字段" in text, relative
-        assert "first_page_only" in text, relative
+        # 整句锚定：不锚"哪个布尔值触发"的话，把 true 改成 false 语义反转仍全绿。
+        assert "`first_page_only=true` 表示" in text, relative
+        page = _section_containing(text, "first_page_only")
+        assert "只读取当前页" in page or "只读当前页" in page, relative
+        assert "50" in page, relative
+        assert "自动翻页" not in text, relative
         for stale in ("取有效记录最多的那个字段", "逐级替换"):
             assert stale not in text, (relative, stale)
 

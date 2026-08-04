@@ -1163,11 +1163,13 @@ def test_professional_documentation_states_field_and_facet_contract(
         assert "累计此前字段尚未取得" in text, relative
         assert "来源类别不是专业检索字段" in text, relative
         assert "P0209" in text and "不写入" in text, relative
-        # 段落锚定：`complete` 是普通英文词，"提到即通过"等于没测。
+        # 整句锚定：只锚"读多少"而不锚"哪个布尔值触发"，把 true 改成 false
+        # 语义完全反转仍会全绿；`complete` 又是普通英文词，"提到即通过"等于没测。
+        assert "`first_page_only=true` 表示" in text, relative
         page = _section_containing(text, "first_page_only")
         assert "只读取当前页" in page or "只读当前页" in page, relative
         assert "50" in page, relative
-        assert "complete=false" in _section_containing(text, "complete=false"), relative
+        assert "`complete=false` 时不得" in text, relative
         assert "自动翻页" not in text, relative
 
 

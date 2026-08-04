@@ -302,6 +302,7 @@ def test_release_build_excludes_unlisted_and_state_baits(skill_root: Path, tmp_p
 RUNTIME_MODULES = (
     "models.py",
     "professional.py",
+    "professional_runtime.py",
     "professional_service.py",
     "ranking.py",
     "webvpn.py",
@@ -317,3 +318,19 @@ def test_modified_runtime_module_matches_mcpb_mirror(
     source = skill_root / "scripts" / "cnki_search" / name
     mirror = skill_root / "mcpb" / "src" / "cnki_search" / name
     assert source.read_bytes() == mirror.read_bytes(), name
+
+
+def test_every_runtime_module_matches_mcpb_mirror(skill_root: Path) -> None:
+    """手工清单会漏（professional_runtime.py 就漏过一次），再加一道全目录兜底。
+
+    纯外观漂移（改注释、改 docstring）不会被任何行为测试抓到，只会让发布包与
+    源码不同；这里对整个包逐字节比对，并禁止镜像里出现源码没有的模块。
+    """
+    source_dir = skill_root / "scripts" / "cnki_search"
+    mirror_dir = skill_root / "mcpb" / "src" / "cnki_search"
+    sources = sorted(path.name for path in source_dir.glob("*.py"))
+    mirrors = sorted(path.name for path in mirror_dir.glob("*.py"))
+    assert sources == mirrors
+    assert set(RUNTIME_MODULES) <= set(sources)
+    for name in sources:
+        assert (source_dir / name).read_bytes() == (mirror_dir / name).read_bytes(), name
