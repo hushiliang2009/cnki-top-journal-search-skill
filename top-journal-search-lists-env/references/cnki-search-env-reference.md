@@ -58,7 +58,8 @@ DOI、年度、引用次数、数据库收录状态或研究结论。
 `page_contract_changed`，绝不退回未筛选结果。
 
 `first_page_only=true` 表示每条表达式只读取当前页最多 50 条；只有累计合格唯一
-记录达到请求数量且无终止状态时 `complete` 才为真。
+记录达到请求数量且无终止状态时 `complete` 才为真，`complete=false` 时不得声称
+检索完整。
 
 三个诊断字段的语义边界：
 

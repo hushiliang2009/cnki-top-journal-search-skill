@@ -41,8 +41,8 @@ User-Agent、**不轮换代理**、不抹除自动化标志、**不自动破解*
 检索成功后的结果页来源类别中勾选，不写入表达式，也不进 `LY=`。分面未证实
 生效时返回 `page_contract_changed`，不会退回未筛选结果。
 
-`first_page_only=true` 表示每条表达式只读当前页最多 50 条；`complete=false`
-时不得当作完整检索。组外记录不占限额，进 `excluded_out_of_scope_records`；
+`first_page_only=true` 表示每条表达式只读取当前页最多 50 条；
+`complete=false` 时不得声称检索完整。组外记录不占限额，进 `excluded_out_of_scope_records`；
 单组调用的 `already_covered_higher_priority_count` 恒为 0（跨组去重属完整
 工作流职责）；`source_category_applied` 取全部已执行批次与字段的合取，可能
 保守低报。
