@@ -2169,3 +2169,52 @@ def _counter(step: float = 1.0):
         return ticks[0]
 
     return now
+
+
+def test_missing_browser_binary_is_reported_as_such_not_as_missing_display() -> None:
+    """浏览器二进制缺失或版本不匹配时，旧提示说的是"需要图形界面"。
+
+    在有图形界面的 Windows 桌面上，这条提示会把排查引向完全错误的方向——实际
+    只需 python -m playwright install chromium。发布前的人工冒烟就因此绕了远路。
+    """
+    playwright = FakePlaywright(None)
+    failure = RuntimeError(
+        "BrowserType.launch: Executable doesn't exist at "
+        "/ms-playwright/chromium-1234/chrome.exe\n"
+        "Looks like Playwright was just installed or updated. "
+        "Please run the following command to download new browsers:\n"
+        "    playwright install"
+    )
+
+    async def fail_launch(**_kwargs):
+        raise failure
+
+    playwright.chromium.launch = fail_launch
+
+    async def scenario() -> None:
+        with pytest.raises(webvpn.BrowserUnavailableError) as raised:
+            await webvpn._EphemeralContextFactory(playwright).launch()
+        message = str(raised.value)
+        assert "playwright install chromium" in message, message
+        assert "图形界面" not in message, message
+        assert raised.value.__cause__ is failure
+
+    asyncio.run(scenario())
+
+
+def test_headless_environment_still_reports_the_display_requirement() -> None:
+    """真的没有图形界面时，仍要给出原来的提示，不能被上面的改动一并覆盖。"""
+    playwright = FakePlaywright(None)
+    failure = RuntimeError("BrowserType.launch: Target page, context or browser has been closed")
+
+    async def fail_launch(**_kwargs):
+        raise failure
+
+    playwright.chromium.launch = fail_launch
+
+    async def scenario() -> None:
+        with pytest.raises(webvpn.BrowserUnavailableError) as raised:
+            await webvpn._EphemeralContextFactory(playwright).launch()
+        assert "图形界面" in str(raised.value)
+
+    asyncio.run(scenario())

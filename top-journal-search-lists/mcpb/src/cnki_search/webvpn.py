@@ -1657,6 +1657,26 @@ class ProfessionalSearchPage:
         )
 
 
+# Playwright 在浏览器二进制缺失或与库版本不匹配时，抛出的仍是通用启动异常。
+# 若一律报告"需要图形界面"，在有图形界面的桌面上会把排查引向错误方向，
+# 而实际只需重新下载浏览器。
+_MISSING_BROWSER_MARKERS = (
+    "executable doesn't exist",
+    "please run the following command to download new browsers",
+    "playwright install",
+)
+
+
+def _describe_launch_failure(error: BaseException) -> str:
+    text = str(error).casefold()
+    if any(marker in text for marker in _MISSING_BROWSER_MARKERS):
+        return (
+            "Playwright 浏览器缺失或与当前版本不匹配，请运行："
+            "python -m playwright install chromium"
+        )
+    return "无法启动有头浏览器：WebVPN 模式需要图形界面完成人工认证"
+
+
 class _EphemeralContextFactory:
     def __init__(self, playwright: Any) -> None:
         self.playwright = playwright
@@ -1678,9 +1698,7 @@ class _EphemeralContextFactory:
                     await _finish_cleanup(await_maybe(browser.close()))
             if not isinstance(exc, Exception):
                 raise
-            raise BrowserUnavailableError(
-                "无法启动有头浏览器：WebVPN 模式需要图形界面完成人工认证"
-            ) from exc
+            raise BrowserUnavailableError(_describe_launch_failure(exc)) from exc
 
 
 async def _start_playwright() -> Any:

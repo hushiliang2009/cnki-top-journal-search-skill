@@ -219,8 +219,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _emit_safe_error() -> int:
-    print(json.dumps(SAFE_ERROR, ensure_ascii=False), file=sys.stderr)
+# 安全守卫把一切失败都压成同一条消息，连"浏览器没装好"这类不含敏感信息的
+# 环境问题也无法自助定位。这里只补一个白名单枚举：值取自固定映射，异常原文、
+# 路径与凭据仍然一律不输出。
+_SAFE_FAILURE_REASONS = {
+    "BrowserUnavailableError": "browser_unavailable",
+    "WebVpnLoginTimeout": "login_timeout",
+    "WebVpnWindowClosed": "browser_window_closed",
+    "WebVpnNavigationError": "page_contract_changed",
+}
+
+
+def _emit_safe_error(error: BaseException | None = None) -> int:
+    payload = dict(SAFE_ERROR)
+    if error is not None:
+        reason = _SAFE_FAILURE_REASONS.get(type(error).__name__)
+        if reason is not None:
+            payload["reason"] = reason
+    print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
     return 1
 
 
@@ -313,8 +329,8 @@ def main(argv: list[str] | None = None) -> int:
             summary = asyncio.run(_run(args))
         print(json.dumps(summary, ensure_ascii=False, allow_nan=False))
         return 0
-    except BaseException:
-        return _emit_safe_error()
+    except BaseException as error:
+        return _emit_safe_error(error)
 
 
 if __name__ == "__main__":

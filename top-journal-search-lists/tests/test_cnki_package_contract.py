@@ -1221,3 +1221,62 @@ def test_readme_explains_why_rebuilt_archive_hashes_differ(skill_root: Path) -> 
     text = (skill_root / "README.md").read_text(encoding="utf-8")
     for value in ("zlib", "compare_release_content.py", "解压"):
         assert value in text, value
+
+
+@pytest.mark.parametrize(
+    ("factory", "reason"),
+    [
+        ("browser_unavailable", "browser_unavailable"),
+        ("login_timeout", "login_timeout"),
+        ("window_closed", "browser_window_closed"),
+        ("navigation", "page_contract_changed"),
+    ],
+)
+def test_webvpn_e2e_names_a_controlled_reason_for_known_failures(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    factory: str,
+    reason: str,
+) -> None:
+    """安全守卫把一切都压成 webvpn_e2e_failed，连"浏览器没装好"也一样。
+
+    使用者无法自助定位，只能去读源码或另写诊断脚本——发布前的人工冒烟就是这么
+    绕的远路。这里只补充一个白名单枚举值，不输出任何异常原文。
+    """
+    from cnki_search.browser import BrowserUnavailableError
+    from cnki_search.webvpn import (
+        WebVpnLoginTimeout,
+        WebVpnNavigationError,
+        WebVpnWindowClosed,
+    )
+
+    errors = {
+        "browser_unavailable": BrowserUnavailableError("SECRET_BROWSER_DETAIL"),
+        "login_timeout": WebVpnLoginTimeout("SECRET_LOGIN_DETAIL"),
+        "window_closed": WebVpnWindowClosed("SECRET_WINDOW_DETAIL"),
+        "navigation": WebVpnNavigationError("SECRET_NAV_DETAIL"),
+    }
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    runtime = _install_e2e_runtime(helper, monkeypatch, error=errors[factory])
+
+    exit_code = helper.main([
+        "--topic", "数字化转型",
+        "--group", "chinese_top_journals",
+    ])
+
+    captured = capfd.readouterr()
+    assert exit_code != 0
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+        "reason": reason,
+    }
+    assert runtime.closed is True
+    combined = captured.out + captured.err
+    for secret in (
+        "SECRET_BROWSER_DETAIL", "SECRET_LOGIN_DETAIL",
+        "SECRET_WINDOW_DETAIL", "SECRET_NAV_DETAIL", "Traceback",
+    ):
+        assert secret not in combined

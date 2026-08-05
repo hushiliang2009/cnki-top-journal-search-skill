@@ -1195,3 +1195,55 @@ def test_readme_explains_why_rebuilt_archive_hashes_differ(skill_root: Path) -> 
     text = (skill_root / "README.md").read_text(encoding="utf-8")
     for value in ("zlib", "compare_release_content.py", "解压"):
         assert value in text, value
+
+
+@pytest.mark.parametrize(
+    ("factory", "reason"),
+    [
+        ("login_timeout", "login_timeout"),
+        ("window_closed", "browser_window_closed"),
+        ("navigation", "page_contract_changed"),
+    ],
+)
+def test_webvpn_e2e_names_a_controlled_reason_for_known_failures(
+    skill_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    factory: str,
+    reason: str,
+) -> None:
+    """同通用版：只补白名单枚举值，不输出任何异常原文。"""
+    from cnki_search_env.webvpn import (
+        WebVpnLoginTimeout,
+        WebVpnNavigationError,
+        WebVpnWindowClosed,
+    )
+
+    errors = {
+        "login_timeout": WebVpnLoginTimeout("SECRET_LOGIN_DETAIL"),
+        "window_closed": WebVpnWindowClosed("SECRET_WINDOW_DETAIL"),
+        "navigation": WebVpnNavigationError("SECRET_NAV_DETAIL"),
+    }
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    runtime = _install_e2e_runtime(helper, monkeypatch, error=errors[factory])
+
+    exit_code = helper.main([
+        "--topic", "污染治理",
+        "--group", "chinese_environment_top",
+    ])
+
+    captured = capfd.readouterr()
+    assert exit_code != 0
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "status": "error",
+        "error": "webvpn_e2e_failed",
+        "reason": reason,
+    }
+    assert runtime.closed is True
+    combined = captured.out + captured.err
+    for secret in (
+        "SECRET_LOGIN_DETAIL", "SECRET_WINDOW_DETAIL",
+        "SECRET_NAV_DETAIL", "Traceback",
+    ):
+        assert secret not in combined
