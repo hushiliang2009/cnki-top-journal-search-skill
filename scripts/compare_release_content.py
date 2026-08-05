@@ -24,6 +24,16 @@ ARCHIVE_SUFFIXES = (".zip", ".mcpb")
 METADATA_FIELDS = ("date_time", "external_attr", "create_system", "compress_type")
 
 
+def _force_utf8_output() -> None:
+    """本脚本的输出是中文。Windows 控制台默认 charmap 编码打不出中文，会让
+    比对通过的运行也以 UnicodeEncodeError 退出，把排查引向"内容不一致"。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def _archives(directory: Path) -> dict[str, Path]:
     return {
         item.name: item
@@ -64,6 +74,7 @@ def compare_archive(left: Path, right: Path) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
+    _force_utf8_output()
     if len(argv) != 2:
         print(__doc__, file=sys.stderr)
         return 2

@@ -96,3 +96,38 @@ def test_ci_compares_release_content_across_platforms(skill_root: Path) -> None:
         "actions/download-artifact@v4",
     ):
         assert required in workflow, required
+
+
+def test_compare_release_content_survives_legacy_console_encoding(
+    skill_root: Path, tmp_path: Path,
+) -> None:
+    """Windows 控制台默认 charmap 编码打不出中文，脚本会在打印成功消息时崩溃。
+
+    后果最坏：比对其实通过了，CI 却因输出异常报失败——排查方向会被引到
+    "跨平台内容不一致"上，而真实原因只是终端编码。
+    """
+    import os
+    import subprocess
+    import sys
+    import zipfile
+
+    script = skill_root.parent / "scripts/compare_release_content.py"
+    left, right = tmp_path / "a", tmp_path / "b"
+    for directory in (left, right):
+        directory.mkdir()
+        archive = directory / "sample.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            info = zipfile.ZipInfo("payload.txt", date_time=(1980, 1, 1, 0, 0, 0))
+            info.external_attr = 0o100644 << 16
+            bundle.writestr(info, "content\n")
+        (directory / "checksums.sha256").write_text(
+            "0" * 64 + "  sample.zip\n", encoding="utf-8"
+        )
+
+    completed = subprocess.run(
+        [sys.executable, str(script), str(left), str(right)],
+        capture_output=True,
+        env=os.environ | {"PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"},
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
