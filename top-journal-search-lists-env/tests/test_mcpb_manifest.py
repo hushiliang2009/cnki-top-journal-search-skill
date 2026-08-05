@@ -12,6 +12,7 @@ import pytest
 from cnki_search_env import mcp_server
 
 
+EXPECTED_VERSION = "0.3.0"
 CNKI_MODULES = (
     "__init__.py",
     "browser.py",
@@ -132,10 +133,11 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
     manifest = json.loads((skill_root / "mcpb/manifest.json").read_text(encoding="utf-8"))
     assert manifest["manifest_version"] == "0.4"
     assert manifest["name"] == "cnki-search-env"
-    assert manifest["display_name"] == "CNKI Environmental Public Theme Search"
-    assert manifest["version"] == "0.2.0"
+    assert manifest["display_name"] == "CNKI Environmental Journal Search"
+    assert manifest["version"] == EXPECTED_VERSION
     assert manifest["description"] == (
-        "Public CNKI theme search with environmental journal classification; no login or downloads."
+        "Public CNKI topic search and attended institutional-WebVPN professional search "
+        "with environmental v4.0 journal classification; no downloads or unattended login."
     )
     assert manifest["author"]["name"] == "Top Environmental Journal Search"
     assert manifest["server"]["type"] == "uv"
@@ -147,14 +149,14 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
     assert manifest["tools"] == [
         {
             "name": "cnki_search_env",
-            "description": "Search the public CNKI homepage and rank first-page records by the environmental journal catalog.",
+            "description": "Search the public CNKI homepage and rank first-page records by the environmental v4.0 journal catalog.",
         },
         {
             "name": "cnki_professional_search_env",
             "description": (
-                "Attended-only CNKI professional search over the environmental catalog via "
-                "institutional WebVPN; requires the user to sign in and keep the browser open, "
-                "and is not usable for scheduled jobs."
+                "Run attended CNKI professional search over controlled environmental journal "
+                "groups through institutional WebVPN; the user must sign in and complete "
+                "security checks."
             ),
         },
     ]
@@ -178,7 +180,11 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
 
 def test_mcpb_pyproject_declares_public_runtime_dependencies(skill_root: Path) -> None:
     text = (skill_root / "mcpb/pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.2.0"' in text
+    assert f'version = "{EXPECTED_VERSION}"' in text
+    assert (
+        'description = "Public and attended CNKI environmental journal-search MCP server"'
+        in text
+    )
     assert 'requires-python = ">=3.11"' in text
     assert '"mcp>=1,<2"' in text
     assert '"playwright>=1.45,<2"' in text
@@ -190,8 +196,10 @@ def test_all_runtime_versions_and_release_allowlist_are_consistent(skill_root: P
         "scripts/cnki_search_env/__init__.py",
         "mcpb/src/cnki_search_env/__init__.py",
     ):
-        assert '__version__ = "0.2.0"' in (skill_root / relative).read_text(encoding="utf-8")
-    assert 'name = "cnki-search-env-mcp"\nversion = "0.2.0"' in (
+        assert f'__version__ = "{EXPECTED_VERSION}"' in (
+            skill_root / relative
+        ).read_text(encoding="utf-8")
+    assert f'name = "cnki-search-env-mcp"\nversion = "{EXPECTED_VERSION}"' in (
         skill_root / "mcpb/uv.lock"
     ).read_text(encoding="utf-8")
     assert ".mcpbignore" in _load_builder(skill_root).MCPB_ALLOWLIST
