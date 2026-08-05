@@ -299,8 +299,10 @@ class OutputPaths:
     sources: SourcePaths
     skill_references: Path
     mcpb_references: Path
-    audit_jsonl: Path
-    audit_markdown: Path
+    # 完整审计只留在仓库，不进任何发布包；发布布局下这两项为 None，
+    # 表示"本次不校验审计输出"，而不是"审计输出为空"。
+    audit_jsonl: Path | None
+    audit_markdown: Path | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1648,12 +1650,14 @@ def generate_outputs(paths: OutputPaths, *, check: bool) -> dict[str, str]:
     }
     _verify_or_write_mirrors(paths, outputs, check=check)
     _verify_or_write_source_mirrors(paths, check=check)
-    _verify_or_write(paths.audit_jsonl, render_audit_jsonl(audit), check=check)
-    _verify_or_write(
-        paths.audit_markdown,
-        outputs["environment_journal_match_audit_v4.0.md"],
-        check=check,
-    )
+    if paths.audit_jsonl is not None:
+        _verify_or_write(paths.audit_jsonl, render_audit_jsonl(audit), check=check)
+    if paths.audit_markdown is not None:
+        _verify_or_write(
+            paths.audit_markdown,
+            outputs["environment_journal_match_audit_v4.0.md"],
+            check=check,
+        )
     return {
         name: hashlib.sha256(content.encode("utf-8")).hexdigest()
         for name, content in outputs.items()

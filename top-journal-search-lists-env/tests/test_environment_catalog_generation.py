@@ -519,3 +519,65 @@ def test_check_mode_reports_stale_output_without_writing(tmp_path: Path) -> None
         catalog.generate_outputs(paths, check=True)
 
     assert catalog_path.read_bytes() == b"stale\n"
+
+
+def test_check_mode_still_verifies_packaged_files_without_repository_audits(
+    tmp_path: Path,
+) -> None:
+    """发布包里没有 docs/audits——完整审计 JSONL 是仓库专有的，按计划不进任何发布包。
+
+    收件人解压后仍应能用随包脚本复算目录本身；把审计输出当作硬性前提会让
+    --check 在发布布局下必然失败，等于这条离线校验路径根本不可用。
+    """
+    catalog = _load_catalog_module()
+    paths = output_paths(tmp_path / "output")
+    catalog.generate_outputs(paths, check=False)
+    portable = catalog.OutputPaths(
+        baseline=paths.baseline,
+        sources=paths.sources,
+        skill_references=paths.skill_references,
+        mcpb_references=paths.mcpb_references,
+        audit_jsonl=None,
+        audit_markdown=None,
+    )
+
+    hashes = catalog.generate_outputs(portable, check=True)
+
+    assert set(hashes) == set(catalog.MIRRORED_REFERENCE_FILES)
+    # 跳过审计并不放宽对随包文件的校验：目录本身被改动仍须报错。
+    (paths.skill_references / "environment_journal_catalog_v4.0.json").write_bytes(b"stale\n")
+    with pytest.raises(ValueError, match="生成文件不一致"):
+        catalog.generate_outputs(portable, check=True)
+
+
+def test_cli_check_succeeds_from_an_extracted_skill_without_repository(
+    tmp_path: Path,
+) -> None:
+    """模拟用户解压 Skill ZIP 后的布局：没有 .git，也没有 docs/audits。"""
+    import os
+    import shutil
+    import subprocess
+
+    extracted = tmp_path / "extracted" / "top-journal-search-lists-env"
+    (extracted / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPT, extracted / "scripts" / SCRIPT.name)
+    shutil.copy2(
+        ROOT / "scripts" / "generate_environment_catalog_v4.py",
+        extracted / "scripts" / "generate_environment_catalog_v4.py",
+    )
+    shutil.copytree(REFERENCES, extracted / "references")
+    shutil.copytree(ROOT / "mcpb" / "src" / "references", extracted / "mcpb" / "src" / "references")
+
+    completed = subprocess.run(
+        [sys.executable, str(extracted / "scripts" / "generate_environment_catalog_v4.py"), "--check"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=tmp_path,
+        env=os.environ | {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "environment_journal_catalog_v4.0.json" in completed.stdout
+    # 部分校验必须自报家门，否则会被当成完整校验。
+    assert "docs/audits" in completed.stdout or "审计" in completed.stdout
