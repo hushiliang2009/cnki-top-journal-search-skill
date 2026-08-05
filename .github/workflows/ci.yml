@@ -162,6 +162,7 @@ jobs:
           after=$(ls -1 "$CODEX_HOME/skills/top-journal-search-lists" | sort | md5sum)
           test "$before" = "$after" || { echo "restored skill differs"; exit 1; }
           grep -q '\[mcp_servers.cnki-search\]' "$CODEX_HOME/config.toml"
+          echo 'rollback verified: skill and config restored after a real venv failure'
       - name: Reinstall over an existing installation on Windows
         if: runner.os == 'Windows'
         shell: pwsh
@@ -192,6 +193,7 @@ jobs:
           $skill = Join-Path $env:CODEX_HOME 'skills\top-journal-search-lists'
           $before = (Get-ChildItem $skill | Sort-Object Name | ForEach-Object { $_.Name }) -join '|'
           $failed = $false
+          $global:LASTEXITCODE = 0
           try { & .\top-journal-search-lists\installers\install.ps1 -Codex -PythonExe $fake } catch { $failed = $true }
           if (-not $failed -and $LASTEXITCODE -eq 0) { throw 'installer should have failed' }
           if (-not (Test-Path -LiteralPath (Join-Path $skill 'SKILL.md'))) { throw 'skill was not restored' }
@@ -199,6 +201,10 @@ jobs:
           if ($before -ne $after) { throw 'restored skill differs' }
           $config = Get-Content -LiteralPath (Join-Path $env:CODEX_HOME 'config.toml') -Encoding utf8 -Raw
           if ($config -notmatch '\[mcp_servers\.cnki-search\]') { throw 'config was not restored' }
+          Write-Output 'rollback verified: skill and config restored after a real venv failure'
+          # 安装器失败留下的 $LASTEXITCODE=1 会让本步骤在结束时被判失败——这里的
+          # 失败是预期内的注入，断言已全部通过，必须显式收尾。
+          exit 0
 
   version-gate:
     runs-on: ${{ matrix.os }}
