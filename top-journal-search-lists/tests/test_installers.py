@@ -306,6 +306,17 @@ def test_powershell_runtime_failure_restores_skill_and_config(skill_root: Path, 
     assert config.read_text(encoding="utf-8") == "[mcp_servers.zotero]\ncommand = 'zotero-mcp'\n"
 
 
+def test_generic_install_copy_does_not_contain_environment_product(
+    skill_root: Path, tmp_path: Path,
+) -> None:
+    """两版共存靠的是各自只装自己的东西；通用版一旦夹带环境目录就会产生版本歧义。"""
+    installed = _copy_test_skill(skill_root, tmp_path / "installed-generic")
+
+    assert (installed / "SKILL.md").is_file()
+    assert not (installed / "references/environment_journal_catalog_v4.0.json").exists()
+    assert not (installed / "scripts/cnki_search_env").exists()
+
+
 def test_shell_rejects_python_310_before_creating_install_paths(skill_root: Path, tmp_path: Path) -> None:
     fake_python = tmp_path / "python310.sh"
     fake_python.write_text("#!/bin/sh\nprintf 'Python 3.10.9\\n'\n", encoding="utf-8")

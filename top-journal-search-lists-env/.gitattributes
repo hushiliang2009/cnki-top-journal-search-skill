@@ -1,2 +1,26 @@
 references/环境科学与工程学科顶尖期刊目录_v3.0.md -text whitespace=-blank-at-eol
 mcpb/src/references/环境科学与工程学科顶尖期刊目录_v3.0.md -text whitespace=-blank-at-eol
+
+references/环境科学与工程学科顶尖期刊目录_v4.0.md text eol=lf
+references/environment_journal_catalog_v4.0.json text eol=lf
+references/environment_catalog_sources_v4.0.json text eol=lf
+references/environment_journal_match_audit_v4.0.md text eol=lf
+mcpb/src/references/环境科学与工程学科顶尖期刊目录_v4.0.md text eol=lf
+mcpb/src/references/environment_journal_catalog_v4.0.json text eol=lf
+mcpb/src/references/environment_catalog_sources_v4.0.json text eol=lf
+mcpb/src/references/environment_journal_match_audit_v4.0.md text eol=lf
+
+references/CSSCI_2025_2026.md -text
+references/北大中文核心期刊目录_2023_自然科学版.md -text
+references/北大中文核心期刊目录_2023_.md -text
+"references/Social Sciences Citation Index_20260715.md" -text
+"references/Social Sciences Citation Index (SSCI).csv" -text
+"references/Science Citation Index Expanded_20260715.md" -text
+"references/Science Citation Index Expanded (SCIE).csv" -text
+mcpb/src/references/CSSCI_2025_2026.md -text
+mcpb/src/references/北大中文核心期刊目录_2023_自然科学版.md -text
+mcpb/src/references/北大中文核心期刊目录_2023_.md -text
+"mcpb/src/references/Social Sciences Citation Index_20260715.md" -text
+"mcpb/src/references/Social Sciences Citation Index (SSCI).csv" -text
+"mcpb/src/references/Science Citation Index Expanded_20260715.md" -text
+"mcpb/src/references/Science Citation Index Expanded (SCIE).csv" -text

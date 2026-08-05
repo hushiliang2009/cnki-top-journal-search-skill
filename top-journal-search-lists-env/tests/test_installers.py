@@ -472,6 +472,10 @@ def test_environment_install_coexists_with_generic_skill_and_mcp(
     assert (generic_skill / "generic.txt").read_text(encoding="utf-8") == "keep generic"
     assert (codex_home / "skills" / "top-journal-search-lists-env").is_dir()
     assert (codex_home / "runtimes" / "cnki-search-env").is_dir()
+    assert (
+        codex_home
+        / "skills/top-journal-search-lists-env/references/environment_journal_catalog_v4.0.json"
+    ).is_file()
 
 
 def test_shell_success_runs_self_checks_and_retains_exactly_three_backups(
@@ -530,6 +534,23 @@ def test_readme_documents_installer_safety_requirements(skill_root: Path) -> Non
         "最近 3 份",
     ):
         assert text in readme
+
+
+def test_allowlisted_install_contains_environment_v4_portable_files(
+    skill_root: Path, tmp_path: Path,
+) -> None:
+    """装好之后目录数据和离线复算脚本都要在本地，否则用户只能相信我们的说法。"""
+    installed = _copy_test_skill(skill_root, tmp_path / "installed-env")
+
+    for relative in (
+        "references/环境科学与工程学科顶尖期刊目录_v4.0.md",
+        "references/environment_journal_catalog_v4.0.json",
+        "references/environment_catalog_sources_v4.0.json",
+        "scripts/environment_catalog_v4.py",
+        "scripts/generate_environment_catalog_v4.py",
+    ):
+        assert (installed / relative).is_file(), relative
+    assert not (installed / "references/环境科学与工程学科顶尖期刊目录_v3.0.md").exists()
 
 
 def test_allowlisted_install_copy_excludes_workspace_baits(

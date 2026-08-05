@@ -299,6 +299,15 @@ def test_webvpn_e2e_helper_prints_only_the_sanitized_summary(
                 "status": "success",
                 "batches_completed": 1,
                 "batches_total": 1,
+                "topic_fields_tried": ["TI", "SU"],
+                "source_category_code": "P0209",
+                "source_category_applied": True,
+                "source_category_total": 2270,
+                "eligible_record_count": 1,
+                "excluded_out_of_scope_count": 0,
+                "first_page_only": True,
+                "complete": True,
+                "human_intervention_required": False,
                 "records": [{
                     "title": "数字化转型与企业创新",
                     "journal_raw": "管理世界",
@@ -356,6 +365,13 @@ def test_webvpn_e2e_helper_prints_only_the_sanitized_summary(
         "record_count": 1,
         "batches_completed": 1,
         "batches_total": 1,
+        "topic_fields_tried": ["TI", "SU"],
+        "source_category_code": "P0209",
+        "source_category_applied": True,
+        "eligible_record_count": 1,
+        "first_page_only": True,
+        "complete": True,
+        "human_intervention_required": False,
         "sample": [{
             "title": "数字化转型与企业创新",
             "journal_raw": "管理世界",
@@ -945,7 +961,7 @@ def test_catalog_resolves_under_both_distribution_layouts(
     assert completed.returncode == 0, completed.stderr
     found, resolved = completed.stdout.splitlines()[:2]
     assert found == "True", f"{module_dir} 布局下未能定位综合期刊目录：{resolved}"
-    assert Path(resolved).is_file()
+    assert Path(resolved).name == "environment_journal_catalog_v4.0.json"
 
 
 def test_skill_uses_ai4scholar_as_primary_and_cnki_as_supplement(skill_root: Path) -> None:
@@ -1020,3 +1036,153 @@ def test_documentation_describes_only_ephemeral_memory_cache(skill_root: Path) -
     expected = "不持久化缓存，运行期仅24小时内存缓存"
     for relative in ("SKILL.md", "README.md", "references/cnki-search-env-reference.md"):
         assert expected in (skill_root / relative).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "poisoned",
+    [
+        {"topic_fields_tried": ["TI", "AB"]},
+        {"topic_fields_tried": "TI"},
+        {"source_category_code": "P9999"},
+        {"source_category_applied": "true"},
+        {"eligible_record_count": "1"},
+        {"first_page_only": None},
+        {"complete": 1},
+        {"human_intervention_required": "no"},
+    ],
+)
+def test_attended_e2e_summary_rejects_out_of_contract_diagnostics(
+    skill_root: Path, poisoned: dict,
+) -> None:
+    """摘要字段是闭集；越界值必须整体失败关闭，而不是原样透传给发布记录。"""
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    result = {
+        "status": "success",
+        "batches_completed": 1,
+        "batches_total": 1,
+        "topic_fields_tried": ["TI"],
+        "source_category_code": "P0209",
+        "source_category_applied": True,
+        "eligible_record_count": 0,
+        "first_page_only": True,
+        "complete": True,
+        "human_intervention_required": False,
+        "records": [],
+    }
+    result.update(poisoned)
+
+    with pytest.raises(helper.UnsafeOutputError):
+        helper._summary(result, "chinese_environment_top")
+
+
+def test_attended_e2e_summary_keeps_only_safe_release_diagnostics(
+    skill_root: Path,
+) -> None:
+    """字段与分面证据可以进摘要，凭据、链接、HTML 一律不行。"""
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    summary = helper._summary({
+        "status": "success",
+        "batches_completed": 1,
+        "batches_total": 1,
+        "topic_fields_tried": ["TI", "SU"],
+        "source_category_code": "P0209",
+        "source_category_applied": True,
+        "eligible_record_count": 3,
+        "first_page_only": True,
+        "complete": True,
+        "human_intervention_required": False,
+        "records": [],
+    }, "chinese_environment_top")
+
+    assert summary["topic_fields_tried"] == ["TI", "SU"]
+    assert summary["source_category_code"] == "P0209"
+    assert summary["source_category_applied"] is True
+    assert summary["eligible_record_count"] == 3
+    assert summary["first_page_only"] is True
+    assert summary["complete"] is True
+    assert summary["human_intervention_required"] is False
+    serialized = json.dumps(summary, ensure_ascii=False).casefold()
+    for forbidden in ("cookie", "token", "html", "url", "password", "download"):
+        assert forbidden not in serialized
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["topic_fields_tried", "source_category_code", "source_category_applied",
+     "eligible_record_count", "first_page_only", "complete",
+     "human_intervention_required"],
+)
+def test_attended_e2e_summary_requires_every_diagnostic_key(
+    skill_root: Path, missing: str,
+) -> None:
+    """漏发字段与"本组无分面"必须可区分，不得静默当成 None。"""
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    result = {
+        "status": "success",
+        "batches_completed": 1,
+        "batches_total": 1,
+        "topic_fields_tried": ["TI"],
+        "source_category_code": None,
+        "source_category_applied": False,
+        "eligible_record_count": 0,
+        "first_page_only": True,
+        "complete": True,
+        "human_intervention_required": False,
+        "records": [],
+    }
+    del result[missing]
+
+    with pytest.raises(helper.UnsafeOutputError):
+        helper._summary(result, "group")
+
+
+def test_v030_readme_names_exact_release_catalog_and_coexistence_contract(
+    skill_root: Path,
+) -> None:
+    text = (skill_root / "README.md").read_text(encoding="utf-8")
+    for value in (
+        "0.3.0",
+        "top-journal-search-lists-env_Skill.zip",
+        "cnki-search-env.mcpb",
+        "checksums.sha256",
+        "环境科学与工程学科顶尖期刊目录_v4.0.md",
+        "environment_journal_catalog_v4.0.json",
+        "top-journal-search-lists",
+        "cnki-search",
+        "互不覆盖",
+    ):
+        assert value in text, value
+
+
+def test_docs_explain_the_packaged_offline_recomputation_script(
+    skill_root: Path,
+) -> None:
+    """脚本随 Skill ZIP 发出去，但两份文档都没写它是干什么的、怎么跑。
+
+    收件人拿到目录数据却不知道可以自己复算，这份数据就只能被当作"要么信、
+    要么不信"的黑箱；随包发一个无人知晓的脚本等于没发。
+    """
+    for relative in ("README.md", "SKILL.md"):
+        text = (skill_root / relative).read_text(encoding="utf-8")
+        assert "generate_environment_catalog_v4.py" in text, relative
+        assert "--check" in text, relative
+    readme = (skill_root / "README.md").read_text(encoding="utf-8")
+    # 必须说明发布包里跳过审计输出，否则用户会把局部校验当成完整校验。
+    assert "docs/audits" in readme
+    assert "environment_catalog_v4.py" in readme
+
+
+def test_docs_do_not_overstate_what_the_recomputation_check_proves(
+    skill_root: Path,
+) -> None:
+    """层级取自已批准的 baseline，脚本不推导它。
+
+    把两本期刊的层级对调后重新生成，--check 仍会通过；说成"层级已复核"会让用户
+    据此放弃人工核对。文档必须写明边界，并把真实性校验指回 checksums.sha256。
+    """
+    readme = (skill_root / "README.md").read_text(encoding="utf-8")
+    for value in ("自洽性", "真实性", "checksums.sha256", "每级期刊数", "3764"):
+        assert value in readme, value
+    skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+    assert "层级已被独立复核" in skill, "必须显式禁止这种说法"
+    assert "formal_evidence" in skill

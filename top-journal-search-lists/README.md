@@ -12,6 +12,12 @@
 
 这属于**机构授权**的正常访问路径。底线不变：**不伪造** User-Agent、**不轮换代理**、不抹除自动化标志、**不自动破解**验证码。
 
+分组检索依次执行 **TI → SU → KY → TKA**，并累计此前字段尚未取得的合格唯一记录；达到请求数量即停。四个字段互相补充，不是从中挑一个"最好的"。
+
+**来源类别不是专业检索字段**：CSSCI（`P0209`）与北大核心（`P01`）只在首次检索成功后的结果页来源类别中勾选，不写入表达式，也不进 `LY=`。分面未证实生效时返回 `page_contract_changed`，不会退回未筛选结果。
+
+`first_page_only=true` 表示每条表达式只读当前页最多 50 条；`complete=false` 时不得当作完整检索。`LY=` 的近似命中不占限额，进 `excluded_out_of_scope_records`。`source_category_applied` 取全部已执行批次与字段的合取，可能保守低报。
+
 启用时只需设置 `CNKI_WEBVPN_HOME`，其值为所在机构 WebVPN 改写后的知网首页地址。`CNKI_WEBVPN_PROFILE` 已不再需要，也不应配置。浏览器上下文为非持久化会话，不保存 Cookie、登录票据或浏览器 profile；服务重启后需要重新登录。
 
 该模式**必须人工值守，不可用于定时任务**——三处人工介入无法自动化：
@@ -252,3 +258,7 @@ python top-journal-search-lists/scripts/catalog_lookup.py lookup "期刊名A" "�
 ```
 
 3. 在成果里如实写明"CNKI 补充检索未能执行"，不要把它当作"该主题无中文文献"。
+
+## 版本与发布包
+
+当前通用版为 `0.5.0`。正式 Release 包含 `top-journal-search-lists_Skill.zip`、`cnki-search.mcpb` 和 `checksums.sha256`。安装前须先按 `checksums.sha256` 核验两个压缩包。通用版使用 `top-journal-search-lists`、`cnki-search` 和 `runtimes/cnki-search`；可与环境版 `top-journal-search-lists-env`、`cnki-search-env` 并存，二者互不覆盖。

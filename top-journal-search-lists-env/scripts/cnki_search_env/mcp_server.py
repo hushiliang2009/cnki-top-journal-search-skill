@@ -190,7 +190,10 @@ class CnkiMcpServer:
             topic: Annotated[str, Field(min_length=1, pattern=r".*\S.*")],
             group: Annotated[
                 str,
-                Field(pattern=r"^(chinese_environment_top|environment_cssci)$"),
+                Field(pattern=(
+                    r"^(chinese_environment_top|other_formally_recognized_chinese"
+                    r"|environment_cssci|pku_core)$"
+                )),
             ] = CHINESE_ENVIRONMENT_TOP_GROUP,
             limit: Annotated[int, Field(ge=MIN_LIMIT, le=MAX_PROFESSIONAL_LIMIT)] = MAX_PROFESSIONAL_LIMIT,
             year_from: Annotated[
@@ -206,7 +209,11 @@ class CnkiMcpServer:
             name="cnki_professional_search_env",
             description=(
                 "经机构 WebVPN 以专业检索按环境期刊目录定向检索中文期刊论文，"
-                "只覆盖中文环境顶尖期刊（6 本）与环境 CSSCI 来源期刊（241 本）。"
+                "只覆盖四个受控范围：中文环境顶尖期刊（第6级6本）、"
+                "其他正式认可中文期刊（第7级60本）、环境CSSCI来源期刊（第9级241本）、"
+                "北大核心（第11—12级，1987本，按结果页来源类别P01筛选）。"
+                "检索字段依次为TI、SU、KY、TKA并累计合格记录；"
+                "来源类别只在结果页筛选，不写入专业检索表达式。"
                 "需要本人登录并全程保持浏览器窗口打开，中途可能需人工完成安全验证；"
                 "不可用于定时任务。未设置环境变量 CNKI_ENV_WEBVPN_HOME 时返回配置错误。"
             ),

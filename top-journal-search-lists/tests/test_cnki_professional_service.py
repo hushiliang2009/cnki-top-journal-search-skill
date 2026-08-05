@@ -6,8 +6,11 @@ import pytest
 
 from cnki_search import professional_service as service_module
 from cnki_search.models import SearchStatus
-from cnki_search.professional import ExpressionBatch
-from cnki_search.professional_service import CnkiProfessionalSearchService, preview_expressions
+from cnki_search.professional import ExpressionBatch, PlanExecutionResult, SourceCategorySpec
+from cnki_search.professional_service import (
+    CnkiProfessionalSearchService,
+    preview_expressions,
+)
 from cnki_search.webvpn import BatchCheckpoint
 
 
@@ -59,14 +62,69 @@ def _result_page(
 
 
 def _executor(pages: list[tuple[str, str]], seen: list[ExpressionBatch] | None = None):
-    async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
+    """模拟生产执行器：返回 PlanExecutionResult，并如实带上分面已生效的证据。"""
+    async def execute(plan: ExpressionBatch) -> PlanExecutionResult:
         if seen is not None:
             seen.append(plan)
         title, journal = pages.pop(0)
+        return PlanExecutionResult(
+            status=SearchStatus.SUCCESS.value,
+            html=RESULT_TEMPLATE.format(title=title, journal=journal),
+            url="https://webvpn.example.edu.cn/https/abc/kns8s/defaultresult/index",
+            source_category_applied=plan.source_category is not None,
+            source_category_total=None,
+        )
+    return execute
+
+
+def _tuple_executor(pages: list[tuple[str, str]]):
+    """旧式三元组执行器：没有分面证据，服务只能保守认定分面未生效。"""
+    async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
+        title, journal = pages[0] if len(pages) == 1 else pages.pop(0)
         return (SearchStatus.SUCCESS.value,
                 RESULT_TEMPLATE.format(title=title, journal=journal),
                 "https://webvpn.example.edu.cn/https/abc/kns8s/defaultresult/index")
     return execute
+
+
+def _field_of(expression: str) -> str:
+    return expression.split(" ", 1)[0]
+
+
+def _service_yielding_by_field(
+    records_by_field: dict[str, list[tuple[str, str]]],
+) -> tuple[CnkiProfessionalSearchService, list[ExpressionBatch]]:
+    seen: list[ExpressionBatch] = []
+
+    async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
+        seen.append(plan)
+        html = "".join(
+            _result_page(title=title, journal=journal)
+            for title, journal in records_by_field.get(_field_of(plan.expression), [])
+        )
+        return SearchStatus.SUCCESS.value, html, "https://example.invalid/"
+
+    return CnkiProfessionalSearchService(execute), seen
+
+
+def _service_with_terminal_by_field(
+    successful: dict[str, list[tuple[str, str]]],
+    terminal_field: str,
+    terminal_status: SearchStatus,
+) -> tuple[CnkiProfessionalSearchService, list[ExpressionBatch]]:
+    seen: list[ExpressionBatch] = []
+
+    async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
+        seen.append(plan)
+        if _field_of(plan.expression) == terminal_field:
+            return terminal_status.value, "", "https://example.invalid/"
+        html = "".join(
+            _result_page(title=title, journal=journal)
+            for title, journal in successful.get(_field_of(plan.expression), [])
+        )
+        return SearchStatus.SUCCESS.value, html, "https://example.invalid/"
+
+    return CnkiProfessionalSearchService(execute), seen
 
 
 def test_chinese_top_plan_uses_exact_journals_without_facet() -> None:
@@ -80,17 +138,118 @@ def test_chinese_top_plan_uses_exact_journals_without_facet() -> None:
 def test_cssci_plan_uses_one_topic_expression_and_result_facet() -> None:
     plans = service_module.preview_plans("数字化转型", service_module.CSSCI_GROUP)
     assert len(plans) == 1
-    assert plans[0].expression == "SU %= '数字化转型'"
+    assert plans[0].expression == "TI %= '数字化转型'"
     assert "LY=" not in plans[0].expression
-    assert plans[0].source_category == "CSSCI"
+    assert plans[0].source_category == SourceCategorySpec("P0209", "CSSCI")
     assert plans[0].page_size == 50
+
+
+def test_fields_accumulate_unique_eligible_records_until_limit() -> None:
+    service, seen = _service_yielding_by_field(
+        {
+            "TI": [("甲", "管理世界")],
+            "SU": [("甲", "管理世界"), ("乙", "管理世界")],
+        }
+    )
+
+    result = asyncio.run(
+        service.search_group("碳中和", service_module.CHINESE_TOP_GROUP, limit=2)
+    )
+
+    assert [record["title"] for record in result["records"]] == ["甲", "乙"]
+    assert result["topic_fields_tried"] == ["TI", "SU"]
+    assert [record["topic_match_field"] for record in result["records"]] == ["TI", "SU"]
+    assert [_field_of(plan.expression) for plan in seen] == ["TI", "SU"]
+
+
+def test_out_of_scope_rows_do_not_consume_limit() -> None:
+    service, _seen = _service_yielding_by_field(
+        {
+            "TI": [
+                ("近似刊物", "管理学报"),
+                ("合格刊物", "管理世界"),
+            ],
+        }
+    )
+
+    result = asyncio.run(
+        service.search_group("生态", service_module.CHINESE_TOP_GROUP, limit=1)
+    )
+
+    assert result["eligible_record_count"] == 1
+    assert result["excluded_out_of_scope_count"] == 1
+    assert result["records"][0]["journal_matched_title"] == "管理世界"
+    assert result["records"][0]["title"] == "合格刊物"
+
+
+def test_all_fields_short_return_accumulated_unique_records_not_largest_field() -> None:
+    service, seen = _service_yielding_by_field(
+        {
+            "TI": [("甲", "管理世界")],
+            "SU": [("乙", "管理世界")],
+            "KY": [("甲", "管理世界"), ("丙", "管理世界")],
+            "TKA": [("丁", "管理世界")],
+        }
+    )
+
+    result = asyncio.run(
+        service.search_group("碳中和", service_module.CHINESE_TOP_GROUP, limit=10)
+    )
+
+    assert [record["title"] for record in result["records"]] == ["甲", "乙", "丙", "丁"]
+    assert result["topic_fields_tried"] == ["TI", "SU", "KY", "TKA"]
+    assert [_field_of(plan.expression) for plan in seen] == ["TI", "SU", "KY", "TKA"]
+    assert result["complete"] is False
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [
+        SearchStatus.CHALLENGE_DETECTED,
+        SearchStatus.LOGIN_REQUIRED,
+        SearchStatus.FORBIDDEN,
+        SearchStatus.RATE_LIMITED,
+        SearchStatus.PAGE_CONTRACT_CHANGED,
+    ],
+)
+def test_blocking_field_keeps_qualified_partial_and_stops_later_fields(
+    terminal_status: SearchStatus,
+) -> None:
+    service, seen = _service_with_terminal_by_field(
+        successful={"TI": [("已取得", "管理世界")], "SU": []},
+        terminal_field="SU",
+        terminal_status=terminal_status,
+    )
+
+    result = asyncio.run(
+        service.search_group("环境治理", service_module.CHINESE_TOP_GROUP, limit=10)
+    )
+
+    assert [record["title"] for record in result["records"]] == ["已取得"]
+    assert result["status"] == SearchStatus.PARTIAL.value
+    assert result["terminal_status"] == terminal_status.value
+    assert result["human_intervention_required"] is True
+    assert result["topic_fields_tried"] == ["TI", "SU"]
+    assert [_field_of(plan.expression) for plan in seen] == ["TI", "SU"]
+
+
+def test_generic_cssci_uses_topic_only_plus_result_facet() -> None:
+    policy = service_module.build_group_policy(service_module.CSSCI_GROUP)
+    plans = service_module.build_group_plans(
+        "环境治理", policy=policy, topic_field="TI"
+    )
+
+    assert len(plans) == 1
+    assert plans[0].expression == "TI %= '环境治理'"
+    assert "CSSCI" not in plans[0].expression
+    assert plans[0].source_category == SourceCategorySpec("P0209", "CSSCI")
 
 
 def test_chinese_top_group_fits_one_batch_and_is_annotated_at_level_six() -> None:
     seen: list[ExpressionBatch] = []
     service = CnkiProfessionalSearchService(
         _executor([("数字经济与全要素生产率", "管理世界")], seen))
-    result = asyncio.run(service.search_group("数字经济", service_module.CHINESE_TOP_GROUP))
+    result = asyncio.run(service.search_group("数字经济", service_module.CHINESE_TOP_GROUP, limit=1))
 
     assert len(seen) == 1, "13 本顶刊必须单批完成"
     assert result["journal_count"] == 13
@@ -107,7 +266,7 @@ def test_expression_restricts_journals_and_uses_official_syntax() -> None:
     expressions = preview_expressions("数字经济", service_module.CHINESE_TOP_GROUP)
     assert len(expressions) == 1
     expression = expressions[0]
-    assert expression.startswith("SU %= '数字经济'")
+    assert expression.startswith("TI %= '数字经济'")
     assert "LY='管理世界'" in expression and "LY='中国社会科学'" in expression
     assert " AND " in expression and " OR " in expression
 
@@ -115,7 +274,7 @@ def test_expression_restricts_journals_and_uses_official_syntax() -> None:
 def test_non_journal_rows_are_excluded_from_records() -> None:
     """只收中文学术期刊论文；解析层是页面设置之外的兜底。"""
     service = CnkiProfessionalSearchService(_executor([("某文", "经济研究")]))
-    result = asyncio.run(service.search_group("共同富裕", service_module.CHINESE_TOP_GROUP))
+    result = asyncio.run(service.search_group("共同富裕", service_module.CHINESE_TOP_GROUP, limit=1))
     assert result["excluded_non_journal_rows"] == 1
     assert all(record["journal_raw"] != "某大学" for record in result["records"])
 
@@ -123,7 +282,7 @@ def test_non_journal_rows_are_excluded_from_records() -> None:
 def test_only_chinese_priority_groups_are_accepted() -> None:
     service = CnkiProfessionalSearchService(_executor([]))
     for group in ("ssci", "scie", "ft50", "no_such_group"):
-        with pytest.raises(ValueError, match="只覆盖中文层级"):
+        with pytest.raises(ValueError, match="不支持分组"):
             asyncio.run(service.search_group("主题", group))
 
 
@@ -131,30 +290,37 @@ def test_cssci_group_uses_one_facet_plan() -> None:
     pages = [("论文甲", "管理评论"), ("论文乙", "财经研究")]
     seen: list[ExpressionBatch] = []
 
-    async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
+    async def execute(plan: ExpressionBatch) -> PlanExecutionResult:
         seen.append(plan)
         title, journal = pages[min(len(seen) - 1, len(pages) - 1)]
-        return (SearchStatus.SUCCESS.value,
-                RESULT_TEMPLATE.format(title=title, journal=journal), "https://example.invalid/")
+        return PlanExecutionResult(
+            status=SearchStatus.SUCCESS.value,
+            html=RESULT_TEMPLATE.format(title=title, journal=journal),
+            url="https://example.invalid/",
+            source_category_applied=plan.source_category is not None,
+        )
 
     # 预算调小以强制分批，验证跨批次合并而非只取第一批
     service = CnkiProfessionalSearchService(execute, max_expression_chars=900)
-    result = asyncio.run(service.search_group("数字化转型", service_module.CSSCI_GROUP))
+    result = asyncio.run(service.search_group("数字化转型", service_module.CSSCI_GROUP, limit=1))
 
     assert result["journal_count"] is None
     assert result["source_category"] == "CSSCI"
     assert result["batches_total"] == 1
     assert len(seen) == result["batches_total"]
-    assert seen[0].source_category == "CSSCI"
+    assert seen[0].source_category == SourceCategorySpec("P0209", "CSSCI")
     assert "LY=" not in seen[0].expression
     assert all(record["priority_level"] == 9 for record in result["records"])
 
 
 def test_duplicate_records_across_batches_are_merged_once() -> None:
-    async def execute(_batch: ExpressionBatch) -> tuple[str, str, str]:
-        return (SearchStatus.SUCCESS.value,
-                RESULT_TEMPLATE.format(title="同一篇论文", journal="管理评论"),
-                "https://example.invalid/")
+    async def execute(batch: ExpressionBatch) -> PlanExecutionResult:
+        return PlanExecutionResult(
+            status=SearchStatus.SUCCESS.value,
+            html=RESULT_TEMPLATE.format(title="同一篇论文", journal="管理评论"),
+            url="https://example.invalid/",
+            source_category_applied=batch.source_category is not None,
+        )
 
     service = CnkiProfessionalSearchService(execute, max_expression_chars=900)
     result = asyncio.run(service.search_group("数字化转型", service_module.CSSCI_GROUP))
@@ -291,11 +457,11 @@ def test_limit_counts_normalized_unique_formal_records(
         executor_calls.append(batch.index)
         if batch.index == 1:
             html = (
-                _result_page(title="Alpha Study", journal="Journal A")
-                + _result_page(title="alpha study", journal="journal a")
+                _result_page(title="Alpha Study", journal="管理世界")
+                + _result_page(title="alpha study", journal="管理世界")
             )
         else:
-            html = _result_page(title="Beta Study", journal="Journal B")
+            html = _result_page(title="Beta Study", journal="管理世界")
         return (SearchStatus.SUCCESS.value, html, "")
 
     result = asyncio.run(
@@ -329,12 +495,12 @@ def test_duplicate_keeps_more_complete_record(
         if batch.index == 1:
             html = _result_page(
                 title="Digital Economy Study",
-                journal="Management World",
+                journal="管理世界",
             )
         else:
             html = _result_page(
                 title=" digital economy study ",
-                journal="management world",
+                journal="管理世界",
                 authors=("张三",),
                 citations=8,
                 downloads=12,
@@ -441,7 +607,7 @@ def test_overlapping_authors_merge_candidate_duplicates(
         authors = first_authors if batch.index == 1 else second_authors
         html = _result_page(
             title="Same Study",
-            journal="Journal A",
+            journal="管理世界",
             authors=authors,
             citations=9 if batch.index == 2 else None,
         )
@@ -524,7 +690,7 @@ def test_common_author_punctuation_normalizes_to_one_identity(
         author = "Zhang San" if batch.index == 1 else "Ｚｈａｎｇ-San"
         html = _result_page(
             title="Same Study",
-            journal="Journal A",
+            journal="管理世界",
             authors=(author,),
             citations=9 if batch.index == 2 else None,
         )
@@ -637,7 +803,7 @@ def test_parser_contract_exception_becomes_structured_page_contract_error() -> N
 def test_result_always_exposes_the_human_attendance_flag() -> None:
     """调用方据此判断能否安排无人值守任务，字段不得缺失。"""
     service = CnkiProfessionalSearchService(_executor([("某文", "经济研究")]))
-    result = asyncio.run(service.search_group("主题", service_module.CHINESE_TOP_GROUP))
+    result = asyncio.run(service.search_group("主题", service_module.CHINESE_TOP_GROUP, limit=1))
     assert "human_intervention_required" in result
     assert result["mode"] == "webvpn"
 
@@ -649,3 +815,124 @@ def test_custom_expression_runs_without_batching() -> None:
     result = asyncio.run(service.search_expression(expression))
     assert [plan.expression for plan in seen] == [expression]
     assert result["batches_total"] == 1 and result["expressions"] == [expression]
+
+
+PROFESSIONAL_RESULT_KEYS = (
+    "source_category_requested",
+    "source_category_applied",
+    "source_category_total",
+    "source_category_code",
+    "topic_fields_tried",
+    "eligible_record_count",
+    "excluded_out_of_scope_count",
+    "excluded_out_of_scope_records",
+    "already_covered_higher_priority_count",
+    "already_covered_higher_priority_records",
+    "first_page_only",
+    "complete",
+    "human_intervention_required",
+)
+
+
+def test_professional_result_exposes_field_facet_and_scope_counts() -> None:
+    """诊断字段必须恒定存在；缺字段会让调用方把"没筛过"误读成"筛过且为空"。"""
+    service = CnkiProfessionalSearchService(_executor([("某文", "管理世界")]))
+    result = asyncio.run(service.search_group("主题", service_module.CHINESE_TOP_GROUP, limit=1))
+
+    for key in PROFESSIONAL_RESULT_KEYS:
+        assert key in result, key
+    assert result["source_category_requested"] is None
+    assert result["source_category_code"] is None
+    assert result["source_category_applied"] is False
+    assert result["source_category_total"] is None
+    assert result["already_covered_higher_priority_count"] == 0
+    assert result["already_covered_higher_priority_records"] == []
+    assert result["first_page_only"] is True
+
+
+def test_faceted_group_reports_its_requested_source_category() -> None:
+    service = CnkiProfessionalSearchService(_executor([("某文", "管理世界")]))
+    result = asyncio.run(service.search_group("主题", service_module.CSSCI_GROUP, limit=1))
+
+    assert result["source_category_requested"] == "CSSCI"
+    assert result["source_category_code"] == "P0209"
+
+
+def test_custom_expression_reports_no_field_ladder_and_no_facet() -> None:
+    """使用者自备表达式原样单次执行，不套字段阶梯也不加分面。"""
+    service = CnkiProfessionalSearchService(_executor([("某文", "管理世界")]))
+    result = asyncio.run(service.search_expression("TI %= '主题'", limit=1))
+
+    for key in PROFESSIONAL_RESULT_KEYS:
+        assert key in result, key
+    assert result["topic_fields_tried"] == []
+    assert result["source_category_requested"] is None
+    assert result["source_category_code"] is None
+    assert result["source_category_applied"] is False
+
+
+def test_legacy_tuple_executor_never_claims_an_unverified_facet() -> None:
+    """三元组执行器拿不到分面证据，只能保守上报未生效。"""
+    service = CnkiProfessionalSearchService(_tuple_executor([("某文", "管理世界")]))
+    result = asyncio.run(service.search_group("主题", service_module.CSSCI_GROUP, limit=1))
+
+    assert result["source_category_applied"] is False
+    # 分面未经证实 => 结果页来源类别筛选的分组不得产出任何"合格"记录。
+    assert result["records"] == []
+
+
+def test_empty_batch_results_never_claim_the_facet_was_applied() -> None:
+    """断点持久化失败等路径会把 results 清空；all([]) 为真会凭空上报已筛选。"""
+    async def execute(_plan: ExpressionBatch) -> PlanExecutionResult:
+        return PlanExecutionResult(
+            status=SearchStatus.CONFIGURATION_ERROR.value,
+            html="",
+            url="",
+            source_category_applied=False,
+        )
+
+    service = CnkiProfessionalSearchService(execute)
+    result = asyncio.run(service.search_group("主题", service_module.CSSCI_GROUP, limit=1))
+
+    assert result["source_category_applied"] is False
+    assert result["records"] == []
+
+
+def test_facet_evidence_requires_every_batch_to_confirm_it() -> None:
+    """只要有一个批次没证实分面，整组就不得上报已筛选。"""
+    seen: list[int] = []
+
+    async def execute(plan: ExpressionBatch) -> PlanExecutionResult:
+        seen.append(plan.index)
+        return PlanExecutionResult(
+            status=SearchStatus.SUCCESS.value,
+            html=RESULT_TEMPLATE.format(title="某文", journal="管理世界"),
+            url="https://example.invalid/",
+            source_category_applied=len(seen) > 1,
+        )
+
+    service = CnkiProfessionalSearchService(execute)
+    result = asyncio.run(service.search_group("主题", service_module.CSSCI_GROUP, limit=1))
+
+    assert result["source_category_applied"] is False
+
+
+def test_abandoned_first_batch_challenge_never_claims_the_facet() -> None:
+    """首批即遭安全验证且人工放弃：一批未跑完，不得声称分面已生效。"""
+    async def execute(_plan: ExpressionBatch) -> PlanExecutionResult:
+        return PlanExecutionResult(
+            status=SearchStatus.CHALLENGE_DETECTED.value,
+            html="",
+            url="",
+            source_category_applied=False,
+        )
+
+    async def give_up(_plan: ExpressionBatch) -> bool:
+        return False
+
+    service = CnkiProfessionalSearchService(execute, on_challenge=give_up)
+    result = asyncio.run(service.search_group("主题", service_module.CSSCI_GROUP, limit=1))
+
+    assert result["source_category_applied"] is False
+    assert result["human_intervention_required"] is True
+    assert result["records"] == []

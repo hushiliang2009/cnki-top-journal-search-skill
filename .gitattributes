@@ -1,0 +1,5 @@
+# 审计产物由 scripts/generate_environment_catalog_v4.py 以 LF 渲染，并按字节比对校验。
+# Windows 上 core.autocrlf=true 会把检出的工作副本转成 CRLF，使仓库布局下的
+# `--check` 必然报"生成文件不一致"。固定为 LF，让三个平台的复算结果一致。
+# 发布包内产物的换行由 top-journal-search-lists-env/.gitattributes 负责，两者互不重叠。
+docs/audits/* text eol=lf

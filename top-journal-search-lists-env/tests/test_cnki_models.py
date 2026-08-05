@@ -25,6 +25,18 @@ def test_record_contract_has_no_url_or_fulltext_fields() -> None:
     }
 
 
+def test_record_exposes_safe_dedup_and_match_metadata() -> None:
+    names = {item.name for item in fields(PaperRecord)}
+    assert {
+        "topic_match_field",
+        "matched_topic_fields",
+        "matched_search_groups",
+    } <= names
+    assert not names & {
+        "doi", "detail_url", "download_url", "pdf_url", "caj_url", "abstract"
+    }
+
+
 def test_search_statuses_match_public_contract() -> None:
     assert {item.value for item in SearchStatus} == {
         "success", "no_results", "partial", "rate_limited",
@@ -76,8 +88,15 @@ def test_outcome_accepts_incomplete_records_only_in_incomplete_collection() -> N
     assert outcome.incomplete_records == [incomplete]
 
 
-def test_catalog_version_is_fixed_and_not_a_constructor_argument() -> None:
-    assert _record().catalog_version == "3.0"
+def test_catalog_version_and_v4_metadata_are_fixed_and_not_constructor_arguments() -> None:
+    record = _record()
+    assert record.catalog_version == "4.0"
+    assert record.catalog_date == "2026-07-29"
+    assert record.revision_date == "2026-07-31"
+    assert record.journal_id is None
+    assert record.aliases == []
+    assert record.index_subject_categories == {}
+    assert record.source_memberships == []
     with pytest.raises(TypeError):
         PaperRecord(
             title="Example", authors=[], journal_raw="Journal", publication_date="2026",
@@ -96,7 +115,7 @@ def test_outcome_rejects_formal_records_with_unverifiable_year(year: int) -> Non
 def test_service_rejects_invalid_arguments_instead_of_faking_page_contract_change() -> None:
     from cnki_search_env.service import CnkiPublicSearchService
 
-    catalog = Path(__file__).resolve().parents[1] / "references" / "环境科学与工程学科顶尖期刊目录_v3.0.md"
+    catalog = Path(__file__).resolve().parents[1] / "references" / "environment_journal_catalog_v4.0.json"
     service = CnkiPublicSearchService(catalog=catalog)
     for query, limit in (("   ", 20), ("topic", 0), ("topic", 21)):
         with pytest.raises(ValueError):

@@ -277,3 +277,38 @@ def test_professional_year_schema_has_supported_bounds() -> None:
         integer_schema = tool.parameters["properties"][name]["anyOf"][0]
         assert integer_schema["minimum"] == 1900
         assert integer_schema["maximum"] == date.today().year + 1
+
+
+def _professional_tool_schema() -> dict:
+    from mcp.server.fastmcp import FastMCP
+
+    mcp = CnkiMcpServer().build_fastmcp(FastMCP)
+    tool = next(
+        item
+        for item in mcp._tool_manager.list_tools()
+        if item.name == "cnki_professional_search"
+    )
+    return tool.parameters
+
+
+def test_group_schema_lists_exactly_the_controlled_scopes() -> None:
+    assert _professional_tool_schema()["properties"]["group"]["pattern"] == (
+        "^(chinese_top_journals|cssci)$"
+    )
+
+
+def test_facet_and_field_are_never_caller_controlled() -> None:
+    """来源类别和检索字段是内部策略，暴露成入参就等于让调用方绕过目录资格。"""
+    properties = _professional_tool_schema()["properties"]
+    for forbidden in ("source_category", "source_category_code", "topic_field"):
+        assert forbidden not in properties
+
+
+@pytest.mark.parametrize("group", list(("chinese_top_journals", "cssci")))
+def test_every_controlled_group_reaches_the_service(group: str) -> None:
+    service = FakeProfessionalService()
+    server = _server_with_service(service)
+
+    asyncio.run(server.cnki_professional_search("环境政策", group))
+
+    assert [call[1] for call in service.calls] == [group]

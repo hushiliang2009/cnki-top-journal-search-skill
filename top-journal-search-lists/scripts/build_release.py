@@ -29,6 +29,7 @@ CNKI_MODULES = (
 TEST_ALLOWLIST = (
     "tests/_mcp_handshake.py",
     "tests/_mcpb_handshake.py",
+    "tests/_mcpb_raw_handshake.py",
     "tests/_webvpn_probe.py",
     "tests/conftest.py",
     "tests/test_catalog_groups.py",

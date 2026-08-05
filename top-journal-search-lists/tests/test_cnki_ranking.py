@@ -24,3 +24,14 @@ def test_annotation_uses_catalog_and_preserves_unmatched() -> None:
     assert "经济学" in ranked[0].subject_categories
     assert ranked[1].journal_match_status == "unmatched"
     assert ranked[1].manual_review_required is True
+
+
+def test_annotation_prefers_earlier_topic_match_field_after_catalog_ranking() -> None:
+    title_match = record("经济研究", 1)
+    title_match.topic_match_field = "TI"
+    keyword_match = record("经济研究", 1)
+    keyword_match.topic_match_field = "KY"
+
+    ranked = annotate_and_sort_records([keyword_match, title_match], catalog=CATALOG)
+
+    assert [item.topic_match_field for item in ranked] == ["TI", "KY"]

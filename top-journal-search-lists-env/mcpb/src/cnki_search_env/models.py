@@ -66,6 +66,9 @@ class PaperRecord:
     result_rank: int
     source_database: str
     search_query: str
+    topic_match_field: str | None = None
+    matched_topic_fields: list[str] = field(default_factory=list)
+    matched_search_groups: list[str] = field(default_factory=list)
     journal_matched_title: str | None = None
     journal_match_status: str = "unmatched"
     journal_match_method: str | None = None
@@ -77,8 +80,13 @@ class PaperRecord:
     formal_evidence: list[str] = field(default_factory=list)
     index_memberships: list[str] = field(default_factory=list)
     ncs_internal_rank: int | None = None
-    catalog_version: str = field(default="3.0", init=False)
-    catalog_date: str = field(default="2026-07-26", init=False)
+    journal_id: str | None = None
+    aliases: list[str] = field(default_factory=list)
+    index_subject_categories: dict[str, list[str]] = field(default_factory=dict)
+    source_memberships: list[dict[str, Any]] = field(default_factory=list)
+    catalog_version: str = field(default="4.0", init=False)
+    catalog_date: str = field(default="2026-07-29", init=False)
+    revision_date: str = field(default="2026-07-31", init=False)
     manual_review_required: bool = True
 
     def __post_init__(self) -> None:

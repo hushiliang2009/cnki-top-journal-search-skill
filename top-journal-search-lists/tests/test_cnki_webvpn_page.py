@@ -4,12 +4,13 @@
 方式失败，因此固化成测试而不是只写注释。
 """
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from cnki_search import webvpn
 from cnki_search.models import SearchStatus
-from cnki_search.professional import ExpressionBatch
+from cnki_search.professional import ExpressionBatch, PlanExecutionResult, SourceCategorySpec
 
 
 class FakeLocator:
@@ -950,10 +951,15 @@ class PlanRecorder(webvpn.ProfessionalSearchPage):
         self.events.append("classify")
         return SearchStatus.SUCCESS
 
-    async def apply_source_category(self, name: str, *,
+    async def apply_source_category(self, category: SourceCategorySpec | str, *,
                                     timeout_seconds: float = 20.0) -> str | None:
-        self.events.append(f"facet:{name}")
-        return "10"
+        label = category.label if isinstance(category, SourceCategorySpec) else category
+        self.events.append(f"facet:{label}")
+        requested = category if isinstance(category, SourceCategorySpec) else \
+            SourceCategorySpec("P0209", category)
+        return webvpn.SourceCategoryApplication(
+            requested, True, 10, SearchStatus.SUCCESS,
+        )
 
     async def set_page_size(self, size: int = 50, *,
                             timeout_seconds: float = 20.0) -> int:
@@ -961,7 +967,7 @@ class PlanRecorder(webvpn.ProfessionalSearchPage):
         return size
 
 
-def _plan(*, source_category: str | None) -> ExpressionBatch:
+def _plan(*, source_category: SourceCategorySpec | str | None) -> ExpressionBatch:
     return ExpressionBatch(
         index=1,
         total=1,
@@ -972,16 +978,173 @@ def _plan(*, source_category: str | None) -> ExpressionBatch:
     )
 
 
+class ControlledFacetLocator:
+    def __init__(self) -> None:
+        self.checked = False
+
+    @property
+    def first(self) -> "ControlledFacetLocator":
+        return self
+
+    async def count(self) -> int:
+        return 1
+
+    async def check(self) -> None:
+        self.checked = True
+
+    async def is_checked(self) -> bool:
+        return self.checked
+
+
+class ControlledFacetPlanPage(PlanPage):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(events)
+        self.facet = ControlledFacetLocator()
+        self.facet_selector: str | None = None
+
+    def locator(self, selector: str) -> ControlledFacetLocator:
+        if selector.startswith("input[type=checkbox]"):
+            self.facet_selector = selector
+        return self.facet
+
+    async def evaluate(self, _script: str) -> str:
+        return "2,270" if self.facet.checked else "2,378"
+
+
+class ControlledFacetPlanDriver(webvpn.ProfessionalSearchPage):
+    def __init__(self, page: ControlledFacetPlanPage, events: list[str]) -> None:
+        super().__init__(page)
+        self.events = events
+
+    async def fill_expression(self, expression: str) -> None:
+        assert expression == "SU %= '数字经济'"
+        self.events.append("fill")
+
+    async def submit(self) -> None:
+        self.events.append("submit")
+
+    async def wait_for_outcome(self, timeout_seconds: float = 30) -> SearchStatus:
+        self.events.append("classify")
+        return SearchStatus.SUCCESS
+
+    async def set_page_size(self, size: int = 50, *,
+                            timeout_seconds: float = 20.0) -> int:
+        self.events.append(f"page_size:{size}")
+        return size
+
+
+class MissingFacetLocator:
+    @property
+    def first(self) -> "MissingFacetLocator":
+        return self
+
+    async def count(self) -> int:
+        return 0
+
+
+class MissingFacetPlanPage(PlanPage):
+    def locator(self, selector: str) -> MissingFacetLocator:
+        assert selector == webvpn.SOURCE_CATEGORY_SELECTOR.format(value="P01")
+        return MissingFacetLocator()
+
+
+class MissingFacetPlanDriver(webvpn.ProfessionalSearchPage):
+    def __init__(self, page: MissingFacetPlanPage, events: list[str]) -> None:
+        super().__init__(page)
+        self.events = events
+
+    async def fill_expression(self, expression: str) -> None:
+        assert expression == "SU %= '数字经济'"
+        self.events.append("fill")
+
+    async def submit(self) -> None:
+        self.events.append("submit")
+
+    async def wait_for_outcome(self, timeout_seconds: float = 30) -> SearchStatus:
+        self.events.append("classify")
+        return SearchStatus.SUCCESS
+
+    async def set_page_size(self, size: int = 50, *,
+                            timeout_seconds: float = 20.0) -> int:
+        self.events.append(f"page_size:{size}")
+        return size
+
+
+class PostFacetStatusDriver(PlanRecorder):
+    def __init__(self, events: list[str], status: SearchStatus, *,
+                 applied: bool = True) -> None:
+        super().__init__(events)
+        self.post_facet_status = status
+        self.applied = applied
+
+    async def apply_source_category(self, category: SourceCategorySpec | str, *,
+                                    timeout_seconds: float = 20.0):
+        label = category.label if isinstance(category, SourceCategorySpec) else category
+        self.events.extend((f"facet:{label}", f"classify:{self.post_facet_status.value}"))
+        return SimpleNamespace(
+            applied=self.applied,
+            total=50 if self.applied else None,
+            status=self.post_facet_status,
+        )
+
+
+def test_real_execute_plan_uses_controlled_facet_code_and_reports_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(webvpn.asyncio, "sleep", no_wait)
+    events: list[str] = []
+    page = ControlledFacetPlanPage(events)
+    driver = ControlledFacetPlanDriver(page, events)
+
+    result = asyncio.run(
+        driver.execute_plan(
+            _plan(source_category=SourceCategorySpec("P0209", "CSSCI"))
+        )
+    )
+
+    assert page.facet_selector == webvpn.SOURCE_CATEGORY_SELECTOR.format(
+        value="P0209"
+    )
+    assert result.source_category_applied is True
+    assert result.source_category_total == 2270
+
+
+def test_real_execute_plan_stops_when_requested_facet_is_missing() -> None:
+    """真实分面执行器缺少目标复选框时，不得退回未筛选结果。"""
+    events: list[str] = []
+    page = MissingFacetPlanPage(events)
+    driver = MissingFacetPlanDriver(page, events)
+
+    result = asyncio.run(
+        driver.execute_plan(
+            _plan(source_category=SourceCategorySpec("P01", "北大核心"))
+        )
+    )
+
+    assert result == PlanExecutionResult(
+        SearchStatus.PAGE_CONTRACT_CHANGED.value,
+        "",
+        "https://webvpn.example.edu.cn/result",
+        False,
+        None,
+    )
+    assert events == ["fill", "submit", "classify"]
+
+
 def test_execute_plan_applies_post_result_options_before_final_render() -> None:
     events: list[str] = []
     driver = PlanRecorder(events)
 
-    status, html, url = asyncio.run(driver.execute_plan(_plan(source_category="CSSCI")))
+    result = asyncio.run(
+        driver.execute_plan(_plan(source_category=SourceCategorySpec("P0209", "CSSCI")))
+    )
 
-    assert (status, html, url) == (
-        "success",
-        "<table class='result-table-list'></table>",
-        "https://webvpn.example.edu.cn/result",
+    assert result == PlanExecutionResult(
+        "success", "<table class='result-table-list'></table>",
+        "https://webvpn.example.edu.cn/result", True, 10,
     )
     assert events == [
         "fill", "submit", "classify",
@@ -989,13 +1152,138 @@ def test_execute_plan_applies_post_result_options_before_final_render() -> None:
     ]
 
 
+def test_execute_plan_reports_controlled_facet_application() -> None:
+    events: list[str] = []
+    driver = PlanRecorder(events)
+    plan = _plan(source_category=SourceCategorySpec("P0209", "CSSCI"))
+
+    result = asyncio.run(driver.execute_plan(plan))
+
+    assert isinstance(result, PlanExecutionResult)
+    assert result.status == SearchStatus.SUCCESS.value
+    assert result.source_category_applied is True
+    assert result.source_category_total == 10
+    assert events == [
+        "fill", "submit", "classify",
+        "facet:CSSCI", "page_size:50", "classify", "content",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("after_status", "expected"),
+    [
+        (SearchStatus.NO_RESULTS, "no_results"),
+        (SearchStatus.CHALLENGE_DETECTED, "challenge_detected"),
+        (SearchStatus.PAGE_CONTRACT_CHANGED, "page_contract_changed"),
+    ],
+)
+def test_execute_plan_rechecks_status_after_facet(
+    after_status: SearchStatus, expected: str,
+) -> None:
+    """分面刷新若进入终止状态，严禁再调整页大小或读取未筛选页面。"""
+    events: list[str] = []
+    result = asyncio.run(
+        PostFacetStatusDriver(events, after_status).execute_plan(
+            _plan(source_category=SourceCategorySpec("P0209", "CSSCI"))
+        )
+    )
+
+    assert result.status == expected
+    assert result.html == ""
+    assert "page_size:50" not in events
+
+
+def test_missing_or_unchecked_facet_never_returns_unfiltered_html() -> None:
+    events: list[str] = []
+    result = asyncio.run(
+        PostFacetStatusDriver(
+            events, SearchStatus.PAGE_CONTRACT_CHANGED, applied=False,
+        ).execute_plan(_plan(source_category=SourceCategorySpec("P01", "北大核心")))
+    )
+
+    assert result.status == SearchStatus.PAGE_CONTRACT_CHANGED.value
+    assert result.source_category_applied is False
+    assert result.html == ""
+    assert "page_size:50" not in events
+
+
+class AmbiguousFacetLocator:
+    """同一 value 命中多个复选框：结构已变，不能任选其一。"""
+
+    def __init__(self, count: int) -> None:
+        self._count = count
+        self.checked = False
+
+    @property
+    def first(self) -> "AmbiguousFacetLocator":
+        return AmbiguousFacetLocator(1)
+
+    async def count(self) -> int:
+        return self._count
+
+    async def check(self) -> None:
+        self.checked = True
+
+    async def is_checked(self) -> bool:
+        return self.checked
+
+
+class AmbiguousFacetPlanPage(PlanPage):
+    def locator(self, selector: str) -> AmbiguousFacetLocator:
+        if selector.startswith("input[type=checkbox]"):
+            return AmbiguousFacetLocator(2)
+        return AmbiguousFacetLocator(1)
+
+    async def evaluate(self, _script: str, _arg=None) -> str:
+        return "50"
+
+
+def test_duplicate_source_category_checkbox_is_a_contract_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`.first` 会掩盖歧义；命中数必须在取 first 之前判定。"""
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(webvpn.asyncio, "sleep", no_wait)
+    events: list[str] = []
+    driver = ControlledFacetPlanDriver(AmbiguousFacetPlanPage(events), events)
+
+    result = asyncio.run(
+        driver.execute_plan(_plan(source_category=SourceCategorySpec("P0209", "CSSCI")))
+    )
+
+    assert result.status == SearchStatus.PAGE_CONTRACT_CHANGED.value
+    assert result.source_category_applied is False
+    assert result.html == ""
+    assert "page_size:50" not in events
+
+
+def test_unapplied_facet_blocks_page_size_even_when_status_is_success() -> None:
+    """状态仍为 success 但分面未真正生效时，同样不得读取未筛选结果。"""
+    events: list[str] = []
+    result = asyncio.run(
+        PostFacetStatusDriver(
+            events, SearchStatus.SUCCESS, applied=False,
+        ).execute_plan(_plan(source_category=SourceCategorySpec("P0209", "CSSCI")))
+    )
+
+    assert result.status == SearchStatus.PAGE_CONTRACT_CHANGED.value
+    assert result.source_category_applied is False
+    assert result.source_category_total is None
+    assert result.html == ""
+    assert "page_size:50" not in events
+
+
 def test_execute_plan_omits_facet_for_chinese_top_plan() -> None:
     events: list[str] = []
     driver = PlanRecorder(events)
 
-    status, _html, _url = asyncio.run(driver.execute_plan(_plan(source_category=None)))
+    result = asyncio.run(driver.execute_plan(_plan(source_category=None)))
 
-    assert status == SearchStatus.SUCCESS.value
+    assert result.status == SearchStatus.SUCCESS.value
+    assert result.source_category_applied is False
+    assert result.source_category_total is None
     assert all(not event.startswith("facet:") for event in events)
 
 

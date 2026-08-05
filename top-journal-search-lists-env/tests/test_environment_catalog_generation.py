@@ -1,0 +1,583 @@
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+import sys
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+REFERENCES = ROOT / "references"
+BASELINE = REFERENCES / "环境科学与工程学科顶尖期刊目录_v4.0.md"
+SCRIPT = ROOT / "scripts" / "environment_catalog_v4.py"
+
+
+def output_paths(
+    root: Path,
+    *,
+    baseline: Path = BASELINE,
+    sources: object | None = None,
+):
+    """构造隔离的生成目标，以验证生成器不依赖既有派生文件。"""
+    catalog = _load_catalog_module()
+    if sources is None:
+        sources = catalog.SourcePaths.from_references(REFERENCES)
+    return catalog.OutputPaths(
+        baseline=baseline,
+        sources=sources,
+        skill_references=root / "skill",
+        mcpb_references=root / "mcpb",
+        audit_jsonl=root / "audits" / "environment_journal_match_audit_v4.0.jsonl",
+        audit_markdown=root / "audits" / "environment_journal_match_audit_v4.0.md",
+    )
+
+
+def _load_catalog_module():
+    assert SCRIPT.is_file(), "环境 v4.0 来源解析器尚未实现"
+    spec = importlib.util.spec_from_file_location("environment_catalog_v4", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip()[1:-1].split("|")]
+
+
+def _write_generated_baseline(
+    tmp_path: Path,
+    *,
+    include_baseline_title: bool = True,
+) -> Path:
+    """写入字段已重排的生成目录，以验证重跑不会重新定义基线身份。"""
+    lines = BASELINE.read_text(encoding="utf-8").splitlines()
+    rendered: list[str] = []
+    ordinal = 0
+    line_index = 0
+    while line_index < len(lines):
+        line = lines[line_index]
+        if (
+            line_index + 1 < len(lines)
+            and line.startswith("| 序号 |")
+            and lines[line_index + 1].startswith("|---")
+        ):
+            headers = _table_cells(line)
+            reordered_headers = ["正式题名", "期刊ID"]
+            if include_baseline_title:
+                reordered_headers.append("基线题名")
+            reordered_headers.extend(
+                header
+                for header in headers
+                if header not in {"期刊名称", "正式题名", "期刊ID", "基线题名"}
+            )
+            rendered.append("| " + " | ".join(reordered_headers) + " |")
+            rendered.append("|" + "|".join("---" for _ in reordered_headers) + "|")
+            line_index += 2
+            while line_index < len(lines) and lines[line_index].startswith("|"):
+                values = dict(zip(headers, _table_cells(lines[line_index]), strict=True))
+                ordinal += 1
+                baseline_title = values.get("基线题名", values.get("期刊名称", ""))
+                formal_title = (
+                    "Cell normalized title" if ordinal == 1 else values.get("正式题名", baseline_title)
+                )
+                row = [formal_title, f"ENVJ-LOCKED-{ordinal:06d}"]
+                if include_baseline_title:
+                    row.append(baseline_title)
+                row.extend(
+                    values[header]
+                    for header in headers
+                    if header not in {"期刊名称", "正式题名", "期刊ID", "基线题名"}
+                )
+                rendered.append("| " + " | ".join(row) + " |")
+                line_index += 1
+            continue
+        rendered.append(line)
+        line_index += 1
+
+    generated = tmp_path / "generated-v4-baseline.md"
+    generated.write_text("\n".join(rendered) + "\n", encoding="utf-8")
+    return generated
+
+
+def test_source_parsers_preserve_approved_counts_and_original_titles() -> None:
+    """删除解析或按逗号拆分北大核心原刊名时，此测试应失败。"""
+    catalog = _load_catalog_module()
+    paths = catalog.SourcePaths.from_references(REFERENCES)
+    ssci = catalog.parse_wos_csv(
+        paths.ssci_csv,
+        "SSCI",
+        display_titles=catalog.parse_wos_markdown(paths.ssci_markdown),
+    )
+    scie = catalog.parse_wos_csv(
+        paths.scie_csv,
+        "SCIE",
+        display_titles=catalog.parse_wos_markdown(paths.scie_markdown),
+    )
+    cssci = catalog.parse_cssci_markdown(paths.cssci_markdown)
+    natural = catalog.parse_pku_markdown(paths.pku_natural, "natural_sciences")
+    non_natural = catalog.parse_pku_markdown(
+        paths.pku_non_natural, "non_natural_sciences"
+    )
+
+    assert [len(items) for items in (ssci, scie, cssci, natural, non_natural)] == [
+        3538,
+        9430,
+        674,
+        1247,
+        740,
+    ]
+    renamed = next(item for item in natural if item.formal_title == "低碳化学与化工")
+    assert renamed.aliases == ("天然气化工.C1,化学与化工",)
+
+
+def test_v4_baseline_has_stable_ids_levels_and_priority_signature() -> None:
+    """删除十二级解析、改变顺序或改写稳定编号时，此测试应失败。"""
+    catalog = _load_catalog_module()
+    records = catalog.parse_v4_baseline(BASELINE)
+
+    assert len(records) == 3764
+    assert [sum(record.priority_level == level for record in records) for level in range(1, 13)] == [
+        4,
+        17,
+        5,
+        45,
+        17,
+        6,
+        134,
+        324,
+        241,
+        1229,
+        1181,
+        561,
+    ]
+    assert records[0].journal_id == "ENVJ-000001"
+    assert records[-1].journal_id == "ENVJ-003764"
+    assert len({record.formal_title for record in records}) == 3764
+    assert len(catalog.priority_signature(records)) == 3764
+    assert catalog.PRIORITY_GROUPS == (
+        "comprehensive_super_journals",
+        "ncs_pnas_environment_flagships",
+        "top_university_highest_consensus",
+        "top_university_high_level",
+        "environment_field_top",
+        "chinese_environment_top",
+        "other_formally_recognized",
+        "environment_ssci",
+        "environment_cssci",
+        "environment_scie",
+        "pku_core_natural_sciences",
+        "pku_core_non_natural_sciences",
+    )
+
+
+def test_v4_generated_baseline_reuses_ids_and_original_baseline_titles(
+    tmp_path: Path,
+) -> None:
+    """若重跑改写期刊ID、误用正式题名或改变签名，此测试应失败。"""
+    catalog = _load_catalog_module()
+    generated = _write_generated_baseline(tmp_path)
+
+    records = catalog.parse_v4_baseline(generated)
+    replayed = catalog.parse_v4_baseline(generated)
+
+    assert records[0].journal_id == "ENVJ-LOCKED-000001"
+    assert records[0].formal_title == "Cell"
+    assert records[0].priority_decision["baseline_title"] == "Cell"
+    assert catalog.priority_signature(records) == catalog.priority_signature(replayed)
+    assert catalog.priority_signature(records)[0] == (
+        "ENVJ-LOCKED-000001",
+        1,
+        "comprehensive_super_journals",
+        None,
+    )
+    assert catalog.priority_signature(records)[4] == (
+        "ENVJ-LOCKED-000005",
+        2,
+        "ncs_pnas_environment_flagships",
+        1,
+    )
+    assert catalog.priority_signature(records)[-1] == (
+        "ENVJ-LOCKED-003764",
+        12,
+        "pku_core_non_natural_sciences",
+        None,
+    )
+
+
+def test_v4_generated_baseline_requires_explicit_baseline_title(tmp_path: Path) -> None:
+    """若生成目录缺少基线题名仍被接受，此测试应失败。"""
+    catalog = _load_catalog_module()
+    generated = _write_generated_baseline(tmp_path, include_baseline_title=False)
+
+    with pytest.raises(ValueError, match="生成目录缺少基线题名列"):
+        catalog.parse_v4_baseline(generated)
+
+
+def test_v4_baseline_excludes_appendix_only_titles() -> None:
+    """若附录一的期刊进入十二级签名，此测试应失败。"""
+    catalog = _load_catalog_module()
+    records = catalog.parse_v4_baseline(BASELINE)
+
+    assert "Innovation" not in {record.formal_title for record in records}
+
+
+def test_v4_baseline_reads_columns_by_header_after_reordering(tmp_path: Path) -> None:
+    """若解析器按列位置而非表头读取生成目录，此测试应失败。"""
+    catalog = _load_catalog_module()
+    generated = _write_generated_baseline(tmp_path)
+
+    records = catalog.parse_v4_baseline(generated)
+
+    assert records[0].environment_subfields == ["环境科学与工程综合"]
+    assert records[0].formal_evidence == [
+        "上海交通大学环境科学与工程学院 AAAAA+（U5）"
+    ]
+
+
+def test_approved_source_counts_intersections_and_aliases() -> None:
+    """删除受控匹配或来源审计时，此测试应失败。"""
+    catalog = _load_catalog_module()
+
+    bundle = catalog.build_catalog_bundle(
+        BASELINE,
+        catalog.SourcePaths.from_references(REFERENCES),
+    )
+
+    assert bundle.match_counts == {
+        "CSSCI": (674, 592, 82),
+        "PKU_CORE_NATURAL": (1247, 1247, 0),
+        "PKU_CORE_NON_NATURAL": (740, 740, 0),
+        "SSCI": (3538, 348, 3190),
+        "SCIE": (9430, 1499, 7931),
+    }
+    assert bundle.intersections == {
+        "CSSCI&PKU_CORE_NATURAL": 22,
+        "CSSCI&PKU_CORE_NON_NATURAL": 520,
+        "SSCI&SCIE": 149,
+    }
+    assert bundle.zero_intersections == {
+        "CSSCI&SSCI": 0,
+        "CSSCI&SCIE": 0,
+        "PKU_CORE_NATURAL&PKU_CORE_NON_NATURAL": 0,
+        "PKU_CORE_NATURAL&SSCI": 0,
+        "PKU_CORE_NATURAL&SCIE": 0,
+        "PKU_CORE_NON_NATURAL&SSCI": 0,
+        "PKU_CORE_NON_NATURAL&SCIE": 0,
+    }
+    assert bundle.controlled_alias_count == 26
+    assert bundle.expected_but_unmatched_count == 0
+    assert bundle.ambiguous_count == 0
+
+    by_title = {record.formal_title: record for record in bundle.records}
+    expected_records = {
+        "Nature Climate Change": (
+            "ENVJ-000006", 2, 1, {"SSCI", "SCIE"}, {"SSCI:02604", "SCIE:07057"}
+        ),
+        "Environmental Science & Technology": (
+            "ENVJ-000024", 3, None, {"SCIE"}, {"SCIE:02891"}
+        ),
+        "中国人口·资源与环境": (
+            "ENVJ-000169", 7, None, {"CSSCI", "PKU_CORE"},
+            {"CSSCI:0620", "PKU_CORE:natural_sciences:0012"},
+        ),
+        "WIREs Climate Change": (
+            "ENVJ-000549", 8, None, {"SSCI", "SCIE"}, {"SSCI:03485", "SCIE:09329"}
+        ),
+        "城市规划": (
+            "ENVJ-000652", 9, None, {"CSSCI", "PKU_CORE"},
+            {"CSSCI:0035", "PKU_CORE:natural_sciences:0007"},
+        ),
+        "WIREs Energy and Environment": (
+            "ENVJ-002018", 10, None, {"SCIE"}, {"SCIE:09333"}
+        ),
+        "Zeitschrift für Geomorphologie": (
+            "ENVJ-002022", 10, None, {"SCIE"}, {"SCIE:09394"}
+        ),
+        "陆军军医大学学报": (
+            "ENVJ-002335", 11, None, {"PKU_CORE"},
+            {"PKU_CORE:natural_sciences:0005"},
+        ),
+        "中国社会科学": (
+            "ENVJ-003204", 12, None, {"CSSCI", "PKU_CORE"},
+            {"CSSCI:0627", "PKU_CORE:non_natural_sciences:0001"},
+        ),
+    }
+    for title, (journal_id, level, rank, memberships, source_ids) in expected_records.items():
+        record = by_title[title]
+        assert (record.journal_id, record.priority_level, record.ncs_internal_rank) == (
+            journal_id,
+            level,
+            rank,
+        )
+        assert set(record.index_memberships) == memberships
+        assert {item["index_name"] for item in record.source_memberships} == memberships
+        assert {item["source_record_id"] for item in record.source_memberships} == source_ids
+    assert by_title["Zeitschrift für Geomorphologie"].source_memberships[0][
+        "match_method"
+    ] == "controlled_alias"
+    assert "第三军医大学学报" in by_title["陆军军医大学学报"].aliases
+
+    assert all(record.priority_decision["unchanged"] is True for record in bundle.records)
+
+
+def test_match_source_records_marks_expected_catalog_membership_unmatched() -> None:
+    """删除预期索引回连审计时，此测试应失败。"""
+    catalog = _load_catalog_module()
+    record = next(
+        item for item in catalog.parse_v4_baseline(BASELINE) if item.priority_level == 8
+    )
+
+    audit = catalog.match_source_records([record], [], controlled_aliases={})
+
+    assert len(audit) == 1
+    expected = audit[0]
+    assert expected.status == "expected_but_unmatched"
+    assert expected.journal_id == record.journal_id
+    assert expected.match_method == "expected_index_membership"
+    assert expected.manual_review_required is True
+    assert expected.review_reasons == ("SSCI",)
+
+
+def test_catalog_json_is_canonical_and_cnki_scopes_are_explicit() -> None:
+    """Changing the canonical payload or fixed CNKI policies must fail here."""
+    catalog = _load_catalog_module()
+    bundle = catalog.build_catalog_bundle(
+        BASELINE,
+        catalog.SourcePaths.from_references(REFERENCES),
+    )
+
+    payload = bundle.catalog_payload
+    assert set(payload) == {
+        "schema_version",
+        "catalog_version",
+        "catalog_date",
+        "revision_date",
+        "data_sha256",
+        "level_counts",
+        "priority_groups",
+        "journals",
+        "cnki_scopes",
+    }
+    assert len(payload["journals"]) == 3764
+    assert payload["data_sha256"] == catalog.compute_data_sha256(payload)
+    assert catalog.canonical_json_bytes({"z": "last", "a": "first"}) == (
+        b'{"a":"first","z":"last"}\n'
+    )
+    with pytest.raises(TypeError):
+        catalog.canonical_json_bytes({"value": 1.0})
+
+    journals = payload["journals"]
+    pku_members = [record for record in journals if "PKU_CORE" in record["index_memberships"]]
+    assert len(pku_members) == 1987
+    assert sum(record["priority_level"] <= 10 for record in pku_members) == 245
+    assert sum(record["priority_level"] >= 11 for record in pku_members) == 1742
+    cssci_members = [record for record in journals if "CSSCI" in record["index_memberships"]]
+    assert len(cssci_members) == 592
+    assert sum(record["priority_group"] == "environment_cssci" for record in cssci_members) == 241
+    assert sum(record["priority_group"] != "environment_cssci" for record in cssci_members) == 351
+
+    scopes = payload["cnki_scopes"]
+    assert len(scopes["chinese_environment_top"]["eligible_journal_ids"]) == 6
+    assert len(scopes["other_formally_recognized_chinese"]["eligible_journal_ids"]) == 60
+    assert len(scopes["environment_cssci"]["eligible_journal_ids"]) == 241
+    assert len(scopes["pku_core"]["eligible_journal_ids"]) == 1987
+    assert scopes["environment_cssci"]["source_category"] == {
+        "code": "P0209",
+        "label": "CSSCI",
+    }
+    assert scopes["pku_core"]["journal_selector"] == "topic_only"
+    assert scopes["pku_core"]["source_category"] == {
+        "code": "P01",
+        "label": "北大核心",
+    }
+
+
+def test_source_registry_has_seven_verified_artifacts_and_resolves_evidence_ids() -> None:
+    """Removing an approved snapshot or orphaning evidence IDs must fail here."""
+    catalog = _load_catalog_module()
+    bundle = catalog.build_catalog_bundle(
+        BASELINE,
+        catalog.SourcePaths.from_references(REFERENCES),
+    )
+
+    registry = bundle.source_registry
+    artifacts = registry["artifacts"]
+    assert len(artifacts) == 7
+    assert {item["filename"] for item in artifacts} == {
+        "CSSCI_2025_2026.md",
+        "北大中文核心期刊目录_2023_自然科学版.md",
+        "北大中文核心期刊目录_2023_.md",
+        "Social Sciences Citation Index_20260715.md",
+        "Social Sciences Citation Index (SSCI).csv",
+        "Science Citation Index Expanded_20260715.md",
+        "Science Citation Index Expanded (SCIE).csv",
+    }
+    assert all(item["bytes"] > 0 and len(item["sha256"]) == 64 for item in artifacts)
+
+    evidence_ids = [item["evidence_id"] for item in registry["evidence_registry"]]
+    assert len(evidence_ids) == len(set(evidence_ids))
+    registered = set(evidence_ids)
+    referenced = {
+        evidence_id
+        for record in bundle.catalog_payload["journals"]
+        for evidence_id in record["evidence_ids"]
+        + record["formal_title_evidence_ids"]
+    }
+    assert referenced <= registered
+
+
+def test_generated_outputs_are_deterministic_hashed_and_mirrored(tmp_path: Path) -> None:
+    """删去确定性渲染、哈希回填或镜像写入时，此测试应失败。"""
+    catalog = _load_catalog_module()
+
+    first = catalog.generate_outputs(output_paths(tmp_path / "one"), check=False)
+    second = catalog.generate_outputs(output_paths(tmp_path / "two"), check=False)
+
+    assert first == second
+    for name in catalog.MIRRORED_REFERENCE_FILES:
+        assert (tmp_path / "one" / "skill" / name).read_bytes() == (
+            tmp_path / "one" / "mcpb" / name
+        ).read_bytes()
+    for name in catalog.SOURCE_REFERENCE_FILES:
+        expected = (REFERENCES / name).read_bytes()
+        assert (tmp_path / "one" / "skill" / name).read_bytes() == expected
+        assert (tmp_path / "one" / "mcpb" / name).read_bytes() == expected
+    markdown = (
+        tmp_path / "one" / "skill" / "环境科学与工程学科顶尖期刊目录_v4.0.md"
+    ).read_text("utf-8")
+    assert 'revision_date: "2026-07-31"' in markdown
+    assert "{{CONTENT_SHA256}}" not in markdown
+    for statistic in (
+        "前十级唯一期刊数：2022",
+        "北大核心原始记录：1987",
+        "排除前十级重复：245",
+        "第十一、十二级净新增：1742",
+        "受控别名：26",
+    ):
+        assert statistic in markdown
+
+
+def test_generated_catalog_preserves_structured_scie_and_v2_appendices() -> None:
+    """若生成器丢弃 SCIE 分类或 v2.0 处置附录，此测试应失败。"""
+    catalog = _load_catalog_module()
+    bundle = catalog.build_catalog_bundle(
+        BASELINE,
+        catalog.SourcePaths.from_references(REFERENCES),
+    )
+
+    assert bundle.scie_appendix_markdown.startswith(
+        "## 附录一：环境相关SCIE分类目录\n"
+    )
+    assert "### 第十级子规则一：直接相关类别完整纳入" in (
+        bundle.scie_appendix_markdown
+    )
+    assert bundle.v2_disposition_appendix_markdown.startswith(
+        "## 附录二：v2.0期刊处置记录\n"
+    )
+    assert "| 原序号 | v2.0名称 | v3.0正式名称 |" in (
+        bundle.v2_disposition_appendix_markdown
+    )
+
+
+def test_generated_markdown_cannot_feed_derived_fields_back_into_matching(
+    tmp_path: Path,
+) -> None:
+    """若派生字段重新参与匹配，生成目录作为输入时将产生不同结果。"""
+    catalog = _load_catalog_module()
+
+    first_paths = output_paths(tmp_path / "first")
+    catalog.generate_outputs(first_paths, check=False)
+    second_paths = output_paths(
+        tmp_path / "second",
+        baseline=(
+            first_paths.skill_references / "环境科学与工程学科顶尖期刊目录_v4.0.md"
+        ),
+        sources=catalog.SourcePaths.from_references(first_paths.skill_references),
+    )
+    catalog.generate_outputs(second_paths, check=False)
+
+    for name in catalog.MIRRORED_REFERENCE_FILES:
+        assert (first_paths.skill_references / name).read_bytes() == (
+            second_paths.skill_references / name
+        ).read_bytes()
+    assert first_paths.audit_jsonl.read_bytes() == second_paths.audit_jsonl.read_bytes()
+    assert first_paths.audit_markdown.read_bytes() == second_paths.audit_markdown.read_bytes()
+
+
+def test_check_mode_reports_stale_output_without_writing(tmp_path: Path) -> None:
+    """若检查模式改写失配文件或未报告失配，此测试应失败。"""
+    catalog = _load_catalog_module()
+    paths = output_paths(tmp_path / "output")
+    catalog.generate_outputs(paths, check=False)
+    catalog_path = paths.skill_references / "environment_journal_catalog_v4.0.json"
+    catalog_path.write_bytes(b"stale\n")
+
+    with pytest.raises(ValueError, match="生成文件不一致"):
+        catalog.generate_outputs(paths, check=True)
+
+    assert catalog_path.read_bytes() == b"stale\n"
+
+
+def test_check_mode_still_verifies_packaged_files_without_repository_audits(
+    tmp_path: Path,
+) -> None:
+    """发布包里没有 docs/audits——完整审计 JSONL 是仓库专有的，按计划不进任何发布包。
+
+    收件人解压后仍应能用随包脚本复算目录本身；把审计输出当作硬性前提会让
+    --check 在发布布局下必然失败，等于这条离线校验路径根本不可用。
+    """
+    catalog = _load_catalog_module()
+    paths = output_paths(tmp_path / "output")
+    catalog.generate_outputs(paths, check=False)
+    portable = catalog.OutputPaths(
+        baseline=paths.baseline,
+        sources=paths.sources,
+        skill_references=paths.skill_references,
+        mcpb_references=paths.mcpb_references,
+        audit_jsonl=None,
+        audit_markdown=None,
+    )
+
+    hashes = catalog.generate_outputs(portable, check=True)
+
+    assert set(hashes) == set(catalog.MIRRORED_REFERENCE_FILES)
+    # 跳过审计并不放宽对随包文件的校验：目录本身被改动仍须报错。
+    (paths.skill_references / "environment_journal_catalog_v4.0.json").write_bytes(b"stale\n")
+    with pytest.raises(ValueError, match="生成文件不一致"):
+        catalog.generate_outputs(portable, check=True)
+
+
+def test_cli_check_succeeds_from_an_extracted_skill_without_repository(
+    tmp_path: Path,
+) -> None:
+    """模拟用户解压 Skill ZIP 后的布局：没有 .git，也没有 docs/audits。"""
+    import os
+    import shutil
+    import subprocess
+
+    extracted = tmp_path / "extracted" / "top-journal-search-lists-env"
+    (extracted / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPT, extracted / "scripts" / SCRIPT.name)
+    shutil.copy2(
+        ROOT / "scripts" / "generate_environment_catalog_v4.py",
+        extracted / "scripts" / "generate_environment_catalog_v4.py",
+    )
+    shutil.copytree(REFERENCES, extracted / "references")
+    shutil.copytree(ROOT / "mcpb" / "src" / "references", extracted / "mcpb" / "src" / "references")
+
+    completed = subprocess.run(
+        [sys.executable, str(extracted / "scripts" / "generate_environment_catalog_v4.py"), "--check"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=tmp_path,
+        env=os.environ | {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "environment_journal_catalog_v4.0.json" in completed.stdout
+    # 部分校验必须自报家门，否则会被当成完整校验。
+    assert "docs/audits" in completed.stdout or "审计" in completed.stdout

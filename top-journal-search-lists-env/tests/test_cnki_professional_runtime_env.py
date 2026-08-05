@@ -2,6 +2,9 @@ import asyncio
 
 import pytest
 
+from cnki_search_env import professional_runtime
+from cnki_search_env.professional import PlanExecutionResult
+
 
 class FakeSession:
     def __init__(self) -> None:
@@ -84,7 +87,6 @@ def test_runtime_aclose_closes_session_once_and_rejects_new_calls() -> None:
 def test_batch_executor_opens_from_home_and_closes_only_result_tab(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from cnki_search_env import professional_runtime
     from cnki_search_env.professional import ExpressionBatch
 
     async def scenario() -> None:
@@ -134,7 +136,7 @@ def test_batch_executor_opens_from_home_and_closes_only_result_tab(
         executor = professional_runtime.ProfessionalBatchExecutor(session)
         plan = ExpressionBatch(1, 1, (), "SU %= '数字经济'")
 
-        assert await executor(plan) == ("success", "<html>ok</html>", "")
+        assert await executor(plan) == PlanExecutionResult("success", "<html>ok</html>", "")
         assert events == [
             "open",
             "switch",
@@ -207,7 +209,7 @@ def test_challenge_page_is_only_observed_then_closed_before_retry(
         )
         plan = ExpressionBatch(1, 1, (), "SU %= '数字经济'")
 
-        assert await executor(plan) == ("challenge_detected", "", "")
+        assert await executor(plan) == PlanExecutionResult("challenge_detected", "", "")
         assert challenge.closed is False
         assert executor.active_challenge_page is challenge
         assert await executor.wait_for_manual_challenge(plan) is True

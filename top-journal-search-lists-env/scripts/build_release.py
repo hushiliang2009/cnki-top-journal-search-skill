@@ -27,6 +27,19 @@ CNKI_MODULES = (
     "session.py",
     "webvpn.py",
 )
+V4_REFERENCE_FILES = (
+    "环境科学与工程学科顶尖期刊目录_v4.0.md",
+    "environment_journal_catalog_v4.0.json",
+    "environment_catalog_sources_v4.0.json",
+    "environment_journal_match_audit_v4.0.md",
+    "CSSCI_2025_2026.md",
+    "北大中文核心期刊目录_2023_自然科学版.md",
+    "北大中文核心期刊目录_2023_.md",
+    "Social Sciences Citation Index_20260715.md",
+    "Social Sciences Citation Index (SSCI).csv",
+    "Science Citation Index Expanded_20260715.md",
+    "Science Citation Index Expanded (SCIE).csv",
+)
 TEST_ALLOWLIST = (
     "tests/_mcp_handshake.py",
     "tests/_mcpb_handshake.py",
@@ -52,6 +65,7 @@ TEST_ALLOWLIST = (
     "tests/test_cnki_search_env.py",
     "tests/test_cnki_service.py",
     "tests/test_cnki_session.py",
+    "tests/test_environment_catalog_generation.py",
     "tests/test_skill_contract.py",
     "tests/test_installers.py",
     "tests/test_install_config_security.py",
@@ -73,7 +87,7 @@ MCPB_ALLOWLIST = (
     "pyproject.toml",
     "src/catalog_lookup.py",
     *(f"src/cnki_search_env/{name}" for name in CNKI_MODULES),
-    "src/references/环境科学与工程学科顶尖期刊目录_v3.0.md",
+    *(f"src/references/{name}" for name in V4_REFERENCE_FILES),
     "src/server.py",
     "uv.lock",
 )
@@ -86,10 +100,12 @@ SKILL_ALLOWLIST = (
     "installers/install.ps1",
     "installers/install.sh",
     *(f"mcpb/{relative}" for relative in MCPB_ALLOWLIST),
-    "references/环境科学与工程学科顶尖期刊目录_v3.0.md",
+    *(f"references/{name}" for name in V4_REFERENCE_FILES),
     "references/cnki-search-env-reference.md",
     "scripts/build_release.py",
     "scripts/catalog_lookup.py",
+    "scripts/environment_catalog_v4.py",
+    "scripts/generate_environment_catalog_v4.py",
     *(f"scripts/cnki_search_env/{name}" for name in CNKI_MODULES),
     *TEST_ALLOWLIST,
 )

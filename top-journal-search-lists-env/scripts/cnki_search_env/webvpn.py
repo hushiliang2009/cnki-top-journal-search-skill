@@ -27,6 +27,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time
 import unicodedata
@@ -45,7 +46,12 @@ from .models import (
     SearchStatus,
     is_verifiable_publication_year,
 )
-from .professional import ExpressionBatch
+from .professional import (
+    TOPIC_FIELD_PRIORITY,
+    ExpressionBatch,
+    PlanExecutionResult,
+    SourceCategorySpec,
+)
 
 #: 实测：连续 4 次快速请求即触发安全验证，冷却约 75 秒后恢复。30 秒是据此取的
 #: 保守值，**不是**二分测试得出的安全阈值，长时间高频使用仍可能触发风控。
@@ -111,6 +117,16 @@ SOURCE_CATEGORY_SELECTOR = "input[type=checkbox][value='{value}']"
 TOTAL_COUNT_JS = (
     r"""() => (document.body.innerText.match(/共找到\s*([\d,]+)\s*条结果/) || [])[1] || null"""
 )
+
+
+@dataclass(frozen=True, slots=True)
+class SourceCategoryApplication:
+    """结果页来源类别分面的稳定应用状态。"""
+
+    requested: SourceCategorySpec
+    applied: bool
+    total: int | None
+    status: SearchStatus
 #: 每页条数是自定义下拉，不是原生 <select>；列表默认 display:none，需先点开。
 #: 实测档位仅 10/20/50。
 PAGE_SIZE_CLICK_JS = """(want) => {
@@ -442,7 +458,68 @@ _CHECKPOINT_RECORD_FIELDS = (
     "is_online_first",
     "result_rank",
     "source_database",
+    "topic_match_field",
+    "matched_topic_fields",
+    "matched_search_groups",
 )
+
+#: 分组标识是受控枚举值，不是自由文本；只允许小写标识符字符，含控制字符即拒绝。
+_SEARCH_GROUP_PATTERN = re.compile(r"^[a-z0-9_]{1,64}$")
+_MAX_MATCHED_SEARCH_GROUPS = 8
+
+
+def _checkpoint_match_metadata(source: Mapping[str, Any]) -> dict[str, Any] | None:
+    """校验字段与分组命中元数据。字段名和分组名都是受控枚举，越界即整条丢弃。"""
+    topic_match_field = source.get("topic_match_field")
+    if topic_match_field is not None and topic_match_field not in TOPIC_FIELD_PRIORITY:
+        return None
+    matched_topic_fields = source.get("matched_topic_fields", [])
+    if not isinstance(matched_topic_fields, list) or any(
+        item not in TOPIC_FIELD_PRIORITY for item in matched_topic_fields
+    ):
+        return None
+    if len(matched_topic_fields) > len(TOPIC_FIELD_PRIORITY):
+        return None
+    matched_search_groups = source.get("matched_search_groups", [])
+    if not isinstance(matched_search_groups, list) or any(
+        not isinstance(item, str) or not _SEARCH_GROUP_PATTERN.fullmatch(item)
+        for item in matched_search_groups
+    ):
+        return None
+    if len(matched_search_groups) > _MAX_MATCHED_SEARCH_GROUPS:
+        return None
+    return {
+        "topic_match_field": topic_match_field,
+        "matched_topic_fields": list(matched_topic_fields),
+        "matched_search_groups": list(matched_search_groups),
+    }
+
+
+def _checkpoint_token(batches: Sequence[ExpressionBatch]) -> str:
+    """断点身份摘要。
+
+    只哈希表达式会让"同一表达式 + 不同分面、字段、范围或目录版本"共用断点，
+    续跑时把上一次的结果冒充成本次结果。这里摘要完整身份，且仍只落盘摘要。
+    """
+    identity = [
+        {
+            "expression": batch.expression,
+            "scope_id": batch.scope_id,
+            "catalog_version": batch.catalog_version,
+            "topic_field": batch.topic_field,
+            "source_category": (
+                None if batch.source_category is None else {
+                    "code": batch.source_category.code,
+                    "label": batch.source_category.label,
+                }
+            ),
+            "page_size": batch.page_size,
+        }
+        for batch in batches
+    ]
+    canonical = json.dumps(identity, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _checkpoint_text(value: str) -> str | None:
@@ -608,6 +685,10 @@ def _checkpoint_record(
         if not isinstance(value, bool):
             return None
         safe[name] = value
+    matches = _checkpoint_match_metadata(source)
+    if matches is None:
+        return None
+    safe.update(matches)
     return {
         name: safe[name]
         for name in _CHECKPOINT_RECORD_FIELDS
@@ -751,9 +832,7 @@ async def run_batches(
     """
     if not batches:
         raise ValueError("批次列表不能为空")
-    token = hashlib.sha256(
-        "\n".join(batch.expression for batch in batches).encode("utf-8")
-    ).hexdigest()
+    token = _checkpoint_token(batches)
     if checkpoint is not None:
         try:
             checkpoint.load(token)
@@ -1479,32 +1558,41 @@ class ProfessionalSearchPage:
             return await await_maybe(self.page.evaluate(TOTAL_COUNT_JS))
         return None
 
-    async def apply_source_category(self, name: str, *,
-                                    timeout_seconds: float = 20.0) -> str | None:
-        """在结果页勾选来源类别分面，返回筛选后的结果总数。
+    async def apply_source_category(self, category: SourceCategorySpec, *,
+                                    timeout_seconds: float = 20.0) -> SourceCategoryApplication:
+        """在结果页勾选来源类别分面，并复核稳定的筛选后状态。
 
         必须先完成一次检索——分面不在高级检索输入页上，只在结果页出现。
         """
-        value = SOURCE_CATEGORY_VALUES.get(name)
-        if value is None:
-            raise ValueError(
-                f"未知的来源类别 {name!r}，可选：{sorted(SOURCE_CATEGORY_VALUES)}"
-            )
-        box = self.page.locator(SOURCE_CATEGORY_SELECTOR.format(value=value))
-        if await await_maybe(box.count()) < 1:
+        requested = category
+        value, label = requested.code, requested.label
+        # 命中数必须在取 .first 之前判定：.first 恒为 0 或 1，会掩盖多命中的歧义。
+        matches = self.page.locator(SOURCE_CATEGORY_SELECTOR.format(value=value))
+        if await await_maybe(matches.count()) != 1:
             raise WebVpnNavigationError(
-                f"结果页未找到「{name}」来源类别分面；需先完成一次检索"
+                f"结果页未找到唯一的「{label}」来源类别分面；需先完成一次检索"
             )
-        before = await self.total_results()
-        await await_maybe(box.first.check())
-        # 分面是异步刷新，等总数变化而不是固定 sleep
+        box = matches.first
+        await await_maybe(box.check())
+        previous: tuple[object, ...] | None = None
+        stable = 0
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
-            await asyncio.sleep(1)
-            current = await self.total_results()
-            if current and current != before:
-                return current
-        return await self.total_results()
+            await asyncio.sleep(0.5)
+            checked = bool(await await_maybe(box.is_checked()))
+            status = await self.classify_outcome()
+            total_text = await self.total_results()
+            rows = await await_maybe(
+                self.page.locator(RESULT_TABLE_SELECTOR + " tbody tr").count()
+            )
+            snapshot = (checked, status.value, total_text, rows)
+            stable = stable + 1 if checked and snapshot == previous else 0
+            previous = snapshot
+            if stable >= 1 and status is not SearchStatus.PAGE_CONTRACT_CHANGED:
+                compact = (total_text or "").replace(",", "").strip()
+                total = int(compact) if compact.isdecimal() else None
+                return SourceCategoryApplication(requested, True, total, status)
+        raise WebVpnNavigationError(f"来源类别未稳定生效：{label}")
 
     async def classify_outcome(self) -> SearchStatus:
         """判定提交后的页面状态。顺序很重要：先看结果，再看拒绝，最后才看验证码。"""
@@ -1543,17 +1631,32 @@ class ProfessionalSearchPage:
                 return status
             await sleep(poll_seconds)
 
-    async def execute_plan(self, plan: ExpressionBatch) -> tuple[str, str, str]:
+    async def execute_plan(self, plan: ExpressionBatch) -> PlanExecutionResult:
         await self.fill_expression(plan.expression)
         await self.submit()
         status = await self.wait_for_outcome()
+        application: SourceCategoryApplication | None = None
         if status is SearchStatus.SUCCESS:
             if plan.source_category is not None:
-                await self.apply_source_category(plan.source_category)
-            await self.set_page_size(plan.page_size)
-            status = await self.wait_for_outcome()
+                try:
+                    application = await self.apply_source_category(plan.source_category)
+                    status = (
+                        application.status if application.applied
+                        else SearchStatus.PAGE_CONTRACT_CHANGED
+                    )
+                except WebVpnNavigationError:
+                    status = SearchStatus.PAGE_CONTRACT_CHANGED
+            if status is SearchStatus.SUCCESS:
+                await self.set_page_size(plan.page_size)
+                status = await self.wait_for_outcome()
         html = await await_maybe(self.page.content()) if status is SearchStatus.SUCCESS else ""
-        return status.value, html, str(getattr(self.page, "url", ""))
+        return PlanExecutionResult(
+            status=status.value,
+            html=html,
+            url=str(getattr(self.page, "url", "")),
+            source_category_applied=bool(application and application.applied),
+            source_category_total=None if application is None else application.total,
+        )
 
 
 class _EphemeralContextFactory:

@@ -9,8 +9,8 @@ description: Use when the user asks to search, review, organize, or synthesize l
 
 以 ai4scholar 为主要来源，以 `cnki_search_env(query, limit)` 作为近期中文
 期刊论文的补充来源。期刊判级只能依据
-`references/环境科学与工程学科顶尖期刊目录_v3.0.md`，目录版本为 3.0，
-日期为 2026-07-26。
+`references/环境科学与工程学科顶尖期刊目录_v4.0.md`，目录版本为 4.0，
+日期为 2026-07-29，修订日期为 2026-07-31。
 
 普通检索不得全文加载约 408 KB 的目录。先运行目录脚本，再按查询结果判级：
 
@@ -37,8 +37,9 @@ python scripts/catalog_lookup.py lookup "Journal A" "Journal B"
 5. 需要中文论文、近期中国研究或用户明确要求 CNKI 时，调用
    `cnki_search_env(query, limit)`。该工具只执行公开首页主题检索，读取第一页，
    `limit` 为 1 至 20。
-6. 用户已启用 WebVPN 人工值守模式，且需要按中文环境顶尖期刊或环境 CSSCI
-   定向查证时，才调用 `cnki_professional_search_env(topic, group, limit,
+6. 用户已启用 WebVPN 人工值守模式，且需要按中文环境顶尖期刊、其他正式认可
+   中文期刊、环境 CSSCI 或北大核心定向查证时，才调用
+   `cnki_professional_search_env(topic, group, limit,
    year_from, year_to)`。启用前必须告知：需要本人登录、浏览器窗口全程打开、
    中途可能需要人工完成安全验证。返回值中的 `human_intervention_required`
    与 `complete` 必须如实转述；`complete` 为假时不得把结果当作该主题的完整
@@ -49,7 +50,7 @@ python scripts/catalog_lookup.py lookup "Journal A" "Journal B"
    `ncs_internal_rank` 升序排列。未匹配或歧义结果保持
    `manual_review_required=true`，不得自行赋级。
 
-## 十级顺序
+## 十二级顺序
 
 | 层级 | `priority_group` |
 |---:|---|
@@ -63,12 +64,24 @@ python scripts/catalog_lookup.py lookup "Journal A" "Journal B"
 | 8 | `environment_ssci` |
 | 9 | `environment_cssci` |
 | 10 | `environment_scie` |
+| 11 | `pku_core_natural_sciences` |
+| 12 | `pku_core_non_natural_sciences` |
 
 同一期刊只采用最高层级。不得把 SCIE 分类附录或 v2.0 处置记录当作主目录记录。
 期刊判级结果须保留 `matched_title`、`priority_level`、`priority_group`、
 `environment_subfields`、`subject_categories`、`formal_evidence`、
 `index_memberships`、`source_catalogs`、`ncs_internal_rank`、
 `catalog_version`、`catalog_date` 和 `manual_review_required`。
+
+用户质疑某本期刊的层级、或要求核实目录来源时，不要凭记忆解释判级理由，应引用目录记录里的
+`formal_evidence` 和 `source_catalogs`。需要核验目录文件未被改动时，运行
+`python scripts/generate_environment_catalog_v4.py --check`：它据七份来源快照重算来源匹配与
+索引收录，并与随包产物逐字节比对，一致则退出码为 0。发布包内不含 `docs/audits/` 的逐条匹配
+审计，该模式下会打印 `docs/audits: skipped`；仓库检出中则一并校验。
+
+不得把该命令的通过说成"层级已被独立复核"。层级、细分领域和正式证据取自已批准的 v4.0 目录
+markdown，脚本不推导它们，只核对每级期刊数与字节一致；两本期刊的层级被对调后重新生成，
+`--check` 仍会通过。判级本身有疑问时，应回到 `formal_evidence` 与来源快照人工核对。
 
 ## CNKI 公开检索边界
 
@@ -103,20 +116,52 @@ python scripts/catalog_lookup.py lookup "Journal A" "Journal B"
 请求携带使用者的实名机构身份，所在机构的使用规范与频率限制均适用。默认请求
 间隔 30 秒。
 
-覆盖范围只有两个分组，均取自本 Skill 的环境期刊目录：
+覆盖范围是四个受控范围，刊名与刊数一律取自本 Skill 的环境期刊目录：
 
 | `group` | 层级 | 期刊数 | 构造方式 |
 |---|---:|---:|---|
 | `chinese_environment_top` | 6 | 6 本 | `LY=` **精确**枚举刊名，单批完成 |
-| `environment_cssci` | 9 | 241 本 | `LY=` 精确枚举 + 按表达式长度分批，每批附结果页「来源类别」= CSSCI |
+| `other_formally_recognized_chinese` | 7（中文） | 60 本 | `LY=` 精确枚举，中文集合由目录构建期固化 |
+| `environment_cssci` | 9 | 241 本 | `LY=` 精确枚举 + 按表达式长度分批，每批附结果页「来源类别」= CSSCI（`P0209`） |
+| `pku_core` | 11—12（成员横跨 1—12 级） | 1987 本 | 只提交主题与年份表达式，勾选结果页「来源类别」= 北大核心（`P01`），**不生成 `LY=`** |
+
+⚠ 1987 是 v4.0 全部北大核心成员数，其中 1742 本位于第11—12级，其余 245 本已在更高
+层级出现。因此 `pku_core` 的合格层级是 **1—12 级**，一条第6级期刊的记录在该组里
+同样合格，命中后按目录层级排序归位——不要以为该组只会返回第11—12级的期刊。
+
+完整环境工作流按 **第6级、第7级中文期刊、第9级CSSCI、第11—12级北大核心** 的
+顺序依次检索；跨组总量只计算全局去重后的新增论文。**第11级和第12级不得分别重复检索**：
+两级同属一个 `pku_core` 范围，一次分面检索即可覆盖，结果按目录层级排序后补充。
+其他层级不在覆盖范围内，应改用 `ai4scholar`。
 
 环境 CSSCI 只是 CSSCI 的子集，仅靠来源类别分面收不窄到环境学科，因此刊名枚举
-与分面两者都不能省。其他层级不在覆盖范围内，应改用 `ai4scholar`。
+与分面两者都不能省。第7级中文集合在目录构建期固化，运行时不猜测语言。
 
-检索字段按 **TI → SU → KY → TKA** 的优先序逐级替换：篇名最准，主题次之，
-关键词第三，篇关摘兜底。**有效记录数达到 `limit` 就停止**，都不够用时取有效
-记录最多的那个字段。返回值里的 `topic_field` 与 `topic_fields_tried` 如实
-说明最终用了哪个、试过哪些。
+分组检索依次执行 **TI → SU → KY → TKA**，并**累计**此前字段尚未取得的合格唯一
+记录；达到请求数量即停。四个字段的结果互相补充，不存在"取有效记录最多的那个
+字段"这回事。返回值里的 `topic_fields_tried` 如实列出试过哪些字段，`topic_field`
+是达到的最宽字段。
+
+**来源类别不是专业检索字段。** CSSCI 固定为 `P0209`、北大核心固定为 `P01`，只在
+首次检索成功后的结果页来源类别中勾选，不写入专业检索表达式，也不出现在 `LY=`
+子句里，更不作为 MCP 的自由输入参数。分面未证实稳定生效即返回
+`page_contract_changed`，绝不退回未筛选结果。
+
+`first_page_only=true` 表示每条表达式只读取当前页最多 50 条；只有累计合格唯一
+记录达到请求数量且无终止状态时 `complete` 才为真，`complete=false` 时不得声称
+检索完整。
+
+三个诊断字段的语义边界：
+
+- `excluded_out_of_scope_records` / `excluded_out_of_scope_count`：`LY=` 的近似
+  命中、目录未匹配、环境 CSSCI 非第9级、索引身份不符的记录都进这里，**不占限额**。
+- `already_covered_higher_priority_count` 在单组 MCP 调用中**恒为 0**——单组调用
+  没有"已检索过哪些更高层级分组"的上下文，跨组去重是完整 Skill 工作流的职责。
+  它为 0 不代表"没有重复"，只代表"本次未计算"。完整工作流中高层级重复项标记为
+  `already_covered_higher_priority`，不占后续剩余总限额。
+- `source_category_applied` 是全部已执行批次与字段的**合取**：任一批次未证实分面
+  生效，整组即为 `false`。它可能低于逐条记录的实际筛选状态，误差方向是保守低报，
+  且必然伴随 `terminal_status` 或 `human_intervention_required=true` 供定位。
 
 ⚠ 每多试一个字段就是一次真实检索，而批次间强制 ≥30 秒节流。窄主题可能一路
 试到 TKA：单组最坏为 4 × 批次数 次请求，`environment_cssci` 两批即 8 次、
@@ -139,7 +184,7 @@ python scripts/catalog_lookup.py lookup "Journal A" "Journal B"
 严格按以下顺序报告：
 
 1. 检索范围：主题、检索式、年份、语言、检索日期和 `sources`。
-2. 按十级目录整理的论文：篇名、作者、年度、正式期刊名、DOI或稳定链接、
+2. 按十二级目录整理的论文：篇名、作者、年度、正式期刊名、DOI或稳定链接、
    期刊层级和来源。
 3. 环境细分领域及正式证据：列出 `environment_subfields`、
    `formal_evidence`、`index_memberships` 和 `source_catalogs`。

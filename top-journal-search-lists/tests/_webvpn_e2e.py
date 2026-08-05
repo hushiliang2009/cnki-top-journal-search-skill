@@ -126,6 +126,34 @@ def _sample_record(record: object) -> dict[str, Any]:
     return sample
 
 
+#: 发布前实机冒烟需要看到字段阶梯与分面证据，否则无法判断"结果为空"是
+#: 真的没命中，还是分面根本没生效。允许值仍是闭集，不接受自由文本。
+ALLOWED_TOPIC_FIELDS = ("TI", "SU", "KY", "TKA")
+ALLOWED_SOURCE_CATEGORY_CODES = (None, "P0209", "P01")
+
+
+def _controlled_topic_fields(mapping: dict[str, Any], key: str) -> list[str]:
+    value = _required_value(mapping, key, list)
+    for item in value:
+        if type(item) is not str or item not in ALLOWED_TOPIC_FIELDS:
+            _reject_unsafe_output()
+    return list(value)
+
+
+def _controlled_source_category_code(
+    mapping: dict[str, Any], key: str,
+) -> str | None:
+    # 缺键与"本组无分面"必须可区分：服务漏发字段属契约破坏，不得静默当成 None。
+    if key not in mapping:
+        _reject_unsafe_output()
+    value = mapping[key]
+    if value is not None and (
+        type(value) is not str or value not in ALLOWED_SOURCE_CATEGORY_CODES
+    ):
+        _reject_unsafe_output()
+    return value
+
+
 def _summary(result: object, group: str) -> dict[str, Any]:
     if type(result) is not dict:
         _reject_unsafe_output()
@@ -140,6 +168,23 @@ def _summary(result: object, group: str) -> dict[str, Any]:
         "record_count": len(records),
         "batches_completed": batches_completed,
         "batches_total": batches_total,
+        "topic_fields_tried": _controlled_topic_fields(
+            result, "topic_fields_tried"
+        ),
+        "source_category_code": _controlled_source_category_code(
+            result, "source_category_code"
+        ),
+        "source_category_applied": _required_value(
+            result, "source_category_applied", bool
+        ),
+        "eligible_record_count": _required_value(
+            result, "eligible_record_count", int
+        ),
+        "first_page_only": _required_value(result, "first_page_only", bool),
+        "complete": _required_value(result, "complete", bool),
+        "human_intervention_required": _required_value(
+            result, "human_intervention_required", bool
+        ),
         "sample": sample,
     }
 

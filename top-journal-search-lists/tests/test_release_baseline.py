@@ -41,6 +41,23 @@ def test_ci_runs_full_non_live_release_matrix(skill_root: Path) -> None:
         assert forbidden not in workflow.casefold()
 
 
+def test_ci_verifies_generic_release_after_extracting_outside_the_checkout(
+    skill_root: Path,
+) -> None:
+    """在仓库里跑通不等于用户解压后跑得通：源码树里的相对路径和同名模块都还在。
+
+    真正要验证的是 ZIP 本身——从 RUNNER_TEMP 解压，再校验哈希、目录和两个握手。
+    """
+    workflow = (skill_root.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    for required in (
+        "Verify generic release outside checkout",
+        "sha256sum -c checksums.sha256",
+        "generic-release-check",
+        "CNKI_MCPB_PROJECT",
+    ):
+        assert required in workflow
+
+
 def test_ci_uploads_generic_release_only_from_canonical_ubuntu_python311(
     skill_root: Path,
 ) -> None:

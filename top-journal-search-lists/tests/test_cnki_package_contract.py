@@ -303,6 +303,15 @@ def test_webvpn_e2e_helper_prints_only_the_sanitized_summary(
                 "status": "success",
                 "batches_completed": 1,
                 "batches_total": 1,
+                "topic_fields_tried": ["TI", "SU"],
+                "source_category_code": "P0209",
+                "source_category_applied": True,
+                "source_category_total": 2270,
+                "eligible_record_count": 1,
+                "excluded_out_of_scope_count": 0,
+                "first_page_only": True,
+                "complete": True,
+                "human_intervention_required": False,
                 "records": [{
                     "title": "数字化转型与企业创新",
                     "journal_raw": "管理世界",
@@ -360,6 +369,13 @@ def test_webvpn_e2e_helper_prints_only_the_sanitized_summary(
         "record_count": 1,
         "batches_completed": 1,
         "batches_total": 1,
+        "topic_fields_tried": ["TI", "SU"],
+        "source_category_code": "P0209",
+        "source_category_applied": True,
+        "eligible_record_count": 1,
+        "first_page_only": True,
+        "complete": True,
+        "human_intervention_required": False,
         "sample": [{
             "title": "数字化转型与企业创新",
             "journal_raw": "管理世界",
@@ -1021,3 +1037,178 @@ def test_documentation_describes_only_ephemeral_memory_cache(skill_root: Path) -
     expected = "不持久化缓存，运行期仅24小时内存缓存"
     for relative in ("SKILL.md", "README.md", "references/cnki-search-reference.md"):
         assert expected in (skill_root / relative).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "poisoned",
+    [
+        {"topic_fields_tried": ["TI", "AB"]},
+        {"topic_fields_tried": "TI"},
+        {"source_category_code": "P9999"},
+        {"source_category_applied": "true"},
+        {"eligible_record_count": "1"},
+        {"first_page_only": None},
+        {"complete": 1},
+        {"human_intervention_required": "no"},
+    ],
+)
+def test_attended_e2e_summary_rejects_out_of_contract_diagnostics(
+    skill_root: Path, poisoned: dict,
+) -> None:
+    """摘要字段是闭集；越界值必须整体失败关闭，而不是原样透传给发布记录。"""
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    result = {
+        "status": "success",
+        "batches_completed": 1,
+        "batches_total": 1,
+        "topic_fields_tried": ["TI"],
+        "source_category_code": "P0209",
+        "source_category_applied": True,
+        "eligible_record_count": 0,
+        "first_page_only": True,
+        "complete": True,
+        "human_intervention_required": False,
+        "records": [],
+    }
+    result.update(poisoned)
+
+    with pytest.raises(helper.UnsafeOutputError):
+        helper._summary(result, "chinese_top_journals")
+
+
+def test_attended_e2e_summary_keeps_only_safe_release_diagnostics(
+    skill_root: Path,
+) -> None:
+    """字段与分面证据可以进摘要，凭据、链接、HTML 一律不行。"""
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    summary = helper._summary({
+        "status": "success",
+        "batches_completed": 1,
+        "batches_total": 1,
+        "topic_fields_tried": ["TI", "SU"],
+        "source_category_code": "P0209",
+        "source_category_applied": True,
+        "eligible_record_count": 3,
+        "first_page_only": True,
+        "complete": True,
+        "human_intervention_required": False,
+        "records": [],
+    }, "chinese_top_journals")
+
+    assert summary["topic_fields_tried"] == ["TI", "SU"]
+    assert summary["source_category_code"] == "P0209"
+    assert summary["source_category_applied"] is True
+    assert summary["eligible_record_count"] == 3
+    assert summary["first_page_only"] is True
+    assert summary["complete"] is True
+    assert summary["human_intervention_required"] is False
+    serialized = json.dumps(summary, ensure_ascii=False).casefold()
+    for forbidden in ("cookie", "token", "html", "url", "password", "download"):
+        assert forbidden not in serialized
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["topic_fields_tried", "source_category_code", "source_category_applied",
+     "eligible_record_count", "first_page_only", "complete",
+     "human_intervention_required"],
+)
+def test_attended_e2e_summary_requires_every_diagnostic_key(
+    skill_root: Path, missing: str,
+) -> None:
+    """漏发字段与"本组无分面"必须可区分，不得静默当成 None。"""
+    helper = _load_helper_module(skill_root, "_webvpn_e2e")
+    result = {
+        "status": "success",
+        "batches_completed": 1,
+        "batches_total": 1,
+        "topic_fields_tried": ["TI"],
+        "source_category_code": None,
+        "source_category_applied": False,
+        "eligible_record_count": 0,
+        "first_page_only": True,
+        "complete": True,
+        "human_intervention_required": False,
+        "records": [],
+    }
+    del result[missing]
+
+    with pytest.raises(helper.UnsafeOutputError):
+        helper._summary(result, "group")
+
+
+PROFESSIONAL_DOCS = ("SKILL.md", "README.md", "references/cnki-search-reference.md")
+
+
+def _section_containing(text: str, needle: str) -> str:
+    """取包含 needle 的那个段落，避免关键词分散在全文各处也能凑齐断言。
+
+    依赖 ``Path.read_text`` 的 universal newlines：这些文档是 CRLF，若改用
+    ``read_bytes().decode()``，``\\n\\n`` 永远匹配不到，整篇会退化成一个段落，
+    锚定彻底失效而测试照样全绿。
+    """
+    assert needle in text, needle
+    blocks = [block for block in text.split("\n\n") if needle in block]
+    return "\n".join(blocks)
+
+
+def test_professional_documentation_states_field_and_facet_contract(
+    skill_root: Path,
+) -> None:
+    """文档不得再声称"取记录最多的字段"或把来源类别写成检索字段。"""
+    for relative in PROFESSIONAL_DOCS:
+        text = (skill_root / relative).read_text(encoding="utf-8")
+        assert "TI → SU → KY → TKA" in text, relative
+        # 只查"累计"二字太松：写成"累计取最多的那个字段"也能过。
+        assert "累计此前字段尚未取得" in text, relative
+        assert "来源类别不是专业检索字段" in text, relative
+        assert "P0209" in text and "不写入" in text, relative
+        # 整句锚定：只锚"读多少"而不锚"哪个布尔值触发"，把 true 改成 false
+        # 语义完全反转仍会全绿；`complete` 又是普通英文词，"提到即通过"等于没测。
+        assert "`first_page_only=true` 表示" in text, relative
+        page = _section_containing(text, "first_page_only")
+        assert "只读取当前页" in page or "只读当前页" in page, relative
+        assert "50" in page, relative
+        assert "`complete=false` 时不得" in text, relative
+        assert "自动翻页" not in text, relative
+
+
+def test_professional_documentation_drops_the_best_field_wording(
+    skill_root: Path,
+) -> None:
+    for relative in PROFESSIONAL_DOCS:
+        text = (skill_root / relative).read_text(encoding="utf-8")
+        for stale in ("取有效记录最多的那个字段", "逐级替换"):
+            assert stale not in text, (relative, stale)
+
+
+def test_v050_readme_names_exact_release_and_coexistence_contract(
+    skill_root: Path,
+) -> None:
+    text = (skill_root / "README.md").read_text(encoding="utf-8")
+    for value in (
+        "0.5.0",
+        "top-journal-search-lists_Skill.zip",
+        "cnki-search.mcpb",
+        "checksums.sha256",
+        "top-journal-search-lists-env",
+        "cnki-search-env",
+        "互不覆盖",
+    ):
+        assert value in text, value
+
+
+def test_v050_workflow_documentation_from_algorithm_plan_remains_present(
+    skill_root: Path,
+) -> None:
+    text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+    assert "TI → SU → KY → TKA" in text
+    assert "来源类别不是专业检索字段" in text
+    assert "P0209" in text
+
+
+def test_raw_mcpb_handshake_accepts_external_project(skill_root: Path) -> None:
+    """握手脚本原本只认仓库内的 mcpb/；解压到别处后它会去校验源码树而非产物本身。"""
+    text = (skill_root / "tests/_mcpb_raw_handshake.py").read_text(encoding="utf-8")
+    assert 'os.environ.get("CNKI_MCPB_PROJECT")' in text
+    assert "Path(configured_project).resolve()" in text

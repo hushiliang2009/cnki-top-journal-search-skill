@@ -14,7 +14,7 @@ from cnki_search_env.session import PublicCnkiSession, SearchSnapshot
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CATALOG = ROOT / "references" / "环境科学与工程学科顶尖期刊目录_v3.0.md"
+CATALOG = ROOT / "references" / "environment_journal_catalog_v4.0.json"
 FIXTURES = Path(__file__).with_name("fixtures")
 
 
@@ -240,7 +240,7 @@ def test_missing_catalog_reports_config_error_without_touching_cnki() -> None:
 
 
 def test_invalid_catalog_reports_configuration_error_without_touching_cnki(tmp_path: Path) -> None:
-    invalid = tmp_path / "环境科学与工程学科顶尖期刊目录_v3.0.md"
+    invalid = tmp_path / "invalid-environment-catalog.json"
     invalid.write_text("# invalid\n", encoding="utf-8")
     factory = SequenceFactory([_snapshot()])
     gate = CountingGate()
@@ -385,9 +385,9 @@ class Session:
     async def search(self, _query):
         return Snapshot()
 
-catalog = Path('references/环境科学与工程学科顶尖期刊目录_v3.0.md')
+catalog = Path('references/environment_journal_catalog_v4.0.json')
 if not catalog.exists():
-    catalog = Path('../references/环境科学与工程学科顶尖期刊目录_v3.0.md')
+    catalog = Path('../references/environment_journal_catalog_v4.0.json')
 outcome = asyncio.run(CnkiPublicSearchService(
     session_factory=Session,
     catalog=catalog,

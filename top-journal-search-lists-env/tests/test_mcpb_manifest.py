@@ -12,6 +12,7 @@ import pytest
 from cnki_search_env import mcp_server
 
 
+EXPECTED_VERSION = "0.3.0"
 CNKI_MODULES = (
     "__init__.py",
     "browser.py",
@@ -30,6 +31,19 @@ CNKI_MODULES = (
     "service.py",
     "session.py",
     "webvpn.py",
+)
+V4_REFERENCE_FILES = (
+    "环境科学与工程学科顶尖期刊目录_v4.0.md",
+    "environment_journal_catalog_v4.0.json",
+    "environment_catalog_sources_v4.0.json",
+    "environment_journal_match_audit_v4.0.md",
+    "CSSCI_2025_2026.md",
+    "北大中文核心期刊目录_2023_自然科学版.md",
+    "北大中文核心期刊目录_2023_.md",
+    "Social Sciences Citation Index_20260715.md",
+    "Social Sciences Citation Index (SSCI).csv",
+    "Science Citation Index Expanded_20260715.md",
+    "Science Citation Index Expanded (SCIE).csv",
 )
 TEST_RELATIVE = (
     "tests/_mcp_handshake.py",
@@ -56,6 +70,7 @@ TEST_RELATIVE = (
     "tests/test_cnki_search_env.py",
     "tests/test_cnki_service.py",
     "tests/test_cnki_session.py",
+    "tests/test_environment_catalog_generation.py",
     "tests/test_skill_contract.py",
     "tests/test_installers.py",
     "tests/test_install_config_security.py",
@@ -84,21 +99,23 @@ EXPECTED_SKILL_RELATIVE = (
     "mcpb/pyproject.toml",
     "mcpb/src/catalog_lookup.py",
     *(f"mcpb/src/cnki_search_env/{name}" for name in CNKI_MODULES),
-    "mcpb/src/references/环境科学与工程学科顶尖期刊目录_v3.0.md",
+    *(f"mcpb/src/references/{name}" for name in V4_REFERENCE_FILES),
     "mcpb/src/server.py",
     "mcpb/uv.lock",
-    "references/环境科学与工程学科顶尖期刊目录_v3.0.md",
+    *(f"references/{name}" for name in V4_REFERENCE_FILES),
     "references/cnki-search-env-reference.md",
     "scripts/build_release.py",
     "scripts/catalog_lookup.py",
+    "scripts/environment_catalog_v4.py",
+    "scripts/generate_environment_catalog_v4.py",
     *(f"scripts/cnki_search_env/{name}" for name in CNKI_MODULES),
     *TEST_RELATIVE,
 )
-EXPECTED_MCPB_RELATIVE = tuple(
+EXPECTED_MCPB_RELATIVE = tuple(sorted(
     relative.removeprefix("mcpb/")
     for relative in EXPECTED_SKILL_RELATIVE
     if relative.startswith("mcpb/")
-)
+))
 
 
 def _load_builder(skill_root: Path):
@@ -118,10 +135,11 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
     manifest = json.loads((skill_root / "mcpb/manifest.json").read_text(encoding="utf-8"))
     assert manifest["manifest_version"] == "0.4"
     assert manifest["name"] == "cnki-search-env"
-    assert manifest["display_name"] == "CNKI Environmental Public Theme Search"
-    assert manifest["version"] == "0.2.0"
+    assert manifest["display_name"] == "CNKI Environmental Journal Search"
+    assert manifest["version"] == EXPECTED_VERSION
     assert manifest["description"] == (
-        "Public CNKI theme search with environmental journal classification; no login or downloads."
+        "Public CNKI topic search and attended institutional-WebVPN professional search "
+        "with environmental v4.0 journal classification; no downloads or unattended login."
     )
     assert manifest["author"]["name"] == "Top Environmental Journal Search"
     assert manifest["server"]["type"] == "uv"
@@ -133,14 +151,14 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
     assert manifest["tools"] == [
         {
             "name": "cnki_search_env",
-            "description": "Search the public CNKI homepage and rank first-page records by the environmental journal catalog.",
+            "description": "Search the public CNKI homepage and rank first-page records by the environmental v4.0 journal catalog.",
         },
         {
             "name": "cnki_professional_search_env",
             "description": (
-                "Attended-only CNKI professional search over the environmental catalog via "
-                "institutional WebVPN; requires the user to sign in and keep the browser open, "
-                "and is not usable for scheduled jobs."
+                "Run attended CNKI professional search over controlled environmental journal "
+                "groups through institutional WebVPN; the user must sign in and complete "
+                "security checks."
             ),
         },
     ]
@@ -164,7 +182,11 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
 
 def test_mcpb_pyproject_declares_public_runtime_dependencies(skill_root: Path) -> None:
     text = (skill_root / "mcpb/pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.2.0"' in text
+    assert f'version = "{EXPECTED_VERSION}"' in text
+    assert (
+        'description = "Public and attended CNKI environmental journal-search MCP server"'
+        in text
+    )
     assert 'requires-python = ">=3.11"' in text
     assert '"mcp>=1,<2"' in text
     assert '"playwright>=1.45,<2"' in text
@@ -176,11 +198,34 @@ def test_all_runtime_versions_and_release_allowlist_are_consistent(skill_root: P
         "scripts/cnki_search_env/__init__.py",
         "mcpb/src/cnki_search_env/__init__.py",
     ):
-        assert '__version__ = "0.2.0"' in (skill_root / relative).read_text(encoding="utf-8")
-    assert 'name = "cnki-search-env-mcp"\nversion = "0.2.0"' in (
+        assert f'__version__ = "{EXPECTED_VERSION}"' in (
+            skill_root / relative
+        ).read_text(encoding="utf-8")
+    assert f'name = "cnki-search-env-mcp"\nversion = "{EXPECTED_VERSION}"' in (
         skill_root / "mcpb/uv.lock"
     ).read_text(encoding="utf-8")
     assert ".mcpbignore" in _load_builder(skill_root).MCPB_ALLOWLIST
+
+
+def test_environment_release_has_portable_v4_inputs_without_v3_or_full_jsonl() -> None:
+    """离线复算脚本必须随 Skill 发布，否则收件人无法自行核验 v4.0 目录是怎么来的。
+
+    但生成脚本不进 MCPB（运行时不需要重算），完整审计 JSONL 不进任何发布包。
+    """
+    assert not any("v3.0" in path for path in EXPECTED_SKILL_RELATIVE)
+    assert "scripts/environment_catalog_v4.py" in EXPECTED_SKILL_RELATIVE
+    assert "scripts/generate_environment_catalog_v4.py" in EXPECTED_SKILL_RELATIVE
+    assert "tests/test_environment_catalog_generation.py" in EXPECTED_SKILL_RELATIVE
+    assert not any(
+        path.endswith("environment_journal_match_audit_v4.0.jsonl")
+        for path in EXPECTED_SKILL_RELATIVE
+    )
+    assert not any(
+        "generate_environment_catalog_v4.py" in path for path in EXPECTED_MCPB_RELATIVE
+    )
+    assert not any(
+        "environment_catalog_v4.py" in path for path in EXPECTED_MCPB_RELATIVE
+    )
 
 
 def test_release_builder_is_present(skill_root: Path) -> None:
@@ -324,3 +369,51 @@ def test_release_build_excludes_unlisted_and_state_baits(skill_root: Path, tmp_p
         ]
     with zipfile.ZipFile(mcpb_zip) as archive:
         assert archive.namelist() == list(EXPECTED_MCPB_RELATIVE)
+
+
+RUNTIME_MODULES = (
+    "models.py",
+    "catalog_adapter.py",
+    "professional.py",
+    "professional_runtime.py",
+    "professional_service.py",
+    "ranking.py",
+    "webvpn.py",
+    "mcp_server.py",
+)
+
+
+@pytest.mark.parametrize("name", RUNTIME_MODULES)
+def test_modified_runtime_module_matches_mcpb_mirror(
+    skill_root: Path, name: str,
+) -> None:
+    """镜像漂移不会让任何测试变红，只会让发布包与源码行为不同——只能显式钉住。"""
+    source = skill_root / "scripts" / "cnki_search_env" / name
+    mirror = skill_root / "mcpb" / "src" / "cnki_search_env" / name
+    assert source.read_bytes() == mirror.read_bytes(), name
+
+
+def test_every_runtime_module_matches_mcpb_mirror(skill_root: Path) -> None:
+    """手工清单会漏（professional_runtime.py 就漏过一次），再加一道全目录兜底。
+
+    纯外观漂移（改注释、改 docstring）不会被任何行为测试抓到，只会让发布包与
+    源码不同；这里对整个包逐字节比对，并禁止镜像里出现源码没有的模块。
+    """
+    source_dir = skill_root / "scripts" / "cnki_search_env"
+    mirror_dir = skill_root / "mcpb" / "src" / "cnki_search_env"
+    sources = sorted(path.name for path in source_dir.glob("*.py"))
+    mirrors = sorted(path.name for path in mirror_dir.glob("*.py"))
+    assert sources == mirrors
+    assert set(RUNTIME_MODULES) <= set(sources)
+    for name in sources:
+        assert (source_dir / name).read_bytes() == (mirror_dir / name).read_bytes(), name
+
+
+def test_runtime_docstrings_do_not_claim_a_ten_level_catalog(
+    skill_root: Path,
+) -> None:
+    """环境目录已是十二级；运行时 docstring 仍写十级会误导后续维护者。"""
+    for base in ("scripts/cnki_search_env", "mcpb/src/cnki_search_env"):
+        for path in sorted((skill_root / base).glob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            assert "十级期刊目录" not in text, path.name

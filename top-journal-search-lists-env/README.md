@@ -2,16 +2,26 @@
 
 `Top Environmental Journal Search` 是环境科学与工程专用文献检索 Skill。
 它以 ai4scholar 为主要来源，按
-《环境科学与工程学科顶尖期刊目录 v3.0》的十级顺序整理文献，并可通过独立的
+《环境科学与工程学科顶尖期刊目录 v4.0》的十二级顺序整理文献，并可通过独立的
 `cnki-search-env` MCP 补充中国知网公开首页中文期刊结果。调用方式为
 `$top-journal-search-lists-env`，MCP 工具为 `cnki_search_env(query, limit)`。
 `limit` 最大为 20。
 
 另有一个可选的第二模式：`cnki_professional_search_env`，由使用者本人经所在
 机构官方 WebVPN 完成统一身份认证后，用知网专业检索按环境期刊目录定向检索
-中文期刊论文。覆盖 `chinese_environment_top`（6 本，`LY=` **精确**枚举）与
-`environment_cssci`（241 本，精确枚举并逐批附结果页「来源类别」= CSSCI），
-`limit` 为 1 至 50。
+中文期刊论文。覆盖四个受控范围：`chinese_environment_top`（第6级 6 本，`LY=`
+**精确**枚举）、`other_formally_recognized_chinese`（第7级中文 60 本，精确枚举）、
+`environment_cssci`（第9级 241 本，精确枚举并逐批附结果页「来源类别」= CSSCI，
+代码 `P0209`）与 `pku_core`（1987 本，只提交主题与年份表达式并勾选「来源类别」= 北大核心，
+代码 `P01`，不生成 `LY=`）。`limit` 为 1 至 50。
+
+1987 是 v4.0 全部北大核心成员数，其中 1742 本位于第11—12级，其余 245 本已在更高
+层级出现；该组的合格层级因此是 **1—12 级**，成员横跨全部层级，命中后按目录层级
+排序归位。
+
+完整工作流按 **第6级、第7级中文期刊、第9级CSSCI、第11—12级北大核心** 的顺序
+依次检索，跨组总量只计全局去重后的新增论文。**第11级和第12级不得分别重复检索**——
+两级同属一个 `pku_core` 范围，一次分面检索即可覆盖。
 
 该模式属**机构授权**的正常访问路径，与检测规避有本质区别：**不伪造**
 User-Agent、**不轮换代理**、不抹除自动化标志、**不自动破解**验证码。它
@@ -23,10 +33,19 @@ User-Agent、**不轮换代理**、不抹除自动化标志、**不自动破解*
 返回 `no_data_retry_later` 表示知网临时拒绝，**不等于空结果**；其他层级不在
 覆盖范围内，应改用 ai4scholar。
 
-检索字段按 **TI → SU → KY → TKA** 的优先序逐级替换：篇名最准，主题次之，
-关键词第三，篇关摘兜底。**有效记录数达到 `limit` 就停止**，都不够用时取有效
-记录最多的那个字段。返回值里的 `topic_field` 与 `topic_fields_tried` 如实
-说明最终用了哪个、试过哪些。
+分组检索依次执行 **TI → SU → KY → TKA**，并**累计**此前字段尚未取得的合格
+唯一记录；达到 `limit` 即停。四个字段互相补充，不是从中挑一个"最好的"。
+`topic_fields_tried` 如实列出试过哪些字段。
+
+**来源类别不是专业检索字段**：CSSCI（`P0209`）与北大核心（`P01`）只在首次
+检索成功后的结果页来源类别中勾选，不写入表达式，也不进 `LY=`。分面未证实
+生效时返回 `page_contract_changed`，不会退回未筛选结果。
+
+`first_page_only=true` 表示每条表达式只读取当前页最多 50 条；
+`complete=false` 时不得声称检索完整。组外记录不占限额，进 `excluded_out_of_scope_records`；
+单组调用的 `already_covered_higher_priority_count` 恒为 0（跨组去重属完整
+工作流职责）；`source_category_applied` 取全部已执行批次与字段的合取，可能
+保守低报。
 
 ⚠ 每多试一个字段就是一次真实检索，而批次间强制 ≥30 秒节流。窄主题可能一路
 试到 TKA：单组最坏为 4 × 批次数 次请求，`environment_cssci` 两批即 8 次、
@@ -152,6 +171,41 @@ python3 top-journal-search-lists-env/scripts/catalog_lookup.py lookup "Cell" "Na
 codex mcp get cnki-search-env
 ```
 
+## 自行复算目录（可选）
+
+发布包内附 `scripts/environment_catalog_v4.py` 和
+`scripts/generate_environment_catalog_v4.py`，可重新推导 v4.0 派生产物并与随包文件
+逐字节比对：
+
+```powershell
+python top-journal-search-lists-env/scripts/generate_environment_catalog_v4.py --check
+```
+
+`--check` 只读不写：一致时打印四份产物的 SHA-256 并以 0 退出；不一致时报错并以非 0
+退出（如 `生成文件不一致`、`各级期刊数错误`）。校验范围覆盖 `references/` 与
+`mcpb/src/references/` 两套镜像，因此单改其中一套也会被发现。
+
+### 它校验什么、不校验什么
+
+脚本从 `references/` 下的七份来源快照重算的是**来源匹配、索引收录、交叉收录和审计
+摘要**；已有派生字段不回流参与匹配。
+
+**层级、环境细分领域、正式证据、内部顺序和期刊清单本身来自已批准的 v4.0 目录
+markdown，不由脚本推导。** 对这些内容，`--check` 只核对每级期刊数（十二级合计 3764）
+和与随包产物的字节一致，不核对某本期刊是否应当位于该层级。因此：删掉一行会因每级
+计数不符而被查出，但把两本期刊的层级对调后重新生成，`--check` 仍会通过。
+
+七份来源快照另有脚本内置的字节数与 SHA-256 锁定，被替换会直接报
+`来源快照未通过字节或 SHA-256 校验`；baseline markdown 没有这种锁定。
+
+这是**自洽性**校验，不是**真实性**校验：它证明随包产物与随包 baseline 相互一致，
+不能证明 baseline 本身没被替换。请另按 Release 附带的 `checksums.sha256` 核验压缩包，
+以确认下载件与官方 Release 所发布的一致。
+
+发布包不含 `docs/audits/` 下的逐条匹配审计 JSONL（该文件只保留在仓库中），所以在
+发布包里运行时会多打印一行 `docs/audits: skipped`，表示这一项未参与校验。在仓库检出
+中运行则会一并校验审计输出，不打印该行。两种情况下随包目录与镜像的校验强度相同。
+
 ## 开发者完整测试
 
 先在开发环境安装 pytest、mcp 和 playwright，再从环境 Skill 目录运行：
@@ -191,3 +245,7 @@ ai4scholar。
 卸载时删除客户端中的 `skills/top-journal-search-lists-env`、
 `runtimes/cnki-search-env`，并从客户端配置中删除 `cnki-search-env` 条目。
 操作前备份配置；不要删除 `cnki-search` 或其他 MCP。
+
+## 版本与发布包
+
+当前环境版为 `0.3.0`，使用《`环境科学与工程学科顶尖期刊目录_v4.0.md`》和机器目录 `environment_journal_catalog_v4.0.json`。正式 Release 包含 `top-journal-search-lists-env_Skill.zip`、`cnki-search-env.mcpb` 和 `checksums.sha256`。环境版使用 `top-journal-search-lists-env`、`cnki-search-env` 和 `runtimes/cnki-search-env`；可与通用版 `top-journal-search-lists`、`cnki-search` 并存，二者互不覆盖。

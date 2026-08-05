@@ -9,6 +9,8 @@ import zipfile
 
 import pytest
 
+from cnki_search import mcp_server
+
 
 CNKI_MODULES = (
     "__init__.py",
@@ -31,6 +33,7 @@ CNKI_MODULES = (
 TEST_RELATIVE = (
     "tests/_mcp_handshake.py",
     "tests/_mcpb_handshake.py",
+    "tests/_mcpb_raw_handshake.py",
     "tests/_webvpn_probe.py",
     "tests/conftest.py",
     "tests/test_catalog_groups.py",
@@ -106,6 +109,22 @@ def _load_builder(skill_root: Path):
     return module
 
 
+EXPECTED_VERSION = "0.5.0"
+EXPECTED_TOOLS = [
+    {
+        "name": "cnki_search",
+        "description": "Search the public CNKI homepage by topic and rank first-page journal records.",
+    },
+    {
+        "name": "cnki_professional_search",
+        "description": (
+            "Run attended CNKI professional journal search through institutional WebVPN; "
+            "the user must sign in, keep the browser open, and complete security checks."
+        ),
+    },
+]
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -114,32 +133,33 @@ def test_mcpb_manifest_is_uv_cross_platform_and_safe(skill_root: Path) -> None:
     manifest = json.loads((skill_root / "mcpb/manifest.json").read_text(encoding="utf-8"))
     assert manifest["manifest_version"] == "0.4"
     assert manifest["name"] == "cnki-search"
-    assert manifest["display_name"] == "CNKI Public Theme Search"
-    assert manifest["version"] == "0.4.2"
+    assert manifest["display_name"] == "CNKI Journal Search"
+    assert manifest["version"] == EXPECTED_VERSION
     assert manifest["description"] == (
-        "Public CNKI theme search with master-journal classification; no login or downloads."
+        "Public CNKI topic search and attended institutional-WebVPN professional search "
+        "with master-journal classification; no downloads or unattended login."
     )
     assert manifest["server"]["type"] == "uv"
     assert manifest["server"]["entry_point"] == "src/server.py"
     assert manifest["server"]["mcp_config"]["command"] == "uv"
     assert set(manifest["compatibility"]["platforms"]) == {"win32", "darwin", "linux"}
-    assert manifest["tools"] == [
-        {
-            "name": "cnki_search",
-            "description": "Search the public CNKI homepage by topic and rank first-page journal records.",
-        }
-    ]
+    assert manifest["tools"] == EXPECTED_TOOLS
+    # manifest 声明的工具必须就是服务器真正注册的那两个，漏声明会让客户端
+    # 以为专业检索不存在。
+    assert [tool["name"] for tool in manifest["tools"]] == mcp_server.REQUIRED_TOOLS
     assert manifest["keywords"] == ["CNKI", "literature", "public-search", "journal-ranking"]
     assert manifest["license"] == "Apache-2.0"
     serialized = json.dumps(manifest, ensure_ascii=False).casefold()
-    for token in ("password", "cookie", "webvpn", "cnki_download", "cnki_fetch_details"):
+    # webvpn 现在是如实描述的能力，不再是禁词；凭据与下载类令牌仍然禁止。
+    for token in ("password", "cookie", "cnki_download", "cnki_fetch_details"):
         assert token not in serialized
     assert "user_config" not in manifest
 
 
 def test_mcpb_pyproject_declares_public_runtime_dependencies(skill_root: Path) -> None:
     text = (skill_root / "mcpb/pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.4.2"' in text
+    assert f'version = "{EXPECTED_VERSION}"' in text
+    assert 'description = "Public and attended CNKI journal-search MCP server"' in text
     assert 'requires-python = ">=3.11"' in text
     assert '"mcp>=1,<2"' in text
     assert '"playwright>=1.45,<2"' in text
@@ -151,8 +171,10 @@ def test_all_runtime_versions_and_release_allowlist_are_consistent(skill_root: P
         "scripts/cnki_search/__init__.py",
         "mcpb/src/cnki_search/__init__.py",
     ):
-        assert '__version__ = "0.4.2"' in (skill_root / relative).read_text(encoding="utf-8")
-    assert 'name = "cnki-search-mcp"\nversion = "0.4.2"' in (
+        assert f'__version__ = "{EXPECTED_VERSION}"' in (
+            skill_root / relative
+        ).read_text(encoding="utf-8")
+    assert f'name = "cnki-search-mcp"\nversion = "{EXPECTED_VERSION}"' in (
         skill_root / "mcpb/uv.lock"
     ).read_text(encoding="utf-8")
     assert ".mcpbignore" in _load_builder(skill_root).MCPB_ALLOWLIST
@@ -297,3 +319,40 @@ def test_release_build_excludes_unlisted_and_state_baits(skill_root: Path, tmp_p
         ]
     with zipfile.ZipFile(mcpb_zip) as archive:
         assert archive.namelist() == list(EXPECTED_MCPB_RELATIVE)
+
+
+RUNTIME_MODULES = (
+    "models.py",
+    "professional.py",
+    "professional_runtime.py",
+    "professional_service.py",
+    "ranking.py",
+    "webvpn.py",
+    "mcp_server.py",
+)
+
+
+@pytest.mark.parametrize("name", RUNTIME_MODULES)
+def test_modified_runtime_module_matches_mcpb_mirror(
+    skill_root: Path, name: str,
+) -> None:
+    """镜像漂移不会让任何测试变红，只会让发布包与源码行为不同——只能显式钉住。"""
+    source = skill_root / "scripts" / "cnki_search" / name
+    mirror = skill_root / "mcpb" / "src" / "cnki_search" / name
+    assert source.read_bytes() == mirror.read_bytes(), name
+
+
+def test_every_runtime_module_matches_mcpb_mirror(skill_root: Path) -> None:
+    """手工清单会漏（professional_runtime.py 就漏过一次），再加一道全目录兜底。
+
+    纯外观漂移（改注释、改 docstring）不会被任何行为测试抓到，只会让发布包与
+    源码不同；这里对整个包逐字节比对，并禁止镜像里出现源码没有的模块。
+    """
+    source_dir = skill_root / "scripts" / "cnki_search"
+    mirror_dir = skill_root / "mcpb" / "src" / "cnki_search"
+    sources = sorted(path.name for path in source_dir.glob("*.py"))
+    mirrors = sorted(path.name for path in mirror_dir.glob("*.py"))
+    assert sources == mirrors
+    assert set(RUNTIME_MODULES) <= set(sources)
+    for name in sources:
+        assert (source_dir / name).read_bytes() == (mirror_dir / name).read_bytes(), name

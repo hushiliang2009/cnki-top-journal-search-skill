@@ -38,6 +38,17 @@ jobs:
         run: python scripts/build_release.py --output release
       - working-directory: top-journal-search-lists
         run: python -c "from pathlib import Path; import zipfile; files = [Path('release/top-journal-search-lists_Skill.zip'), Path('release/cnki-search.mcpb'), Path('release/checksums.sha256')]; assert all(path.is_file() and path.stat().st_size > 0 for path in files); assert all(zipfile.ZipFile(path).namelist() for path in files[:2])"
+      - name: Verify generic release outside checkout
+        if: matrix.python-version == '3.11'
+        shell: bash
+        run: |
+          cd top-journal-search-lists/release
+          sha256sum -c checksums.sha256
+          cd "$GITHUB_WORKSPACE"
+          python -c "from pathlib import Path; import os, zipfile; root=Path(os.environ['RUNNER_TEMP'])/'generic-release-check'; (root/'skill').mkdir(parents=True); (root/'mcpb').mkdir(); zipfile.ZipFile('top-journal-search-lists/release/top-journal-search-lists_Skill.zip').extractall(root/'skill'); zipfile.ZipFile('top-journal-search-lists/release/cnki-search.mcpb').extractall(root/'mcpb')"
+          python "$RUNNER_TEMP/generic-release-check/skill/top-journal-search-lists/scripts/catalog_lookup.py" validate
+          python "$RUNNER_TEMP/generic-release-check/skill/top-journal-search-lists/tests/_mcp_handshake.py"
+          CNKI_MCPB_PROJECT="$RUNNER_TEMP/generic-release-check/mcpb" python "$RUNNER_TEMP/generic-release-check/skill/top-journal-search-lists/tests/_mcpb_raw_handshake.py"
       - uses: actions/upload-artifact@v4
         if: matrix.python-version == '3.11'
         with:
@@ -180,6 +191,18 @@ jobs:
         run: python scripts/build_release.py --output release
       - working-directory: top-journal-search-lists-env
         run: python -c "from pathlib import Path; import zipfile; files = [Path('release/top-journal-search-lists-env_Skill.zip'), Path('release/cnki-search-env.mcpb'), Path('release/checksums.sha256')]; assert all(path.is_file() and path.stat().st_size > 0 for path in files); assert all(zipfile.ZipFile(path).namelist() for path in files[:2])"
+      - name: Verify environment release outside checkout
+        if: matrix.python-version == '3.11'
+        shell: bash
+        run: |
+          cd top-journal-search-lists-env/release
+          sha256sum -c checksums.sha256
+          cd "$GITHUB_WORKSPACE"
+          python -c "from pathlib import Path; import os, zipfile; root=Path(os.environ['RUNNER_TEMP'])/'environment-release-check'; (root/'skill').mkdir(parents=True); (root/'mcpb').mkdir(); zipfile.ZipFile('top-journal-search-lists-env/release/top-journal-search-lists-env_Skill.zip').extractall(root/'skill'); zipfile.ZipFile('top-journal-search-lists-env/release/cnki-search-env.mcpb').extractall(root/'mcpb')"
+          python "$RUNNER_TEMP/environment-release-check/skill/top-journal-search-lists-env/scripts/catalog_lookup.py" validate
+          python "$RUNNER_TEMP/environment-release-check/skill/top-journal-search-lists-env/scripts/generate_environment_catalog_v4.py" --check
+          python "$RUNNER_TEMP/environment-release-check/skill/top-journal-search-lists-env/tests/_mcp_handshake.py"
+          CNKI_ENV_MCPB_PROJECT="$RUNNER_TEMP/environment-release-check/mcpb" python "$RUNNER_TEMP/environment-release-check/skill/top-journal-search-lists-env/tests/_mcpb_raw_handshake.py"
       - uses: actions/upload-artifact@v4
         if: matrix.python-version == '3.11'
         with:
@@ -227,18 +250,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install environment Skill on POSIX
+      - name: Install both Skills side by side on POSIX
         if: runner.os != 'Windows'
         shell: bash
         run: |
           export HOME="$RUNNER_TEMP/cnki-env-home"
           export CODEX_HOME="$HOME/.codex"
+          export CNKI_PYTHON=python
           export CNKI_ENV_PYTHON=python
           mkdir -p "$HOME"
+          sh top-journal-search-lists/installers/install.sh --codex
           sh top-journal-search-lists-env/installers/install.sh --codex
+          test -x "$CODEX_HOME/runtimes/cnki-search/.venv/bin/python"
           test -x "$CODEX_HOME/runtimes/cnki-search-env/.venv/bin/python"
           test -f "$CODEX_HOME/config.toml"
-      - name: Install environment Skill on Windows
+          grep '\[mcp_servers.cnki-search\]' "$CODEX_HOME/config.toml"
+          grep '\[mcp_servers.cnki-search-env\]' "$CODEX_HOME/config.toml"
+      - name: Install both Skills side by side on Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -247,10 +275,15 @@ jobs:
           $env:APPDATA = Join-Path $testHome 'AppData\Roaming'
           $env:CODEX_HOME = Join-Path $testHome '.codex'
           New-Item -ItemType Directory -Path $env:APPDATA -Force | Out-Null
+          & .\top-journal-search-lists\installers\install.ps1 -Codex -PythonExe python
           & .\top-journal-search-lists-env\installers\install.ps1 -Codex -PythonExe python
-          $runtimePython = Join-Path $env:CODEX_HOME 'runtimes\cnki-search-env\.venv\Scripts\python.exe'
-          if (-not (Test-Path -LiteralPath $runtimePython -PathType Leaf)) { throw 'environment runtime Python was not installed' }
+          $genericPython = Join-Path $env:CODEX_HOME 'runtimes\cnki-search\.venv\Scripts\python.exe'
+          $environmentPython = Join-Path $env:CODEX_HOME 'runtimes\cnki-search-env\.venv\Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $genericPython -PathType Leaf)) { throw 'generic runtime Python was not installed' }
+          if (-not (Test-Path -LiteralPath $environmentPython -PathType Leaf)) { throw 'environment runtime Python was not installed' }
           if (-not (Test-Path -LiteralPath (Join-Path $env:CODEX_HOME 'config.toml') -PathType Leaf)) { throw 'Codex config was not installed' }
+          $config = Get-Content -LiteralPath (Join-Path $env:CODEX_HOME 'config.toml') -Encoding utf8 -Raw
+          if ($config -notmatch '\[mcp_servers\.cnki-search\]' -or $config -notmatch '\[mcp_servers\.cnki-search-env\]') { throw 'coexistence configuration missing' }
 
   env-version-gate:
     runs-on: ${{ matrix.os }}

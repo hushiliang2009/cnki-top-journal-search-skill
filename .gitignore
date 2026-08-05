@@ -32,6 +32,8 @@ npm-cache/
 # Runtime logs and command streams
 *.log
 *.jsonl
+!docs/audits/
+!docs/audits/environment_journal_match_audit_v4.0.jsonl
 *.pid
 
 # Browser profiles and session material
