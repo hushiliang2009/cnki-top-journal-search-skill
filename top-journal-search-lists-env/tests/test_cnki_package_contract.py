@@ -1170,3 +1170,19 @@ def test_docs_explain_the_packaged_offline_recomputation_script(
     # 必须说明发布包里跳过审计输出，否则用户会把局部校验当成完整校验。
     assert "docs/audits" in readme
     assert "environment_catalog_v4.py" in readme
+
+
+def test_docs_do_not_overstate_what_the_recomputation_check_proves(
+    skill_root: Path,
+) -> None:
+    """层级取自已批准的 baseline，脚本不推导它。
+
+    把两本期刊的层级对调后重新生成，--check 仍会通过；说成"层级已复核"会让用户
+    据此放弃人工核对。文档必须写明边界，并把真实性校验指回 checksums.sha256。
+    """
+    readme = (skill_root / "README.md").read_text(encoding="utf-8")
+    for value in ("自洽性", "真实性", "checksums.sha256", "每级期刊数", "3764"):
+        assert value in readme, value
+    skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+    assert "层级已被独立复核" in skill, "必须显式禁止这种说法"
+    assert "formal_evidence" in skill

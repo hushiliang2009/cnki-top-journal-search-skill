@@ -173,21 +173,31 @@ codex mcp get cnki-search-env
 
 ## 自行复算目录（可选）
 
-目录数据不必只能选择相信。发布包内附 `scripts/environment_catalog_v4.py` 和
-`scripts/generate_environment_catalog_v4.py`，可重新推导全部 v4.0 产物并与随包文件
+发布包内附 `scripts/environment_catalog_v4.py` 和
+`scripts/generate_environment_catalog_v4.py`，可重新推导 v4.0 派生产物并与随包文件
 逐字节比对：
 
 ```powershell
 python top-journal-search-lists-env/scripts/generate_environment_catalog_v4.py --check
 ```
 
-输入是 `references/` 下的七份来源快照，以及 v4.0 目录 markdown 中的期刊清单与稳定
-`ENVJ-*` 标识；层级、来源匹配、交叉收录和审计摘要全部由脚本重新算出，派生字段不回流
-参与匹配。因此它能查出层级、来源判定或镜像被改动，但不构成对期刊清单本身的独立重建。
+`--check` 只读不写：一致时打印四份产物的 SHA-256 并以 0 退出；不一致时报错并以非 0
+退出（如 `生成文件不一致`、`各级期刊数错误`）。校验范围覆盖 `references/` 与
+`mcpb/src/references/` 两套镜像，因此单改其中一套也会被发现。
 
-`--check` 只读不写：一致时打印四份产物的 SHA-256 并以 0 退出；任何一份被改动过都会
-报 `生成文件不一致` 并以 1 退出。校验范围覆盖 `references/` 与 `mcpb/src/references/`
-两套镜像，因此单改其中一套也会被发现。
+### 它校验什么、不校验什么
+
+脚本从 `references/` 下的七份来源快照重算的是**来源匹配、索引收录、交叉收录和审计
+摘要**；已有派生字段不回流参与匹配。
+
+**层级、环境细分领域、正式证据、内部顺序和期刊清单本身来自已批准的 v4.0 目录
+markdown，不由脚本推导。** 对这些内容，`--check` 只核对每级期刊数（十二级合计 3764）
+和与随包产物的字节一致，不核对某本期刊是否应当位于该层级。因此：删掉一行会因每级
+计数不符而被查出，但把两本期刊的层级对调后重新生成，`--check` 仍会通过。
+
+这是**自洽性**校验，不是**真实性**校验：它证明随包产物与随包 baseline 相互一致，
+不能证明 baseline 本身没被替换。要确认拿到的是官方发布，请按 Release 附带的
+`checksums.sha256` 核验压缩包，那才是来源可信性的依据。
 
 发布包不含 `docs/audits/` 下的逐条匹配审计 JSONL（该文件只保留在仓库中），所以在
 发布包里运行时会多打印一行 `docs/audits: skipped`，表示这一项未参与校验。在仓库检出
