@@ -73,6 +73,13 @@ python scripts/catalog_lookup.py lookup "Journal A" "Journal B"
 `index_memberships`、`source_catalogs`、`ncs_internal_rank`、
 `catalog_version`、`catalog_date` 和 `manual_review_required`。
 
+用户质疑某本期刊的层级、或要求核实目录来源时，不要凭记忆解释判级理由。逐刊判级证据
+应引用目录记录里的 `formal_evidence` 和 `source_catalogs`。需要核验目录整体未被篡改时，
+运行 `python scripts/generate_environment_catalog_v4.py --check`：它据七份来源快照重算
+层级与来源匹配，并与随包产物逐字节比对，一致则退出码为 0。该校验覆盖层级与镜像，不构成
+对期刊清单本身的独立重建。发布包内不含 `docs/audits/` 的逐条匹配审计，该模式下会打印
+`docs/audits: skipped`；仓库检出中则一并校验。
+
 ## CNKI 公开检索边界
 
 - 固定使用 `https://www.cnki.net/` 公开首页和主题字段，只读取第一页。

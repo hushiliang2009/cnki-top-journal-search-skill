@@ -1152,3 +1152,21 @@ def test_v030_readme_names_exact_release_catalog_and_coexistence_contract(
         "互不覆盖",
     ):
         assert value in text, value
+
+
+def test_docs_explain_the_packaged_offline_recomputation_script(
+    skill_root: Path,
+) -> None:
+    """脚本随 Skill ZIP 发出去，但两份文档都没写它是干什么的、怎么跑。
+
+    收件人拿到目录数据却不知道可以自己复算，这份数据就只能被当作"要么信、
+    要么不信"的黑箱；随包发一个无人知晓的脚本等于没发。
+    """
+    for relative in ("README.md", "SKILL.md"):
+        text = (skill_root / relative).read_text(encoding="utf-8")
+        assert "generate_environment_catalog_v4.py" in text, relative
+        assert "--check" in text, relative
+    readme = (skill_root / "README.md").read_text(encoding="utf-8")
+    # 必须说明发布包里跳过审计输出，否则用户会把局部校验当成完整校验。
+    assert "docs/audits" in readme
+    assert "environment_catalog_v4.py" in readme
