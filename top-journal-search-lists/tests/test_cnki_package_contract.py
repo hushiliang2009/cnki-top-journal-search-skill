@@ -1212,3 +1212,12 @@ def test_raw_mcpb_handshake_accepts_external_project(skill_root: Path) -> None:
     text = (skill_root / "tests/_mcpb_raw_handshake.py").read_text(encoding="utf-8")
     assert 'os.environ.get("CNKI_MCPB_PROJECT")' in text
     assert "Path(configured_project).resolve()" in text
+
+
+def test_readme_explains_why_rebuilt_archive_hashes_differ(skill_root: Path) -> None:
+    """自行重建时归档哈希与官方值不同是正常的（zlib 实现差异），但 README 不说，
+    使用者只会得出"产物被篡改"的结论。必须写明正确的跨平台校验方式。
+    """
+    text = (skill_root / "README.md").read_text(encoding="utf-8")
+    for value in ("zlib", "compare_release_content.py", "解压"):
+        assert value in text, value

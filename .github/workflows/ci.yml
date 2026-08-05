@@ -57,6 +57,8 @@ jobs:
 
   desktop:
     runs-on: ${{ matrix.os }}
+    # 需要 ubuntu 先上传规范产物，才能做跨平台内容比对。
+    needs: ubuntu
     strategy:
       fail-fast: false
       matrix:
@@ -83,6 +85,14 @@ jobs:
         run: python scripts/build_release.py --output release
       - working-directory: top-journal-search-lists
         run: python -c "from pathlib import Path; import zipfile; files = [Path('release/top-journal-search-lists_Skill.zip'), Path('release/cnki-search.mcpb'), Path('release/checksums.sha256')]; assert all(path.is_file() and path.stat().st_size > 0 for path in files); assert all(zipfile.ZipFile(path).namelist() for path in files[:2])"
+      - name: Download the canonical Ubuntu release for comparison
+        uses: actions/download-artifact@v4
+        with:
+          name: release-canonical-ubuntu-py3.11
+          path: ci-ubuntu-release
+      - name: Compare release content across platforms
+        shell: bash
+        run: python scripts/compare_release_content.py top-journal-search-lists/release ci-ubuntu-release
   installer:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -211,6 +221,8 @@ jobs:
 
   env-desktop:
     runs-on: ${{ matrix.os }}
+    # 需要 env-ubuntu 先上传规范产物，才能做跨平台内容比对。
+    needs: env-ubuntu
     strategy:
       fail-fast: false
       matrix:
@@ -237,6 +249,14 @@ jobs:
         run: python scripts/build_release.py --output release
       - working-directory: top-journal-search-lists-env
         run: python -c "from pathlib import Path; import zipfile; files = [Path('release/top-journal-search-lists-env_Skill.zip'), Path('release/cnki-search-env.mcpb'), Path('release/checksums.sha256')]; assert all(path.is_file() and path.stat().st_size > 0 for path in files); assert all(zipfile.ZipFile(path).namelist() for path in files[:2])"
+      - name: Download the canonical Ubuntu release for comparison
+        uses: actions/download-artifact@v4
+        with:
+          name: release-environment-ubuntu-py3.11
+          path: ci-ubuntu-release
+      - name: Compare release content across platforms
+        shell: bash
+        run: python scripts/compare_release_content.py top-journal-search-lists-env/release ci-ubuntu-release
 
   env-installer:
     runs-on: ${{ matrix.os }}

@@ -98,3 +98,14 @@ def test_root_ignore_does_not_hide_a_generated_outputs_directory() -> None:
     text = root_ignore.read_text(encoding="utf-8")
     assert "outputs/*" in text
     assert "\noutputs/\n" not in text
+
+
+def test_ci_compares_environment_release_content_across_platforms(skill_root: Path) -> None:
+    """环境版同样需要跨平台内容比对；归档哈希受 zlib 实现影响，不能作为判据。"""
+    workflow = (skill_root.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "Compare release content across platforms" in workflow
+    assert "release-environment-ubuntu-py3.11\n          path: ci-ubuntu-release" in workflow
+    assert (
+        "compare_release_content.py top-journal-search-lists-env/release ci-ubuntu-release"
+        in workflow
+    )

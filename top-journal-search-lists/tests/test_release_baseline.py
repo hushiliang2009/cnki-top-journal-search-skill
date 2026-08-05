@@ -81,3 +81,18 @@ def test_root_ignore_does_not_hide_a_generated_outputs_directory() -> None:
     text = root_ignore.read_text(encoding="utf-8")
     assert "outputs/*" in text
     assert "\noutputs/\n" not in text
+
+
+def test_ci_compares_release_content_across_platforms(skill_root: Path) -> None:
+    """归档 SHA-256 跨平台本就不同（zlib 实现差异），因此只能比对解压后内容。
+
+    没有这条，Windows 与 Ubuntu 构建出内容不一致的产物也不会被发现——既有的
+    确定性测试只比较同一环境连续两次构建。
+    """
+    workflow = (skill_root.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    for required in (
+        "Compare release content across platforms",
+        "compare_release_content.py",
+        "actions/download-artifact@v4",
+    ):
+        assert required in workflow, required

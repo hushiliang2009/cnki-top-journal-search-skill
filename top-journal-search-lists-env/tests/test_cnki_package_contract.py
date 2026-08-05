@@ -1186,3 +1186,12 @@ def test_docs_do_not_overstate_what_the_recomputation_check_proves(
     skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
     assert "层级已被独立复核" in skill, "必须显式禁止这种说法"
     assert "formal_evidence" in skill
+
+
+def test_readme_explains_why_rebuilt_archive_hashes_differ(skill_root: Path) -> None:
+    """自行重建时归档哈希与官方值不同是正常的（zlib 实现差异），但 README 不说，
+    使用者只会得出"产物被篡改"的结论。必须写明正确的跨平台校验方式。
+    """
+    text = (skill_root / "README.md").read_text(encoding="utf-8")
+    for value in ("zlib", "compare_release_content.py", "解压"):
+        assert value in text, value

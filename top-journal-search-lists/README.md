@@ -262,3 +262,22 @@ python top-journal-search-lists/scripts/catalog_lookup.py lookup "期刊名A" "�
 ## 版本与发布包
 
 当前通用版为 `0.5.0`。正式 Release 包含 `top-journal-search-lists_Skill.zip`、`cnki-search.mcpb` 和 `checksums.sha256`。安装前须先按 `checksums.sha256` 核验两个压缩包。通用版使用 `top-journal-search-lists`、`cnki-search` 和 `runtimes/cnki-search`；可与环境版 `top-journal-search-lists-env`、`cnki-search-env` 并存，二者互不覆盖。
+
+### 校验发布产物
+
+`checksums.sha256` 用于确认下载到的压缩包与官方 Release 发布的是同一份文件。这是同一
+文件的比对，在任何平台都成立，也是安装前应当做的检查。
+
+如果你从源码仓库自行重建产物，归档的 SHA-256 可能与官方值不同，这是正常现象：ZIP 的
+deflate 压缩流取决于 Python 链接的 zlib 实现（例如 zlib-ng 与标准 zlib 对同一输入会产生
+不同但同样合法的压缩流），而官方产物由 Ubuntu CI 构建。归档哈希不同并不意味着内容不同。
+
+跨平台应比对**解压后的内容**：
+
+```text
+python scripts/compare_release_content.py <你的构建输出目录> <官方产物目录>
+```
+
+该脚本比对成员集合与顺序、每个成员的 CRC 与解压字节，以及打包元数据（固定时间戳与
+权限位），不比较归档哈希和压缩后大小。全部一致时退出码为 0。
+
