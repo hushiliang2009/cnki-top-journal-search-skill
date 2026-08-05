@@ -1,0 +1,4 @@
+# 发布包按字节打包工作副本。Windows 检出若把文本转成 CRLF，产物 SHA-256 就与
+# Ubuntu CI 构建的官方产物不同，使用者无法用 checksums.sha256 自证。统一为 LF，
+# 使任何平台的重建都能复现官方哈希。text=auto 让 Git 自行跳过二进制文件。
+* text=auto eol=lf

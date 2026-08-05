@@ -356,3 +356,25 @@ def test_every_runtime_module_matches_mcpb_mirror(skill_root: Path) -> None:
     assert set(RUNTIME_MODULES) <= set(sources)
     for name in sources:
         assert (source_dir / name).read_bytes() == (mirror_dir / name).read_bytes(), name
+
+
+def test_packaged_text_members_use_lf_on_every_platform(
+    skill_root: Path, tmp_path: Path,
+) -> None:
+    """Windows 检出把打包文本变成 CRLF，产物哈希便与 Linux 构建不同。
+
+    后果不是产物错了，而是使用者无法用官方 checksums.sha256 自证——本地重建
+    四件产物哈希全对不上，看起来就像被篡改。既有确定性测试只比较"同一环境
+    连续两次构建"，因此发现不了这一点。
+    """
+    module = _load_builder(skill_root)
+    skill_zip, mcpb_zip, _checksums = module.build(skill_root, tmp_path / "outputs")
+
+    offenders = []
+    for archive in (skill_zip, mcpb_zip):
+        with zipfile.ZipFile(archive) as bundle:
+            for name in bundle.namelist():
+                if b"\r\n" in bundle.read(name):
+                    offenders.append(f"{archive.name}:{name}")
+
+    assert offenders == [], f"这些成员含 CRLF：{offenders[:8]}（共 {len(offenders)} 个）"

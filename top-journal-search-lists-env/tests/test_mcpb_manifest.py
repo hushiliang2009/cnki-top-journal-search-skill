@@ -417,3 +417,37 @@ def test_runtime_docstrings_do_not_claim_a_ten_level_catalog(
         for path in sorted((skill_root / base).glob("*.py")):
             text = path.read_text(encoding="utf-8")
             assert "十级期刊目录" not in text, path.name
+
+
+# 七份来源快照标记为 -text，逐字节保留上游原样，换行不由本仓库决定。
+UPSTREAM_SNAPSHOTS = frozenset({
+    "CSSCI_2025_2026.md",
+    "北大中文核心期刊目录_2023_自然科学版.md",
+    "北大中文核心期刊目录_2023_.md",
+    "Social Sciences Citation Index_20260715.md",
+    "Social Sciences Citation Index (SSCI).csv",
+    "Science Citation Index Expanded_20260715.md",
+    "Science Citation Index Expanded (SCIE).csv",
+})
+
+
+def test_packaged_text_members_use_lf_on_every_platform(
+    skill_root: Path, tmp_path: Path,
+) -> None:
+    """同通用版：Windows 检出会让产物哈希偏离官方值，使用者无法自证。
+
+    七份上游来源快照除外——它们按约定逐字节保留，含 CRLF 是正确的。
+    """
+    module = _load_builder(skill_root)
+    skill_zip, mcpb_zip, _checksums = module.build(skill_root, tmp_path / "outputs")
+
+    offenders = []
+    for archive in (skill_zip, mcpb_zip):
+        with zipfile.ZipFile(archive) as bundle:
+            for name in bundle.namelist():
+                if name.rsplit("/", 1)[-1] in UPSTREAM_SNAPSHOTS:
+                    continue
+                if b"\r\n" in bundle.read(name):
+                    offenders.append(f"{archive.name}:{name}")
+
+    assert offenders == [], f"这些成员含 CRLF：{offenders[:8]}（共 {len(offenders)} 个）"

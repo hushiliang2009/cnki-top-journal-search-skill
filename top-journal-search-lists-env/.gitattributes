@@ -1,5 +1,10 @@
-references/环境科学与工程学科顶尖期刊目录_v3.0.md -text whitespace=-blank-at-eol
-mcpb/src/references/环境科学与工程学科顶尖期刊目录_v3.0.md -text whitespace=-blank-at-eol
+# 发布包按字节打包工作副本。Windows 检出若把文本转成 CRLF，产物 SHA-256 就与
+# Ubuntu CI 构建的官方产物不同，使用者无法用 checksums.sha256 自证。统一为 LF，
+# 使任何平台的重建都能复现官方哈希。text=auto 让 Git 自行跳过二进制文件。
+#
+# 本行必须留在最前：Git 取最后一条匹配规则，下方七份来源快照的 -text 与 v4.0
+# 产物的显式 eol=lf 都要能覆盖它。
+* text=auto eol=lf
 
 references/环境科学与工程学科顶尖期刊目录_v4.0.md text eol=lf
 references/environment_journal_catalog_v4.0.json text eol=lf
