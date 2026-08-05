@@ -25,6 +25,24 @@ function Assert-PythonVersion([string]$Command) {
     }
 }
 
+# The Playwright driver tree is deep: runtimes\<name>\.venv\Lib\site-packages\
+# playwright\driver\package\lib\tools\skills\...\gallery-spec.md is about 150
+# characters on its own. When the home directory is long, pip fails while unpacking
+# because Windows caps paths at 260 - and by then the Skill has already been copied
+# and a backup has already been taken. Check before writing anything.
+$RuntimePathBudget = 150
+$WindowsMaxPath = 260
+
+function Assert-PathBudget([string]$Root, [string]$Label) {
+    $projected = $Root.Length + 1 + $RuntimePathBudget
+    if ($projected -gt $WindowsMaxPath) {
+        throw ("The $Label path is too long: '$Root' uses $($Root.Length) characters, " +
+            "but installing the Playwright runtime needs about $RuntimePathBudget more " +
+            "and Windows limits paths to $WindowsMaxPath. Use a shorter location " +
+            "(for example C:\codex) or enable Windows long path support.")
+    }
+}
+
 function Assert-LastExit([string]$Description) {
     if ($LASTEXITCODE -ne 0) { throw "$Description failed, exit code: $LASTEXITCODE" }
 }
@@ -147,6 +165,13 @@ $TimeStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
 $ClaudeHome = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
 $Succeeded = $false
+
+# Test doubles never unpack the Playwright driver tree, so the budget does not
+# apply to them; real installs always go through the check.
+if (-not $env:CNKI_TEST_SKIP_PATH_BUDGET) {
+    if ($Codex) { Assert-PathBudget $CodexHome 'CODEX_HOME' }
+    if ($ClaudeCode -or $ClaudeDesktop) { Assert-PathBudget $ClaudeHome 'Claude home' }
+}
 
 try {
     $CodexSkill = Join-Path $CodexHome 'skills\top-journal-search-lists-env'

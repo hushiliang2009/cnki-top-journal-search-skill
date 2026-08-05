@@ -159,7 +159,9 @@ def _run_powershell_installer(
     return subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
         cwd=copied_skill,
-        env=environment,
+        # 这些用例走替身 runtime，不做真实 pip 解包；而 .pytest-runtime 下的路径
+        # 本身就超过长路径预算，会被预检拦下。预检自身由专门的用例验证。
+        env=environment | {"CNKI_TEST_SKIP_PATH_BUDGET": "1"},
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -797,3 +799,39 @@ def test_readme_documents_cross_computer_installation_and_verification():
     assert "开发环境安装 pytest" in developer_checks
     assert "Windows: python -m pytest" not in developer_checks
     assert "macOS/Linux: python3 -m pytest" not in developer_checks
+
+
+@requires_windows_powershell
+def test_powershell_rejects_a_too_deep_codex_home_before_writing_anything(
+    skill_root: Path, tmp_path: Path,
+) -> None:
+    """playwright 的 driver 目录很深，深 CODEX_HOME 下 pip 解包会超 Windows MAX_PATH。
+
+    失败发生在 pip 阶段，安装器只透传一段英文 pip 报错，用户要读完整段才能定位；
+    而此时 Skill 已经复制过、备份已经产生。预检必须在任何写入之前拦下。
+    """
+    deep_home = tmp_path / ("d" * 120) / "codex-home"
+    environment = os.environ | {
+        "USERPROFILE": str(tmp_path / "profile"),
+        "APPDATA": str(tmp_path / "appdata"),
+        "CODEX_HOME": str(deep_home),
+    }
+
+    result = subprocess.run(
+        [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+            f"& '{skill_root / 'installers' / 'install.ps1'}' -Codex -PythonExe python",
+        ],
+        cwd=skill_root,
+        env=environment,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "too long" in result.stderr.casefold(), result.stderr
+    assert not (deep_home / "skills").exists()
+    assert not (deep_home / "runtimes").exists()
+    assert not (deep_home / "backups").exists()
