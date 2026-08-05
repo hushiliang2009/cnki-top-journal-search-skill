@@ -104,6 +104,8 @@ SKILL_ALLOWLIST = (
     "references/cnki-search-env-reference.md",
     "scripts/build_release.py",
     "scripts/catalog_lookup.py",
+    "scripts/environment_catalog_v4.py",
+    "scripts/generate_environment_catalog_v4.py",
     *(f"scripts/cnki_search_env/{name}" for name in CNKI_MODULES),
     *TEST_ALLOWLIST,
 )

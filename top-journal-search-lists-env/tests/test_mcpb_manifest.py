@@ -106,6 +106,8 @@ EXPECTED_SKILL_RELATIVE = (
     "references/cnki-search-env-reference.md",
     "scripts/build_release.py",
     "scripts/catalog_lookup.py",
+    "scripts/environment_catalog_v4.py",
+    "scripts/generate_environment_catalog_v4.py",
     *(f"scripts/cnki_search_env/{name}" for name in CNKI_MODULES),
     *TEST_RELATIVE,
 )
@@ -203,6 +205,27 @@ def test_all_runtime_versions_and_release_allowlist_are_consistent(skill_root: P
         skill_root / "mcpb/uv.lock"
     ).read_text(encoding="utf-8")
     assert ".mcpbignore" in _load_builder(skill_root).MCPB_ALLOWLIST
+
+
+def test_environment_release_has_portable_v4_inputs_without_v3_or_full_jsonl() -> None:
+    """离线复算脚本必须随 Skill 发布，否则收件人无法自行核验 v4.0 目录是怎么来的。
+
+    但生成脚本不进 MCPB（运行时不需要重算），完整审计 JSONL 不进任何发布包。
+    """
+    assert not any("v3.0" in path for path in EXPECTED_SKILL_RELATIVE)
+    assert "scripts/environment_catalog_v4.py" in EXPECTED_SKILL_RELATIVE
+    assert "scripts/generate_environment_catalog_v4.py" in EXPECTED_SKILL_RELATIVE
+    assert "tests/test_environment_catalog_generation.py" in EXPECTED_SKILL_RELATIVE
+    assert not any(
+        path.endswith("environment_journal_match_audit_v4.0.jsonl")
+        for path in EXPECTED_SKILL_RELATIVE
+    )
+    assert not any(
+        "generate_environment_catalog_v4.py" in path for path in EXPECTED_MCPB_RELATIVE
+    )
+    assert not any(
+        "environment_catalog_v4.py" in path for path in EXPECTED_MCPB_RELATIVE
+    )
 
 
 def test_release_builder_is_present(skill_root: Path) -> None:
