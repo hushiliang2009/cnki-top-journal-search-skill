@@ -52,6 +52,40 @@ def test_ci_adds_environment_matrix_without_removing_generic_jobs(skill_root: Pa
         assert forbidden not in workflow.casefold()
 
 
+def test_ci_verifies_environment_release_after_extracting_outside_the_checkout(
+    skill_root: Path,
+) -> None:
+    """环境版还多一条：解压后必须能用随包脚本把 v4.0 目录原样复算出来。"""
+    workflow = (skill_root.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    for required in (
+        "Verify environment release outside checkout",
+        "sha256sum -c checksums.sha256",
+        "environment-release-check",
+        "CNKI_ENV_MCPB_PROJECT",
+        'generate_environment_catalog_v4.py" --check',
+    ):
+        assert required in workflow
+
+
+def test_ci_env_installer_job_installs_both_products_side_by_side(
+    skill_root: Path,
+) -> None:
+    """共存只在两版真的一起装过之后才算验证过；单独装环境版证明不了不覆盖通用版。"""
+    workflow = (skill_root.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    env_installer = workflow.split("\n  env-installer:\n", 1)[1].split(
+        "\n  env-version-gate:\n", 1
+    )[0]
+    for required in (
+        "top-journal-search-lists/installers/install.sh --codex",
+        "top-journal-search-lists-env/installers/install.sh --codex",
+        "top-journal-search-lists\\installers\\install.ps1 -Codex -PythonExe python",
+        "top-journal-search-lists-env\\installers\\install.ps1 -Codex -PythonExe python",
+        "runtimes/cnki-search/.venv/bin/python",
+        "runtimes/cnki-search-env/.venv/bin/python",
+    ):
+        assert required in env_installer
+
+
 def test_ci_uploads_separate_generic_and_environment_artifacts(skill_root: Path) -> None:
     workflow = (skill_root.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert workflow.count("actions/upload-artifact@v4") == 2

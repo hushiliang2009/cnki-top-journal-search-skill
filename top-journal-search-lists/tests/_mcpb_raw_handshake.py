@@ -23,11 +23,13 @@ def receive(process: subprocess.Popen[str]) -> dict[str, object]:
 
 def main() -> None:
     skill_root = Path(__file__).resolve().parent.parent
+    configured_project = os.environ.get("CNKI_MCPB_PROJECT")
+    project = Path(configured_project).resolve() if configured_project else skill_root / "mcpb"
     environment = dict(os.environ)
     environment.pop("PYTHONHOME", None)
     environment.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
     process = subprocess.Popen(
-        ["uv", "run", "--directory", str(skill_root / "mcpb"), "src/server.py"],
+        ["uv", "run", "--directory", str(project), "src/server.py"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

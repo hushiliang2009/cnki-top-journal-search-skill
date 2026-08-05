@@ -1205,3 +1205,10 @@ def test_v050_workflow_documentation_from_algorithm_plan_remains_present(
     assert "TI → SU → KY → TKA" in text
     assert "来源类别不是专业检索字段" in text
     assert "P0209" in text
+
+
+def test_raw_mcpb_handshake_accepts_external_project(skill_root: Path) -> None:
+    """握手脚本原本只认仓库内的 mcpb/；解压到别处后它会去校验源码树而非产物本身。"""
+    text = (skill_root / "tests/_mcpb_raw_handshake.py").read_text(encoding="utf-8")
+    assert 'os.environ.get("CNKI_MCPB_PROJECT")' in text
+    assert "Path(configured_project).resolve()" in text
