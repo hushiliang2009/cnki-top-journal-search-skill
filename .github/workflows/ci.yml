@@ -129,6 +129,76 @@ jobs:
           $runtimePython = Join-Path $env:CODEX_HOME 'runtimes\cnki-search\.venv\Scripts\python.exe'
           if (-not (Test-Path -LiteralPath $runtimePython -PathType Leaf)) { throw 'runtime Python was not installed' }
           if (-not (Test-Path -LiteralPath (Join-Path $env:CODEX_HOME 'config.toml') -PathType Leaf)) { throw 'Codex config was not installed' }
+      - name: Reinstall over an existing installation on POSIX
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          export HOME="$RUNNER_TEMP/cnki-home"
+          export CODEX_HOME="$HOME/.codex"
+          export CNKI_PYTHON=python
+          sh top-journal-search-lists/installers/install.sh --codex
+          test -x "$CODEX_HOME/runtimes/cnki-search/.venv/bin/python"
+          # 首次安装时没有旧版本可备份，重装才会产生第一份。
+          count=$(ls -1d "$CODEX_HOME"/backups/skills/top-journal-search-lists.backup-* | wc -l)
+          test "$count" -eq 1 || { echo "unexpected backup count: $count"; exit 1; }
+          test -f "$CODEX_HOME/skills/top-journal-search-lists/SKILL.md"
+      - name: Roll back a failing reinstall on POSIX
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          export HOME="$RUNNER_TEMP/cnki-home"
+          export CODEX_HOME="$HOME/.codex"
+          # 版本合格但其余调用一律失败：让安装器在真实的 venv 创建阶段崩掉，
+          # 此时磁盘上已有一份完整的真实安装需要被完整恢复。
+          printf '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "Python 3.11.0"; exit 0; fi\nexit 1\n' > "$RUNNER_TEMP/fake-python.sh"
+          chmod +x "$RUNNER_TEMP/fake-python.sh"
+          rm -rf "$CODEX_HOME/runtimes/cnki-search/.venv"
+          before=$(ls -1 "$CODEX_HOME/skills/top-journal-search-lists" | sort | md5sum)
+          export CNKI_PYTHON="$RUNNER_TEMP/fake-python.sh"
+          if sh top-journal-search-lists/installers/install.sh --codex; then
+            echo "installer should have failed"; exit 1
+          fi
+          test -f "$CODEX_HOME/skills/top-journal-search-lists/SKILL.md" || { echo "skill was not restored"; exit 1; }
+          after=$(ls -1 "$CODEX_HOME/skills/top-journal-search-lists" | sort | md5sum)
+          test "$before" = "$after" || { echo "restored skill differs"; exit 1; }
+          grep -q '\[mcp_servers.cnki-search\]' "$CODEX_HOME/config.toml"
+      - name: Reinstall over an existing installation on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $testHome = Join-Path $env:RUNNER_TEMP 'cnki-home'
+          $env:USERPROFILE = $testHome
+          $env:APPDATA = Join-Path $testHome 'AppData\Roaming'
+          $env:CODEX_HOME = Join-Path $testHome '.codex'
+          & .\top-journal-search-lists\installers\install.ps1 -Codex -PythonExe python
+          $backups = @(Get-ChildItem (Join-Path $env:CODEX_HOME 'backups\skills') -Directory -Filter 'top-journal-search-lists.backup-*')
+          if ($backups.Count -ne 1) { throw "unexpected backup count: $($backups.Count)" }
+          if (-not (Test-Path -LiteralPath (Join-Path $env:CODEX_HOME 'skills\top-journal-search-lists\SKILL.md'))) { throw 'skill missing after reinstall' }
+      - name: Roll back a failing reinstall on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $testHome = Join-Path $env:RUNNER_TEMP 'cnki-home'
+          $env:USERPROFILE = $testHome
+          $env:APPDATA = Join-Path $testHome 'AppData\Roaming'
+          $env:CODEX_HOME = Join-Path $testHome '.codex'
+          $fake = Join-Path $env:RUNNER_TEMP 'fake-python.cmd'
+          Set-Content -LiteralPath $fake -Encoding ascii -Value @(
+            '@echo off',
+            'if "%1"=="--version" (echo Python 3.11.0& exit /b 0)',
+            'exit /b 1'
+          )
+          Remove-Item -Recurse -Force (Join-Path $env:CODEX_HOME 'runtimes\cnki-search\.venv') -ErrorAction SilentlyContinue
+          $skill = Join-Path $env:CODEX_HOME 'skills\top-journal-search-lists'
+          $before = (Get-ChildItem $skill | Sort-Object Name | ForEach-Object { $_.Name }) -join '|'
+          $failed = $false
+          try { & .\top-journal-search-lists\installers\install.ps1 -Codex -PythonExe $fake } catch { $failed = $true }
+          if (-not $failed -and $LASTEXITCODE -eq 0) { throw 'installer should have failed' }
+          if (-not (Test-Path -LiteralPath (Join-Path $skill 'SKILL.md'))) { throw 'skill was not restored' }
+          $after = (Get-ChildItem $skill | Sort-Object Name | ForEach-Object { $_.Name }) -join '|'
+          if ($before -ne $after) { throw 'restored skill differs' }
+          $config = Get-Content -LiteralPath (Join-Path $env:CODEX_HOME 'config.toml') -Encoding utf8 -Raw
+          if ($config -notmatch '\[mcp_servers\.cnki-search\]') { throw 'config was not restored' }
 
   version-gate:
     runs-on: ${{ matrix.os }}

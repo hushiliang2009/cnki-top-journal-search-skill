@@ -131,3 +131,20 @@ def test_compare_release_content_survives_legacy_console_encoding(
     )
 
     assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+
+
+def test_ci_installer_job_covers_reinstall_and_rollback(skill_root: Path) -> None:
+    """索引的总验收要求在三平台 CI 安装场景验证共存、重装和回滚。
+
+    重装与回滚此前只有替身 runtime 的单元测试覆盖——那里被回滚的是替身造的空壳
+    目录，而真实安装含 references 与 venv，规模与失败点都不同。
+    """
+    workflow = (skill_root.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    installer = workflow.split("\n  installer:\n", 1)[1].split("\n  version-gate:\n", 1)[0]
+    for required in (
+        "Reinstall over an existing installation",
+        "Roll back a failing reinstall",
+    ):
+        assert required in installer, required
+    # 回滚场景必须注入真实失败，而不是跳过安装
+    assert "fake-python" in installer
