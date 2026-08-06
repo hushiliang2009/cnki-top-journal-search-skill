@@ -12,6 +12,10 @@ def test_pytest_uses_workspace_local_runtime_directory(skill_root: Path) -> None
 def test_ci_runs_full_non_live_release_matrix(skill_root: Path) -> None:
     workflow = (skill_root.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     for required in (
+        "actions/checkout@v7",
+        "actions/setup-python@v7",
+        "actions/upload-artifact@v7",
+        "actions/download-artifact@v8",
         "ubuntu-latest",
         "windows-latest",
         "macos-latest",
@@ -37,6 +41,13 @@ def test_ci_runs_full_non_live_release_matrix(skill_root: Path) -> None:
         "runtimes\\cnki-search\\.venv\\Scripts\\python.exe",
     ):
         assert required in workflow
+    for obsolete in (
+        "actions/checkout@v4",
+        "actions/setup-python@v5",
+        "actions/upload-artifact@v4",
+        "actions/download-artifact@v4",
+    ):
+        assert obsolete not in workflow
     for forbidden in ("www.cnki.net", "kns.cnki.net", "webvpn", "proxy"):
         assert forbidden not in workflow.casefold()
 
@@ -68,11 +79,11 @@ def test_ci_uploads_generic_release_only_from_canonical_ubuntu_python311(
         "\n  env-desktop:\n", 1
     )[0]
 
-    assert workflow.count("actions/upload-artifact@v4") == 2
-    assert "actions/upload-artifact@v4" in ubuntu_job
+    assert workflow.count("actions/upload-artifact@v7") == 2
+    assert "actions/upload-artifact@v7" in ubuntu_job
     assert "if: matrix.python-version == '3.11'" in ubuntu_job
     assert "name: release-canonical-ubuntu-py3.11" in ubuntu_job
-    assert "actions/upload-artifact@v4" not in desktop_job
+    assert "actions/upload-artifact@v7" not in desktop_job
     assert "name: release-environment-ubuntu-py3.11" in environment_job
 
 
@@ -93,7 +104,7 @@ def test_ci_compares_release_content_across_platforms(skill_root: Path) -> None:
     for required in (
         "Compare release content across platforms",
         "compare_release_content.py",
-        "actions/download-artifact@v4",
+        "actions/download-artifact@v8",
     ):
         assert required in workflow, required
 

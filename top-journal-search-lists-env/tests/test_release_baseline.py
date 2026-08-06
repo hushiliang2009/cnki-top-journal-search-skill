@@ -12,6 +12,10 @@ def test_pytest_uses_workspace_local_runtime_directory(skill_root: Path) -> None
 def test_ci_adds_environment_matrix_without_removing_generic_jobs(skill_root: Path) -> None:
     workflow = (skill_root.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     for generic in (
+        "actions/checkout@v7",
+        "actions/setup-python@v7",
+        "actions/upload-artifact@v7",
+        "actions/download-artifact@v8",
         "\n  ubuntu:\n",
         "\n  desktop:\n",
         "\n  installer:\n",
@@ -20,6 +24,13 @@ def test_ci_adds_environment_matrix_without_removing_generic_jobs(skill_root: Pa
         "name: release-canonical-ubuntu-py3.11",
     ):
         assert generic in workflow
+    for obsolete in (
+        "actions/checkout@v4",
+        "actions/setup-python@v5",
+        "actions/upload-artifact@v4",
+        "actions/download-artifact@v4",
+    ):
+        assert obsolete not in workflow
     for required in (
         "\n  env-ubuntu:\n",
         "\n  env-desktop:\n",
@@ -88,7 +99,7 @@ def test_ci_env_installer_job_installs_both_products_side_by_side(
 
 def test_ci_uploads_separate_generic_and_environment_artifacts(skill_root: Path) -> None:
     workflow = (skill_root.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert workflow.count("actions/upload-artifact@v4") == 2
+    assert workflow.count("actions/upload-artifact@v7") == 2
     assert "name: release-canonical-ubuntu-py3.11" in workflow
     assert "name: release-environment-ubuntu-py3.11" in workflow
 
