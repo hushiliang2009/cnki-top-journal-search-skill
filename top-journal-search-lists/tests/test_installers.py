@@ -526,7 +526,7 @@ def test_merge_claude_config_keeps_user_env_across_upgrades() -> None:
     entry = after["mcpServers"]["cnki-search"]
 
     # 安装器自己管的键指向新路径
-    assert entry["command"] == "/new/python"
+    assert entry["command"] == str(Path("/new/python"))
     assert entry["env"]["PYTHONPATH"] == str(Path("/new/skill") / "scripts")
     assert entry["env"]["PYTHONUTF8"] == "1"
     assert entry["env"]["PYTHONIOENCODING"] == "utf-8"
@@ -565,7 +565,7 @@ def test_merge_codex_config_keeps_user_env_across_upgrades() -> None:
     merged = install_config.merge_codex_config(existing, server)
 
     entry = tomllib.loads(merged)["mcp_servers"]["cnki-search"]
-    assert entry["command"] == "/new/python"
+    assert entry["command"] == str(Path("/new/python"))
     assert entry["env"]["PYTHONPATH"] == str(Path("/new/skill") / "scripts")
     assert entry["env"]["CNKI_WEBVPN_HOME"] == "https://webvpn.example.edu.cn/cnki"
 

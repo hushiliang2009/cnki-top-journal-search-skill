@@ -617,7 +617,7 @@ def test_merge_claude_config_keeps_user_env_across_upgrades() -> None:
     after = merge_claude_config(before, server)
     entry = after["mcpServers"]["cnki-search-env"]
 
-    assert entry["command"] == "/new/runtime/.venv/bin/python"
+    assert entry["command"] == str(Path("/new/runtime/.venv/bin/python"))
     assert entry["env"]["PYTHONPATH"] == str(Path("/new/skill") / "scripts")
     # 受管键跟随新运行时，不得沿用旧值
     assert entry["env"]["PLAYWRIGHT_BROWSERS_PATH"] == str(
