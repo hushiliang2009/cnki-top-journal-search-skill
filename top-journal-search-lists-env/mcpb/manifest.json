@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "cnki-search-env",
   "display_name": "CNKI Environmental Journal Search",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Public CNKI topic search and attended institutional-WebVPN professional search with environmental v4.0 journal classification; no downloads or unattended login.",
   "author": {
     "name": "Top Environmental Journal Search"

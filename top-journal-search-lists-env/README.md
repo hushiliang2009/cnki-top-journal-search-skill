@@ -255,7 +255,7 @@ ai4scholar。
 
 ## 版本与发布包
 
-当前环境版为 `0.3.1`，使用《`环境科学与工程学科顶尖期刊目录_v4.0.md`》和机器目录 `environment_journal_catalog_v4.0.json`。正式 Release 包含 `top-journal-search-lists-env_Skill.zip`、`cnki-search-env.mcpb` 和 `checksums.sha256`。环境版使用 `top-journal-search-lists-env`、`cnki-search-env` 和 `runtimes/cnki-search-env`；可与通用版 `top-journal-search-lists`、`cnki-search` 并存，二者互不覆盖。
+当前环境版为 `0.3.2`，使用《`环境科学与工程学科顶尖期刊目录_v4.0.md`》和机器目录 `environment_journal_catalog_v4.0.json`。正式 Release 包含 `top-journal-search-lists-env_Skill.zip`、`cnki-search-env.mcpb` 和 `checksums.sha256`。环境版使用 `top-journal-search-lists-env`、`cnki-search-env` 和 `runtimes/cnki-search-env`；可与通用版 `top-journal-search-lists`、`cnki-search` 并存，二者互不覆盖。
 
 ### 校验发布产物
 

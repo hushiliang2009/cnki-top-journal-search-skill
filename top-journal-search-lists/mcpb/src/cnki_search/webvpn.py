@@ -1518,7 +1518,7 @@ class ProfessionalSearchPage:
         """在出版年度控件填写年份；年份不得写入专业检索表达式。"""
         if (year_from is None) != (year_to is None):
             raise ValueError("年份区间必须同时提供起止年份")
-        if year_from is not None and year_from > year_to:
+        if year_from is not None and year_to is not None and year_from > year_to:
             raise ValueError(f"起始年份 {year_from} 不能晚于结束年份 {year_to}")
         for selector, value, label in (
             (YEAR_FROM_SELECTOR, year_from, "起始年"),

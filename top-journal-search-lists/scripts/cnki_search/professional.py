@@ -163,7 +163,7 @@ def validate_year_range(
 ) -> tuple[int | None, int | None]:
     if (year_from is None) != (year_to is None):
         raise ValueError("年份区间必须同时提供起止年份")
-    if year_from is None:
+    if year_from is None or year_to is None:
         return None, None
     if year_from > year_to:
         raise ValueError(f"起始年份 {year_from} 不能晚于结束年份 {year_to}")
