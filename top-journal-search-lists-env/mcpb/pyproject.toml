@@ -1,6 +1,6 @@
 [project]
 name = "cnki-search-env-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "Public and attended CNKI environmental journal-search MCP server"
 requires-python = ">=3.11"
 dependencies = [

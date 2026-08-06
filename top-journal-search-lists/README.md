@@ -261,7 +261,7 @@ python top-journal-search-lists/scripts/catalog_lookup.py lookup "期刊名A" "�
 
 ## 版本与发布包
 
-当前通用版为 `0.5.0`。正式 Release 包含 `top-journal-search-lists_Skill.zip`、`cnki-search.mcpb` 和 `checksums.sha256`。安装前须先按 `checksums.sha256` 核验两个压缩包。通用版使用 `top-journal-search-lists`、`cnki-search` 和 `runtimes/cnki-search`；可与环境版 `top-journal-search-lists-env`、`cnki-search-env` 并存，二者互不覆盖。
+当前通用版为 `0.5.1`。正式 Release 包含 `top-journal-search-lists_Skill.zip`、`cnki-search.mcpb` 和 `checksums.sha256`。安装前须先按 `checksums.sha256` 核验两个压缩包。通用版使用 `top-journal-search-lists`、`cnki-search` 和 `runtimes/cnki-search`；可与环境版 `top-journal-search-lists-env`、`cnki-search-env` 并存，二者互不覆盖。
 
 ### 校验发布产物
 

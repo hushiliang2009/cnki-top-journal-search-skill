@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "cnki-search",
   "display_name": "CNKI Journal Search",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Public CNKI topic search and attended institutional-WebVPN professional search with master-journal classification; no downloads or unattended login.",
   "author": {
     "name": "Top Journal Search Lists"

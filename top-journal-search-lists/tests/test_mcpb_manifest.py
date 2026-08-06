@@ -109,7 +109,7 @@ def _load_builder(skill_root: Path):
     return module
 
 
-EXPECTED_VERSION = "0.5.0"
+EXPECTED_VERSION = "0.5.1"
 EXPECTED_TOOLS = [
     {
         "name": "cnki_search",
