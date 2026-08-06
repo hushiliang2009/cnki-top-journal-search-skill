@@ -87,6 +87,10 @@ PROFESSIONAL_TAB_CLICK_JS = """(label) => {
 #: 只有 100 字符；误填到那里会把表达式**静默截断成半截语法**再提交，站点直接
 #: 返回「访问禁止」，而且现象看起来像风控，极易误判。
 EXPRESSION_BOX_SELECTOR = "textarea.textarea-major.majorSearch"
+ACADEMIC_JOURNALS_TEXT = "学术期刊"
+ACADEMIC_JOURNALS_SELECTOR = "a:has-text('学术期刊')"
+YEAR_FROM_SELECTOR = "input[placeholder='起始年']"
+YEAR_TO_SELECTOR = "input[placeholder='结束年']"
 #: 高级检索页的提交按钮是 input.btn-search（实测 161×34 可见）。
 #: 页面上同时存在 input.search-btn，但那是知网首页按钮的类名，在这里尺寸为
 #: 0×0 且不可点——按 class 取 .first 会拿到它，点击必然超时 30 秒。
@@ -100,12 +104,8 @@ SEARCH_BUTTON_SELECTOR = SEARCH_BUTTON_SELECTORS[0]
 RESULT_TABLE_SELECTOR = "table.result-table-list"
 #: 「抱歉，暂无数据，请稍后重试。」——服务端临时拒绝的措辞。
 NO_DATA_MARKERS = ("暂无数据", "请稍后重试")
-#: 结果页左侧「来源类别」分面的取值。
-#:
-#: 它只出现在**结果页**，高级检索输入页上没有——曾据输入页错判为"来源类别
-#: 筛选不存在"，进而以为 CSSCI 只能靠枚举 661 本刊名。实际用分面更好：
-#: 一次请求即可，且 CSSCI 分面含来源期刊与扩展版，范围大于目录里的 674 本，
-#: 也不受刊名全半角变体的影响。
+#: 选择「学术期刊」后，专业检索条件区显示的「来源类别」取值。
+#: 来源类别是页面筛选控件，不是专业检索字段，必须在提交前勾选。
 SOURCE_CATEGORY_VALUES = {
     "CSSCI": "P0209",
     "北大核心": "P01",
@@ -121,7 +121,7 @@ TOTAL_COUNT_JS = (
 
 @dataclass(frozen=True, slots=True)
 class SourceCategoryApplication:
-    """结果页来源类别分面的稳定应用状态。"""
+    """专业检索条件区来源类别的应用状态。"""
 
     requested: SourceCategorySpec
     applied: bool
@@ -1489,6 +1489,53 @@ class ProfessionalSearchPage:
                 return
         raise WebVpnNavigationError("已点击「专业检索」标签，但表达式框始终不可见")
 
+    async def select_academic_journals(
+        self, *, timeout_seconds: float = 20.0,
+    ) -> None:
+        """把检索范围限定为学术期刊，并等待来源类别条件区出现。"""
+        cssci = self.page.locator(
+            SOURCE_CATEGORY_SELECTOR.format(value=SOURCE_CATEGORY_VALUES["CSSCI"])
+        )
+        if await await_maybe(cssci.count()) == 1:
+            return
+        links = self.page.locator(ACADEMIC_JOURNALS_SELECTOR)
+        visible = None
+        for index in range(await await_maybe(links.count())):
+            candidate = links.nth(index)
+            if await await_maybe(candidate.is_visible()):
+                visible = candidate
+                break
+        if visible is None:
+            raise WebVpnNavigationError("专业检索页未找到可见的「学术期刊」入口")
+        await await_maybe(visible.click())
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+            if await await_maybe(cssci.count()) == 1:
+                return
+        raise WebVpnNavigationError("已选择「学术期刊」，但来源类别条件区未出现")
+
+    async def set_publication_year_range(
+        self, year_from: int | None, year_to: int | None,
+    ) -> None:
+        """在出版年度控件填写年份；年份不得写入专业检索表达式。"""
+        if (year_from is None) != (year_to is None):
+            raise ValueError("年份区间必须同时提供起止年份")
+        if year_from is not None and year_from > year_to:
+            raise ValueError(f"起始年份 {year_from} 不能晚于结束年份 {year_to}")
+        for selector, value, label in (
+            (YEAR_FROM_SELECTOR, year_from, "起始年"),
+            (YEAR_TO_SELECTOR, year_to, "结束年"),
+        ):
+            box = self.page.locator(selector)
+            if await await_maybe(box.count()) != 1:
+                raise WebVpnNavigationError(f"学术期刊专业检索页未找到出版年度{label}控件")
+            text = "" if value is None else str(value)
+            await await_maybe(box.fill(text))
+            accepted = await await_maybe(box.input_value())
+            if accepted != text:
+                raise WebVpnNavigationError(f"出版年度{label}未正确写入")
+
     async def fill_expression(self, expression: str) -> None:
         box = self.page.locator(EXPRESSION_BOX_SELECTOR)
         if await await_maybe(box.count()) != 1:
@@ -1560,39 +1607,20 @@ class ProfessionalSearchPage:
 
     async def apply_source_category(self, category: SourceCategorySpec, *,
                                     timeout_seconds: float = 20.0) -> SourceCategoryApplication:
-        """在结果页勾选来源类别分面，并复核稳定的筛选后状态。
-
-        必须先完成一次检索——分面不在高级检索输入页上，只在结果页出现。
-        """
+        """在学术期刊专业检索条件区勾选来源类别，并在提交前复核。"""
         requested = category
         value, label = requested.code, requested.label
         # 命中数必须在取 .first 之前判定：.first 恒为 0 或 1，会掩盖多命中的歧义。
         matches = self.page.locator(SOURCE_CATEGORY_SELECTOR.format(value=value))
         if await await_maybe(matches.count()) != 1:
             raise WebVpnNavigationError(
-                f"结果页未找到唯一的「{label}」来源类别分面；需先完成一次检索"
+                f"专业检索条件区未找到唯一的「{label}」来源类别"
             )
         box = matches.first
         await await_maybe(box.check())
-        previous: tuple[object, ...] | None = None
-        stable = 0
-        deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
-            await asyncio.sleep(0.5)
-            checked = bool(await await_maybe(box.is_checked()))
-            status = await self.classify_outcome()
-            total_text = await self.total_results()
-            rows = await await_maybe(
-                self.page.locator(RESULT_TABLE_SELECTOR + " tbody tr").count()
-            )
-            snapshot = (checked, status.value, total_text, rows)
-            stable = stable + 1 if checked and snapshot == previous else 0
-            previous = snapshot
-            if stable >= 1 and status is not SearchStatus.PAGE_CONTRACT_CHANGED:
-                compact = (total_text or "").replace(",", "").strip()
-                total = int(compact) if compact.isdecimal() else None
-                return SourceCategoryApplication(requested, True, total, status)
-        raise WebVpnNavigationError(f"来源类别未稳定生效：{label}")
+        if not bool(await await_maybe(box.is_checked())):
+            raise WebVpnNavigationError(f"来源类别未正确勾选：{label}")
+        return SourceCategoryApplication(requested, True, None, SearchStatus.SUCCESS)
 
     async def classify_outcome(self) -> SearchStatus:
         """判定提交后的页面状态。顺序很重要：先看结果，再看拒绝，最后才看验证码。"""
@@ -1632,20 +1660,21 @@ class ProfessionalSearchPage:
             await sleep(poll_seconds)
 
     async def execute_plan(self, plan: ExpressionBatch) -> PlanExecutionResult:
-        await self.fill_expression(plan.expression)
-        await self.submit()
-        status = await self.wait_for_outcome()
         application: SourceCategoryApplication | None = None
-        if status is SearchStatus.SUCCESS:
+        try:
+            await self.select_academic_journals()
+            await self.switch_to_professional()
+            await self.set_publication_year_range(plan.year_from, plan.year_to)
             if plan.source_category is not None:
-                try:
-                    application = await self.apply_source_category(plan.source_category)
-                    status = (
-                        application.status if application.applied
-                        else SearchStatus.PAGE_CONTRACT_CHANGED
-                    )
-                except WebVpnNavigationError:
-                    status = SearchStatus.PAGE_CONTRACT_CHANGED
+                application = await self.apply_source_category(plan.source_category)
+                if not application.applied:
+                    raise WebVpnNavigationError("来源类别未在提交前生效")
+        except WebVpnNavigationError:
+            status = SearchStatus.PAGE_CONTRACT_CHANGED
+        else:
+            await self.fill_expression(plan.expression)
+            await self.submit()
+            status = await self.wait_for_outcome()
             if status is SearchStatus.SUCCESS:
                 await self.set_page_size(plan.page_size)
                 status = await self.wait_for_outcome()

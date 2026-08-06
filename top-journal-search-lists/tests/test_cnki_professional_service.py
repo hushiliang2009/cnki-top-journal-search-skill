@@ -811,10 +811,18 @@ def test_result_always_exposes_the_human_attendance_flag() -> None:
 def test_custom_expression_runs_without_batching() -> None:
     seen: list[ExpressionBatch] = []
     service = CnkiProfessionalSearchService(_executor([("某文", "经济研究")], seen))
-    expression = "SU %= '碳中和' AND LY='经济研究' AND YE BETWEEN ('2020', '2026')"
+    expression = "SU %= '碳中和' AND LY='经济研究'"
     result = asyncio.run(service.search_expression(expression))
     assert [plan.expression for plan in seen] == [expression]
     assert result["batches_total"] == 1 and result["expressions"] == [expression]
+
+
+def test_custom_expression_rejects_unsupported_year_field() -> None:
+    service = CnkiProfessionalSearchService(_executor([]))
+    with pytest.raises(ValueError, match="YE"):
+        asyncio.run(service.search_expression(
+            "SU %= '碳中和' AND YE BETWEEN ('2020', '2026')"
+        ))
 
 
 PROFESSIONAL_RESULT_KEYS = (
@@ -877,7 +885,7 @@ def test_legacy_tuple_executor_never_claims_an_unverified_facet() -> None:
     result = asyncio.run(service.search_group("主题", service_module.CSSCI_GROUP, limit=1))
 
     assert result["source_category_applied"] is False
-    # 分面未经证实 => 结果页来源类别筛选的分组不得产出任何"合格"记录。
+    # 来源类别未经证实 => 该分组不得产出任何合格记录。
     assert result["records"] == []
 
 

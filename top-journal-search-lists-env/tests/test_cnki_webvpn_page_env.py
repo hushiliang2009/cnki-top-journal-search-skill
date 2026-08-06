@@ -921,6 +921,55 @@ def test_selectors_match_the_observed_page_structure() -> None:
     assert webvpn.PROFESSIONAL_TAB_TEXT == "专业检索"
 
 
+class AcademicScopeLocator:
+    def __init__(self, page: "AcademicScopePage", kind: str) -> None:
+        self.page = page
+        self.kind = kind
+
+    def nth(self, _index: int) -> "AcademicScopeLocator":
+        return self
+
+    async def count(self) -> int:
+        if self.kind == "source_category":
+            return int(self.page.selected)
+        return 1
+
+    async def is_visible(self) -> bool:
+        return True
+
+    async def click(self) -> None:
+        self.page.events.append("scope:academic_journals")
+        self.page.selected = True
+
+
+class AcademicScopePage:
+    def __init__(self) -> None:
+        self.selected = False
+        self.events: list[str] = []
+
+    def locator(self, selector: str) -> AcademicScopeLocator:
+        if selector == webvpn.ACADEMIC_JOURNALS_SELECTOR:
+            return AcademicScopeLocator(self, "academic_journals")
+        assert selector == webvpn.SOURCE_CATEGORY_SELECTOR.format(value="P0209")
+        return AcademicScopeLocator(self, "source_category")
+
+
+def test_academic_journals_is_selected_before_source_category_controls() -> None:
+    page = AcademicScopePage()
+    asyncio.run(webvpn.ProfessionalSearchPage(page).select_academic_journals())
+    assert page.selected is True
+    assert page.events == ["scope:academic_journals"]
+
+
+def test_publication_year_uses_page_controls_not_expression_field() -> None:
+    page = FakePage()
+    asyncio.run(
+        webvpn.ProfessionalSearchPage(page).set_publication_year_range(2020, 2026)
+    )
+    assert page.locator(webvpn.YEAR_FROM_SELECTOR).value == "2020"
+    assert page.locator(webvpn.YEAR_TO_SELECTOR).value == "2026"
+
+
 class PlanPage:
     def __init__(self, events: list[str]) -> None:
         self.events = events
@@ -935,6 +984,17 @@ class PlanRecorder(webvpn.ProfessionalSearchPage):
     def __init__(self, events: list[str]) -> None:
         super().__init__(PlanPage(events))
         self.events = events
+
+    async def select_academic_journals(self) -> None:
+        self.events.append("scope:academic_journals")
+
+    async def switch_to_professional(self, *, timeout_seconds: float = 20.0) -> None:
+        self.events.append("mode:professional")
+
+    async def set_publication_year_range(
+        self, year_from: int | None, year_to: int | None,
+    ) -> None:
+        self.events.append(f"years:{year_from}-{year_to}")
 
     async def fill_expression(self, expression: str) -> None:
         assert expression == "SU %= '数字经济'"
@@ -954,7 +1014,7 @@ class PlanRecorder(webvpn.ProfessionalSearchPage):
         requested = category if isinstance(category, SourceCategorySpec) else \
             SourceCategorySpec("P0209", category)
         return webvpn.SourceCategoryApplication(
-            requested, True, 10, SearchStatus.SUCCESS,
+            requested, True, None, SearchStatus.SUCCESS,
         )
 
     async def set_page_size(self, size: int = 50, *,
@@ -971,6 +1031,8 @@ def _plan(*, source_category: SourceCategorySpec | str | None) -> ExpressionBatc
         expression="SU %= '数字经济'",
         page_size=50,
         source_category=source_category,
+        year_from=2020,
+        year_to=2026,
     )
 
 
@@ -1012,6 +1074,17 @@ class ControlledFacetPlanDriver(webvpn.ProfessionalSearchPage):
         super().__init__(page)
         self.events = events
 
+    async def select_academic_journals(self) -> None:
+        self.events.append("scope:academic_journals")
+
+    async def switch_to_professional(self, *, timeout_seconds: float = 20.0) -> None:
+        self.events.append("mode:professional")
+
+    async def set_publication_year_range(
+        self, year_from: int | None, year_to: int | None,
+    ) -> None:
+        self.events.append(f"years:{year_from}-{year_to}")
+
     async def fill_expression(self, expression: str) -> None:
         assert expression == "SU %= '数字经济'"
         self.events.append("fill")
@@ -1049,6 +1122,17 @@ class MissingFacetPlanDriver(webvpn.ProfessionalSearchPage):
         super().__init__(page)
         self.events = events
 
+    async def select_academic_journals(self) -> None:
+        self.events.append("scope:academic_journals")
+
+    async def switch_to_professional(self, *, timeout_seconds: float = 20.0) -> None:
+        self.events.append("mode:professional")
+
+    async def set_publication_year_range(
+        self, year_from: int | None, year_to: int | None,
+    ) -> None:
+        self.events.append(f"years:{year_from}-{year_to}")
+
     async def fill_expression(self, expression: str) -> None:
         assert expression == "SU %= '数字经济'"
         self.events.append("fill")
@@ -1084,7 +1168,7 @@ class PostFacetStatusDriver(PlanRecorder):
         )
 
 
-def test_real_execute_plan_uses_controlled_facet_code_and_reports_total(
+def test_real_execute_plan_uses_controlled_source_category_code_before_submit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def no_wait(_seconds: float) -> None:
@@ -1105,7 +1189,7 @@ def test_real_execute_plan_uses_controlled_facet_code_and_reports_total(
         value="P0209"
     )
     assert result.source_category_applied is True
-    assert result.source_category_total == 2270
+    assert result.source_category_total is None
 
 
 def test_real_execute_plan_stops_when_requested_facet_is_missing() -> None:
@@ -1127,10 +1211,12 @@ def test_real_execute_plan_stops_when_requested_facet_is_missing() -> None:
         False,
         None,
     )
-    assert events == ["fill", "submit", "classify"]
+    assert events == [
+        "scope:academic_journals", "mode:professional", "years:2020-2026",
+    ]
 
 
-def test_execute_plan_applies_post_result_options_before_final_render() -> None:
+def test_execute_plan_sets_scope_years_and_source_category_before_submit() -> None:
     events: list[str] = []
     driver = PlanRecorder(events)
 
@@ -1140,11 +1226,11 @@ def test_execute_plan_applies_post_result_options_before_final_render() -> None:
 
     assert result == PlanExecutionResult(
         "success", "<table class='result-table-list'></table>",
-        "https://webvpn.example.edu.cn/result", True, 10,
+        "https://webvpn.example.edu.cn/result", True, None,
     )
     assert events == [
-        "fill", "submit", "classify",
-        "facet:CSSCI", "page_size:50", "classify", "content",
+        "scope:academic_journals", "mode:professional", "years:2020-2026", "facet:CSSCI",
+        "fill", "submit", "classify", "page_size:50", "classify", "content",
     ]
 
 
@@ -1158,30 +1244,6 @@ def test_execute_plan_omits_facet_for_chinese_top_plan() -> None:
     assert result.source_category_applied is False
     assert result.source_category_total is None
     assert all(not event.startswith("facet:") for event in events)
-
-
-@pytest.mark.parametrize(
-    ("after_status", "expected"),
-    [
-        (SearchStatus.NO_RESULTS, "no_results"),
-        (SearchStatus.CHALLENGE_DETECTED, "challenge_detected"),
-        (SearchStatus.PAGE_CONTRACT_CHANGED, "page_contract_changed"),
-    ],
-)
-def test_execute_plan_rechecks_status_after_facet(
-    after_status: SearchStatus, expected: str,
-) -> None:
-    """分面刷新若进入终止状态，严禁再调整页大小或读取未筛选页面。"""
-    events: list[str] = []
-    result = asyncio.run(
-        PostFacetStatusDriver(events, after_status).execute_plan(
-            _plan(source_category=SourceCategorySpec("P0209", "CSSCI"))
-        )
-    )
-
-    assert result.status == expected
-    assert result.html == ""
-    assert "page_size:50" not in events
 
 
 def test_missing_or_unchecked_facet_never_returns_unfiltered_html() -> None:
@@ -1203,10 +1265,10 @@ class UnchangedTotalFacetPage(ControlledFacetPlanPage):
         return "50"
 
 
-def test_unchanged_total_is_valid_when_checkbox_is_checked_and_page_is_stable(
+def test_checked_source_category_is_applied_before_submit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """分面命中全部结果时总数可以不变，不能被误判为未生效。"""
+    """来源类别在条件区勾选后即视为已应用，结果总数应待提交后生成。"""
     async def no_wait(_seconds: float) -> None:
         return None
 
@@ -1221,7 +1283,7 @@ def test_unchanged_total_is_valid_when_checkbox_is_checked_and_page_is_stable(
     )
 
     assert application.applied is True
-    assert application.total == 50
+    assert application.total is None
     assert application.status is SearchStatus.SUCCESS
 
 

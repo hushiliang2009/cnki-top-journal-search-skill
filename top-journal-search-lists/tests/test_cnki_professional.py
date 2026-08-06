@@ -38,11 +38,13 @@ def test_journal_variants_are_deduplicated_for_plain_names() -> None:
     assert professional.journal_name_variants("管理世界") == ["管理世界"]
 
 
-def test_year_clause_uses_between_syntax() -> None:
-    expression = professional.build_expression(
+def test_year_range_is_batch_metadata_not_an_expression_field() -> None:
+    batch = professional.build_batches(
         "共同富裕", ["经济研究"], year_from=2020, year_to=2026
-    )
-    assert "YE BETWEEN ('2020', '2026')" in expression
+    )[0]
+    assert batch.expression == "TI %= '共同富裕' AND (LY='经济研究')"
+    assert batch.year_from == 2020
+    assert batch.year_to == 2026
 
 
 def test_year_bounds_must_be_supplied_together_and_ordered() -> None:
@@ -91,8 +93,24 @@ def test_journal_too_long_for_budget_raises_instead_of_looping() -> None:
 
 def test_looks_like_expression_separates_expressions_from_plain_topics() -> None:
     assert professional.looks_like_expression("SU %= '数字经济' AND LY='管理世界'")
-    assert professional.looks_like_expression("YE BETWEEN ('2020', '2026')")
+    assert not professional.looks_like_expression("YE BETWEEN ('2020', '2026')")
+    assert not professional.looks_like_expression(
+        "SU %= '碳中和' AND YE BETWEEN ('2020', '2026')"
+    )
     assert not professional.looks_like_expression("数字经济 全要素生产率")
+
+
+def test_searchable_fields_match_the_cnki_professional_search_panel() -> None:
+    assert professional.SEARCHABLE_FIELDS == {
+        "SU": "主题", "TKA": "篇关摘", "TI": "篇名", "KY": "关键词",
+        "AB": "摘要", "CO": "小标题", "FT": "全文", "AU": "作者",
+        "FI": "第一作者", "RP": "通讯作者", "AF": "作者单位",
+        "LY": "期刊名称", "RF": "参考文献", "FU": "基金",
+        "CLC": "中图分类号", "SN": "ISSN", "CN": "CN", "DOI": "DOI",
+        "QKLM": "栏目信息", "FAF": "第一单位", "CF": "被引频次",
+    }
+    with pytest.raises(TypeError):
+        professional.SEARCHABLE_FIELDS["YE"] = "出版年份"  # type: ignore[index]
 
 
 def test_mcpb_copy_exposes_the_same_behaviour() -> None:

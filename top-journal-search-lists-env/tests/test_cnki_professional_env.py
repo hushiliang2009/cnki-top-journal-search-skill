@@ -38,11 +38,13 @@ def test_journal_variants_are_deduplicated_for_plain_names() -> None:
     assert professional.journal_name_variants("环境科学学报") == ["环境科学学报"]
 
 
-def test_year_clause_uses_between_syntax() -> None:
-    expression = professional.build_expression(
+def test_year_range_is_batch_metadata_not_an_expression_field() -> None:
+    batch = professional.build_batches(
         "碳中和", ["环境科学"], year_from=2020, year_to=2026
-    )
-    assert "YE BETWEEN ('2020', '2026')" in expression
+    )[0]
+    assert batch.expression == "TI %= '碳中和' AND (LY='环境科学')"
+    assert batch.year_from == 2020
+    assert batch.year_to == 2026
 
 
 def test_year_bounds_must_be_supplied_together_and_ordered() -> None:
@@ -90,12 +92,17 @@ def test_journal_too_long_for_budget_raises_instead_of_looping() -> None:
 
 
 def test_batches_carry_the_declared_source_category() -> None:
-    """环境版 CSSCI 每批都要带来源类别；缺省时保持 None，不凭空加筛选。"""
+    """环境版 CSSCI 或北大核心每批都要带来源类别；缺省时保持 None。"""
     plain = professional.build_batches("碳排放", ["环境科学"])
     assert plain[0].source_category is None
-    category = professional.SourceCategorySpec("P0209", "CSSCI")
-    faceted = professional.build_batches("碳排放", ["环境科学"], source_category=category)
-    assert [batch.source_category for batch in faceted] == [category]
+    for category in (
+        professional.SourceCategorySpec("P0209", "CSSCI"),
+        professional.SourceCategorySpec("P01", "北大核心"),
+    ):
+        faceted = professional.build_batches(
+            "碳排放", ["环境科学"], source_category=category
+        )
+        assert [batch.source_category for batch in faceted] == [category]
     with pytest.raises(ValueError, match="受控代码与名称"):
         professional.build_batches("碳排放", ["环境科学"], source_category="CSSCI")
 
@@ -108,8 +115,24 @@ def test_batch_page_size_defaults_to_site_ceiling() -> None:
 
 def test_looks_like_expression_separates_expressions_from_plain_topics() -> None:
     assert professional.looks_like_expression("SU %= '碳中和' AND LY='中国环境科学'")
-    assert professional.looks_like_expression("YE BETWEEN ('2020', '2026')")
+    assert not professional.looks_like_expression("YE BETWEEN ('2020', '2026')")
+    assert not professional.looks_like_expression(
+        "SU %= '碳中和' AND YE BETWEEN ('2020', '2026')"
+    )
     assert not professional.looks_like_expression("大气污染 协同治理")
+
+
+def test_searchable_fields_match_the_cnki_professional_search_panel() -> None:
+    assert professional.SEARCHABLE_FIELDS == {
+        "SU": "主题", "TKA": "篇关摘", "TI": "篇名", "KY": "关键词",
+        "AB": "摘要", "CO": "小标题", "FT": "全文", "AU": "作者",
+        "FI": "第一作者", "RP": "通讯作者", "AF": "作者单位",
+        "LY": "期刊名称", "RF": "参考文献", "FU": "基金",
+        "CLC": "中图分类号", "SN": "ISSN", "CN": "CN", "DOI": "DOI",
+        "QKLM": "栏目信息", "FAF": "第一单位", "CF": "被引频次",
+    }
+    with pytest.raises(TypeError):
+        professional.SEARCHABLE_FIELDS["YE"] = "出版年份"  # type: ignore[index]
 
 
 def test_expression_budget_stays_under_the_measured_server_limit() -> None:
@@ -136,10 +159,9 @@ def test_all_builders_default_to_title_and_reject_unknown_fields() -> None:
         professional.build_topic_expression("碳中和", topic_field="AB")
 
 
-def test_source_category_is_a_closed_pair_not_free_text() -> None:
-    spec = professional.SourceCategorySpec("P0209", "CSSCI")
-    assert spec.code == "P0209"
-    assert professional.SourceCategorySpec("P01", "北大核心").label == "北大核心"
+def test_environment_source_category_allows_cssci_and_pku_core_only() -> None:
+    assert professional.SourceCategorySpec("P0209", "CSSCI").code == "P0209"
+    assert professional.SourceCategorySpec("P01", "北大核心").code == "P01"
     with pytest.raises(ValueError):
         professional.SourceCategorySpec("P01", "CSSCI")
     with pytest.raises(ValueError, match="受控代码与名称"):
