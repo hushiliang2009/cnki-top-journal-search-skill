@@ -85,7 +85,35 @@ CNKI 计划 Task 1—3 与环境目录 v4.0 计划 8 项任务在更早的会话
 但由此发现产物在 Windows 检出下无法复现官方 SHA-256，见 Issue #21。现有确定性测试只验证
 "同一环境连续两次构建字节一致"，因此发现不了跨平台差异。
 
-## 已知遗留
+## 后续 patch：v0.5.1 与环境版 v0.3.1
+
+四项遗留（#19—#22）在 v0.5.0 发布之后全部修复并关闭，其中三项触及会进发布包的文件：
+`install.ps1` 的长路径预检、两版 `webvpn.py` 的浏览器失败原因区分、`_webvpn_e2e.py` 的
+受控失败原因，以及 README 的产物校验说明与 `.gitattributes` 的 LF 固定。
+
+已发布的 v0.5.0 / v0.3.0 附件不含这些修复，据此安装的环境在浏览器版本错位时仍会报
+"需要图形界面"。因此发 patch 版本让发布物与 `main` 一致。
+
+- 标签：`v0.5.1`、`top-journal-search-lists-env-v0.3.1`，均指向 `e945bef`
+- 产物取自 CI run `31058483269`，重新下载复核后哈希一致
+
+| 产物 | SHA-256 |
+|---|---|
+| `top-journal-search-lists_Skill.zip` | `825224926d593a1e4e05b6ea4c43509156f642d46a096f5390925905654a86d4` |
+| `cnki-search.mcpb` | `3ce4316129142d31eb21bdca3b3071a03a6a780937d10557a021b1a5386c7ed3` |
+| `top-journal-search-lists-env_Skill.zip` | `7654fc61db7c05a5a37c752c56eec66c287cf12b58f65fcd1863e1256f203f07` |
+| `cnki-search-env.mcpb` | `abfb2dee2dfb25e047f75481df7e926c6ae30586afc62db1298e8903c56ce8a1` |
+
+检索逻辑未改动：`professional_service.py`、`professional.py`、`ranking.py`、`results.py`
+在 `v0.5.0..main` 的差异中均未出现。两版人工值守冒烟均通过，且返回记录与 v0.5.0 那次
+逐条相同——这正是 patch 应有的证据。环境版首次报 `page_contract_changed`，重试即过；
+判定为偶发的依据是重试结果与上版完全一致，站点若真改版不会恰好还原同一批记录。
+
+该次失败也顺带验证了 #20 本身：`reason` 字段直接指明了失败性质，无需再另写诊断脚本。
+
+## 已知遗留（均已关闭）
+
+以下四项在 v0.5.1 / env v0.3.1 中全部修复并关闭，此处保留记录以说明来龙去脉。
 
 - Issue #19：安装器缺 Windows 长路径预检。深 `CODEX_HOME` 下 pip 解包 playwright 会超
   MAX_PATH。默认 `%USERPROFILE%\.codex` 很短，不受影响。
@@ -101,7 +129,8 @@ CNKI 计划 Task 1—3 与环境目录 v4.0 计划 8 项任务在更早的会话
 ## 验收状态
 
 三份计划共 23 项任务全部完成。索引「总验收顺序」六条中五条完全满足，第四条
-（三平台 CI 安装场景的共存、重装、回滚）部分满足，差额见 Issue #22。
+（三平台 CI 安装场景的共存、重装、回滚）当时部分满足；Issue #22 已补齐重装与回滚的真实
+CI 覆盖，六条现已全部满足。
 
 ## 环境注意事项
 
