@@ -69,6 +69,47 @@ def cnki_server_config(skill_root: Path, python_executable: Path) -> dict[str, o
     }
 
 
+#: 使用者可以自行设置、升级时必须原样留下的 env 键。
+#:
+#: 这里刻意用白名单而非"凡非安装器所写皆保留"。既有安全约定是整条 cnki 表
+#: 被完整替换，好让陈旧值（可能含密钥）不残留；黑名单会把这个性质一并破坏。
+#: 白名单只放行文档写明由使用者设置的变量，其余陈旧键照旧清除。
+#:
+#: CNKI_ENV_WEBVPN_HOME 由 WebVPN 人工值守模式要求使用者手工设置。此前每次
+#: 重装都会把它抹掉，专业检索退回配置错误，而安装器并不提示自己删了什么。
+#: 环境版刻意使用与通用版不同的变量名，此处不得写成 CNKI_WEBVPN_HOME。
+_PRESERVED_ENV_KEYS = ("CNKI_ENV_WEBVPN_HOME",)
+
+
+def _merged_server_entry(
+    existing_entry: object, server_config: Mapping[str, object]
+) -> dict[str, object]:
+    """以新配置为准，并把 _PRESERVED_ENV_KEYS 中的旧值带过来。"""
+    merged = copy.deepcopy(dict(server_config))
+    if not isinstance(existing_entry, Mapping):
+        return merged
+
+    previous_env = existing_entry.get("env")
+    if not isinstance(previous_env, Mapping):
+        return merged
+
+    carried = {
+        key: copy.deepcopy(previous_env[key])
+        for key in _PRESERVED_ENV_KEYS
+        if key in previous_env
+    }
+    if not carried:
+        return merged
+
+    new_env = merged.get("env")
+    if not isinstance(new_env, dict):
+        new_env = {}
+        merged["env"] = new_env
+    for key, value in carried.items():
+        new_env.setdefault(key, value)
+    return merged
+
+
 def merge_claude_config(
     existing: Mapping[str, object], server_config: Mapping[str, object]
 ) -> dict[str, object]:
@@ -79,7 +120,9 @@ def merge_claude_config(
         servers = result["mcpServers"]
     if not isinstance(servers, dict):
         raise ValueError("Claude 配置中的 mcpServers 必须是对象")
-    servers["cnki-search-env"] = copy.deepcopy(dict(server_config))
+    servers["cnki-search-env"] = _merged_server_entry(
+        servers.get("cnki-search-env"), server_config
+    )
     return result
 
 
@@ -275,6 +318,14 @@ def merge_codex_config(existing_toml: str, server_config: Mapping[str, object]) 
     _reject_unsupported_cnki_definitions(
         existing_toml, headers, parsed_config, root_inline_table
     )
+    # 这条路径靠删表重渲染实现覆盖，使用者自加的 env 键会随旧表一起消失。
+    # 先从解析结果里取回，再交给渲染函数。
+    previous_entry = parsed_config.get("mcp_servers", {})
+    if isinstance(previous_entry, Mapping):
+        previous_entry = previous_entry.get("cnki-search-env")
+    else:
+        previous_entry = None
+    server_config = _merged_server_entry(previous_entry, server_config)
     if root_inline_table:
         _, end = root_inline_table
         separator = ", " if existing_toml[root_inline_table[0] + 1 : end].strip() else ""

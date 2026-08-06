@@ -591,6 +591,71 @@ def test_merge_claude_config_preserves_unrelated_servers() -> None:
     assert before["mcpServers"].keys() == {"zotero"}
 
 
+def test_merge_claude_config_keeps_user_env_across_upgrades() -> None:
+    """升级不得丢掉使用者自加的环境变量，但受管键必须跟着新运行时走。
+
+    PLAYWRIGHT_BROWSERS_PATH 指向运行时目录，若被误当作使用者变量保留，
+    升级后浏览器路径仍指向旧运行时，无头浏览器将无法启动。
+    """
+    before = {
+        "mcpServers": {
+            "cnki-search-env": {
+                "command": "/old/.venv/bin/python",
+                "args": ["-m", "cnki_search_env.mcp_server"],
+                "env": {
+                    "PYTHONPATH": "/old/skill/scripts",
+                    "PYTHONUTF8": "1",
+                    "PYTHONIOENCODING": "utf-8",
+                    "PLAYWRIGHT_BROWSERS_PATH": "/old/playwright-browsers",
+                    "CNKI_ENV_WEBVPN_HOME": "https://webvpn.example.edu.cn/cnki",
+                },
+            }
+        }
+    }
+    server = cnki_server_config(Path("/new/skill"), Path("/new/runtime/.venv/bin/python"))
+
+    after = merge_claude_config(before, server)
+    entry = after["mcpServers"]["cnki-search-env"]
+
+    assert entry["command"] == "/new/runtime/.venv/bin/python"
+    assert entry["env"]["PYTHONPATH"] == str(Path("/new/skill") / "scripts")
+    # 受管键跟随新运行时，不得沿用旧值
+    assert entry["env"]["PLAYWRIGHT_BROWSERS_PATH"] == str(
+        Path("/new/runtime/playwright-browsers")
+    )
+    # 使用者自加的键原样留下
+    assert entry["env"]["CNKI_ENV_WEBVPN_HOME"] == "https://webvpn.example.edu.cn/cnki"
+    assert before["mcpServers"]["cnki-search-env"]["command"] == "/old/.venv/bin/python"
+
+
+def test_merge_codex_config_keeps_user_env_across_upgrades() -> None:
+    """Codex 侧同样不得丢使用者变量。该路径删表重渲染，更容易漏掉。"""
+    existing = "\n".join(
+        [
+            "[mcp_servers.cnki-search-env]",
+            'command = "/old/.venv/bin/python"',
+            'args = ["-m", "cnki_search_env.mcp_server"]',
+            "",
+            "[mcp_servers.cnki-search-env.env]",
+            'PYTHONPATH = "/old/skill/scripts"',
+            'PYTHONUTF8 = "1"',
+            'PYTHONIOENCODING = "utf-8"',
+            'PLAYWRIGHT_BROWSERS_PATH = "/old/playwright-browsers"',
+            'CNKI_ENV_WEBVPN_HOME = "https://webvpn.example.edu.cn/cnki"',
+            "",
+        ]
+    )
+    server = cnki_server_config(Path("/new/skill"), Path("/new/runtime/.venv/bin/python"))
+
+    merged = install_config.merge_codex_config(existing, server)
+
+    entry = tomllib.loads(merged)["mcp_servers"]["cnki-search-env"]
+    assert entry["env"]["PLAYWRIGHT_BROWSERS_PATH"] == str(
+        Path("/new/runtime/playwright-browsers")
+    )
+    assert entry["env"]["CNKI_ENV_WEBVPN_HOME"] == "https://webvpn.example.edu.cn/cnki"
+
+
 def test_windows_client_paths() -> None:
     paths = client_paths(
         PureWindowsPath("C:/CodexTest"),

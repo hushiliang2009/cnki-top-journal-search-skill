@@ -499,6 +499,77 @@ def test_merge_claude_config_preserves_unrelated_servers() -> None:
     assert before["mcpServers"].keys() == {"zotero"}
 
 
+def test_merge_claude_config_keeps_user_env_across_upgrades() -> None:
+    """升级不得丢掉用户自己加的环境变量。
+
+    WebVPN 人工值守模式要求用户手工设置 CNKI_WEBVPN_HOME。此前每次重装都会
+    把整条 cnki-search 覆盖掉，该变量随之消失，专业检索退回配置错误，而安装器
+    并不会提示自己抹掉了什么。
+    """
+    before = {
+        "mcpServers": {
+            "cnki-search": {
+                "command": "/old/python",
+                "args": ["-m", "cnki_search.mcp_server"],
+                "env": {
+                    "PYTHONPATH": "/old/skill/scripts",
+                    "PYTHONUTF8": "1",
+                    "PYTHONIOENCODING": "utf-8",
+                    "CNKI_WEBVPN_HOME": "https://webvpn.example.edu.cn/cnki",
+                },
+            }
+        }
+    }
+    server = cnki_server_config(Path("/new/skill"), Path("/new/python"))
+
+    after = merge_claude_config(before, server)
+    entry = after["mcpServers"]["cnki-search"]
+
+    # 安装器自己管的键指向新路径
+    assert entry["command"] == "/new/python"
+    assert entry["env"]["PYTHONPATH"] == str(Path("/new/skill") / "scripts")
+    assert entry["env"]["PYTHONUTF8"] == "1"
+    assert entry["env"]["PYTHONIOENCODING"] == "utf-8"
+    # 用户自己加的键原样留下
+    assert entry["env"]["CNKI_WEBVPN_HOME"] == "https://webvpn.example.edu.cn/cnki"
+    # 不得就地改写调用方传入的对象
+    assert before["mcpServers"]["cnki-search"]["command"] == "/old/python"
+
+
+def test_merge_claude_config_tolerates_malformed_existing_entry() -> None:
+    """既有条目或其 env 不是对象时按新配置写入，不得抛错。"""
+    server = cnki_server_config(Path("/skill"), Path("/python"))
+    for broken in ("not-an-object", {"env": "not-an-object"}, {}):
+        after = merge_claude_config({"mcpServers": {"cnki-search": broken}}, server)
+        assert after["mcpServers"]["cnki-search"]["env"]["PYTHONUTF8"] == "1"
+
+
+def test_merge_codex_config_keeps_user_env_across_upgrades() -> None:
+    """Codex 侧同样不得丢用户变量。该路径删表重渲染，更容易漏掉。"""
+    existing = "\n".join(
+        [
+            "[mcp_servers.cnki-search]",
+            'command = "/old/python"',
+            'args = ["-m", "cnki_search.mcp_server"]',
+            "",
+            "[mcp_servers.cnki-search.env]",
+            'PYTHONPATH = "/old/skill/scripts"',
+            'PYTHONUTF8 = "1"',
+            'PYTHONIOENCODING = "utf-8"',
+            'CNKI_WEBVPN_HOME = "https://webvpn.example.edu.cn/cnki"',
+            "",
+        ]
+    )
+    server = cnki_server_config(Path("/new/skill"), Path("/new/python"))
+
+    merged = install_config.merge_codex_config(existing, server)
+
+    entry = tomllib.loads(merged)["mcp_servers"]["cnki-search"]
+    assert entry["command"] == "/new/python"
+    assert entry["env"]["PYTHONPATH"] == str(Path("/new/skill") / "scripts")
+    assert entry["env"]["CNKI_WEBVPN_HOME"] == "https://webvpn.example.edu.cn/cnki"
+
+
 def test_windows_client_paths() -> None:
     paths = client_paths(
         PureWindowsPath("C:/CodexTest"),
