@@ -1,12 +1,15 @@
 """知网专业检索表达式构造。
 
-语法依据知网《专业检索》官方说明（可检索字段、匹配运算符、逻辑运算符、比较运算符）：
+语法依据知网专业检索页面列出的可检索字段：
 
-- 字段：``SU`` 主题、``LY`` 文献来源、``TI`` 篇名、``AB`` 摘要、``KY`` 关键词、
-  ``AU`` 作者、``FT`` 全文、``YE`` 出版年份、``CF`` 被引频次。
+- ``SU`` 主题、``TKA`` 篇关摘、``TI`` 篇名、``KY`` 关键词、``AB`` 摘要、
+  ``CO`` 小标题、``FT`` 全文、``AU`` 作者、``FI`` 第一作者、``RP`` 通讯作者、
+  ``AF`` 作者单位、``LY`` 期刊名称、``RF`` 参考文献、``FU`` 基金、
+  ``CLC`` 中图分类号、``SN`` ISSN、``CN`` CN、``DOI`` DOI、
+  ``QKLM`` 栏目信息、``FAF`` 第一单位、``CF`` 被引频次。
 - 主题推荐用相关匹配 ``%=``；``LY`` 用精确匹配 ``=``。
 - 逻辑运算符 ``AND`` / ``OR`` / ``NOT`` **前后必须有空格**，优先级用英文半角括号。
-- 年份区间用 ``YE BETWEEN ('2020', '2026')``。
+- ``YE`` 不是可检索字段；年份必须通过页面的出版年度起止控件设置。
 
 本模块只负责构造与分批，不触网、不解析结果，便于离线测试。
 """
@@ -15,7 +18,8 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Literal
+from types import MappingProxyType
+from typing import Literal, Mapping
 
 from .models import MAX_RESULTS_PER_PAGE
 
@@ -31,6 +35,15 @@ from .models import MAX_RESULTS_PER_PAGE
 # 超限时站点返回「抱歉，暂无数据，请稍后重试。」而不是报错，很容易被误读成
 # "该主题在这些期刊上没有文献"——所以宁可多分一批，也不要贴着上限走。
 DEFAULT_MAX_EXPRESSION_CHARS = 3000
+
+SEARCHABLE_FIELDS: Mapping[str, str] = MappingProxyType({
+    "SU": "主题", "TKA": "篇关摘", "TI": "篇名", "KY": "关键词",
+    "AB": "摘要", "CO": "小标题", "FT": "全文", "AU": "作者",
+    "FI": "第一作者", "RP": "通讯作者", "AF": "作者单位",
+    "LY": "期刊名称", "RF": "参考文献", "FU": "基金",
+    "CLC": "中图分类号", "SN": "ISSN", "CN": "CN", "DOI": "DOI",
+    "QKLM": "栏目信息", "FAF": "第一单位", "CF": "被引频次",
+})
 
 TOPIC_FIELD_PRIORITY: tuple[str, ...] = ("TI", "SU", "KY", "TKA")
 TOPIC_FIELD = TOPIC_FIELD_PRIORITY[0]
@@ -145,10 +158,16 @@ def journal_clause(titles: list[str]) -> str:
     return "(" + " OR ".join(terms) + ")"
 
 
-def year_clause(year_from: int, year_to: int) -> str:
+def validate_year_range(
+    year_from: int | None, year_to: int | None,
+) -> tuple[int | None, int | None]:
+    if (year_from is None) != (year_to is None):
+        raise ValueError("年份区间必须同时提供起止年份")
+    if year_from is None or year_to is None:
+        return None, None
     if year_from > year_to:
         raise ValueError(f"起始年份 {year_from} 不能晚于结束年份 {year_to}")
-    return f"YE BETWEEN ('{year_from}', '{year_to}')"
+    return year_from, year_to
 
 
 def build_topic_expression(
@@ -159,12 +178,8 @@ def build_topic_expression(
     topic_field: str = TOPIC_FIELD,
 ) -> str:
     field = validate_topic_field(topic_field)
-    clauses = [f"{field} {RELEVANCE_OPERATOR} {quote_value(topic)}"]
-    if year_from is not None and year_to is not None:
-        clauses.append(year_clause(year_from, year_to))
-    elif (year_from is None) != (year_to is None):
-        raise ValueError("年份区间必须同时提供起止年份")
-    return " AND ".join(clauses)
+    validate_year_range(year_from, year_to)
+    return f"{field} {RELEVANCE_OPERATOR} {quote_value(topic)}"
 
 
 def build_expression(topic: str, journals: list[str], *,
@@ -172,12 +187,10 @@ def build_expression(topic: str, journals: list[str], *,
                      topic_field: str = TOPIC_FIELD) -> str:
     """构造一条完整的专业检索表达式。"""
     field = validate_topic_field(topic_field)
-    clauses = [f"{field} {RELEVANCE_OPERATOR} {quote_value(topic)}", journal_clause(journals)]
-    if year_from is not None and year_to is not None:
-        clauses.append(year_clause(year_from, year_to))
-    elif (year_from is None) != (year_to is None):
-        raise ValueError("年份区间必须同时提供起止年份")
-    return " AND ".join(clauses)
+    validate_year_range(year_from, year_to)
+    return " AND ".join(
+        [f"{field} {RELEVANCE_OPERATOR} {quote_value(topic)}", journal_clause(journals)]
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +204,8 @@ class ExpressionBatch:
     catalog_version: str = ""
     topic_field: str | None = None
     source_category: SourceCategorySpec | None = None
+    year_from: int | None = None
+    year_to: int | None = None
 
 
 def build_batches(topic: str, journals: list[str], *,
@@ -202,7 +217,7 @@ def build_batches(topic: str, journals: list[str], *,
                   source_category: SourceCategorySpec | None = None) -> list[ExpressionBatch]:
     """按字符上限把期刊集合切成多条表达式。
 
-    只切 ``LY=`` 列表；主题与年份条件在每批中重复出现。
+    只切 ``LY=`` 列表。年份作为批次元数据交给页面的出版年度控件，不进入表达式。
     """
     if not journals:
         raise ValueError("期刊列表不能为空")
@@ -236,14 +251,33 @@ def build_batches(topic: str, journals: list[str], *,
             catalog_version=catalog_version,
             topic_field=topic_field,
             source_category=category,
+            year_from=year_from,
+            year_to=year_to,
         )
         for position, group in enumerate(groups, start=1)
     ]
 
 
-_EXPRESSION_FIELD = re.compile(r"\b(SU|LY|TI|AB|KY|AU|FI|RP|AF|FU|FT|CO|RF|CLC|DOI|CF|YE|TKA)\b")
+_EXPRESSION_FIELD_TOKEN = re.compile(
+    r"\b([A-Z][A-Z0-9]*)\s*(?:%=|>=|<=|=|>|<|\bBETWEEN\b)"
+)
+
+
+def validate_expression_fields(value: str) -> tuple[str, ...]:
+    """核对表达式中所有字段，防止合法字段掩盖 ``YE`` 等非法字段。"""
+    fields = tuple(_EXPRESSION_FIELD_TOKEN.findall(value))
+    if not fields:
+        raise ValueError("未识别到专业检索字段")
+    unsupported = tuple(dict.fromkeys(field for field in fields if field not in SEARCHABLE_FIELDS))
+    if unsupported:
+        raise ValueError(f"专业检索不支持字段：{', '.join(unsupported)}")
+    return fields
 
 
 def looks_like_expression(value: str) -> bool:
     """粗判一段文本是否为专业检索表达式，用于区分它与普通主题词。"""
-    return bool(_EXPRESSION_FIELD.search(value)) and ("=" in value or "BETWEEN" in value)
+    try:
+        validate_expression_fields(value)
+    except ValueError:
+        return False
+    return True

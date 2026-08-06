@@ -1,8 +1,7 @@
-"""来源类别分面的契约测试。
+"""学术期刊专业检索条件区的来源类别契约测试。
 
-分面只出现在结果页。曾据高级检索输入页错判为"来源类别筛选不存在"，
-据此把 CSSCI 设计成枚举 661 本刊名的 5 批请求；实测分面一次请求即可，
-且覆盖面更大。把这个事实钉住，避免再退回枚举方案。
+来源类别在先选择学术期刊后显示，并须在提交检索前勾选。CSSCI 仍按一次
+来源类别检索覆盖，不退回枚举661本刊名的方案。
 """
 import asyncio
 
@@ -37,7 +36,7 @@ class ResultRowsLocator:
 
 
 class FacetPage:
-    """勾选分面后总数从 before 变成 after。"""
+    """模拟来源类别条件控件，并保留结果总数读取能力。"""
 
     def __init__(self, *, before: str = "2,378", after: str = "2,270",
                  facet_present: bool = True) -> None:
@@ -68,13 +67,13 @@ def test_cssci_facet_value_matches_the_observed_page() -> None:
         assert name in webvpn.SOURCE_CATEGORY_VALUES
 
 
-def test_applying_the_facet_narrows_the_result_count() -> None:
+def test_applying_source_category_checks_the_condition_before_submit() -> None:
     page = FacetPage(before="2,378", after="2,270")
     application = asyncio.run(
         _driver(page).apply_source_category(SourceCategorySpec("P0209", "CSSCI"))
     )
     assert application.applied is True
-    assert application.total == 2270
+    assert application.total is None
     selector = webvpn.SOURCE_CATEGORY_SELECTOR.format(value="P0209")
     assert page.locators[selector].checked is True
 
@@ -86,15 +85,15 @@ def test_applying_controlled_category_uses_its_cnki_code() -> None:
     application = asyncio.run(_driver(page).apply_source_category(category))
 
     assert application.applied is True
-    assert application.total == 2270
+    assert application.total is None
     selector = webvpn.SOURCE_CATEGORY_SELECTOR.format(value="P0209")
     assert page.locators[selector].checked is True
 
 
-def test_unchanged_total_is_valid_when_checkbox_is_checked_and_page_is_stable(
+def test_result_total_is_not_required_before_submit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """分面命中全部结果时总数可以不变，不能被误判为未生效。"""
+    """提交前尚无结果总数，只要唯一复选框已勾选即可。"""
     async def no_wait(_seconds: float) -> None:
         return None
 
@@ -108,7 +107,7 @@ def test_unchanged_total_is_valid_when_checkbox_is_checked_and_page_is_stable(
     )
 
     assert application.applied is True
-    assert application.total == 50
+    assert application.total is None
     assert application.status is webvpn.SearchStatus.SUCCESS
 
 
@@ -117,9 +116,8 @@ def test_source_category_requires_a_closed_code_and_label_pair() -> None:
         SourceCategorySpec("P0209", "SSCI")
 
 
-def test_missing_facet_points_at_the_real_precondition() -> None:
-    """分面不在输入页上；报错要说清"先检索"，否则会被当成站点改版。"""
-    with pytest.raises(webvpn.WebVpnNavigationError, match="需先完成一次检索"):
+def test_missing_source_category_reports_condition_area_failure() -> None:
+    with pytest.raises(webvpn.WebVpnNavigationError, match="专业检索条件区"):
         asyncio.run(
             _driver(FacetPage(facet_present=False)).apply_source_category(
                 SourceCategorySpec("P0209", "CSSCI")

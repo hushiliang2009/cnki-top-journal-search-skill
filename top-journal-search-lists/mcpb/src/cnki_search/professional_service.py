@@ -8,7 +8,7 @@
 4. :func:`ranking.annotate_and_sort_records` —— 十级期刊目录标注与排序
 
 检索范围**只限中文学术期刊论文**。这一约束靠三层保证，缺一不可：表达式层不使用
-跨库字段；页面层由调用方把检索范围设为学术期刊、语种设为中文；解析层由
+跨库字段；页面层由执行器把检索范围设为学术期刊、语种设为中文；解析层由
 ``parse_public_result_page`` 丢弃 ``document_type != "期刊"`` 的行。页面设置未必
 随会话保持，表达式又表达不了文献类型，因此解析层的兜底不能省。
 """
@@ -33,6 +33,7 @@ from .professional import (
     build_batches,
     build_expression,
     build_topic_expression,
+    validate_expression_fields,
 )
 from .ranking import annotate_and_sort_records
 from .results import parse_public_result_page
@@ -226,6 +227,7 @@ class CnkiProfessionalSearchService:
 
     async def search_expression(self, expression: str, *, limit: int = 20) -> dict[str, Any]:
         """直接执行一条使用者自备的专业检索表达式，不做分批。"""
+        validate_expression_fields(expression)
         batch = ExpressionBatch(index=1, total=1, journals=(), expression=expression)
         return await self._run([batch], limit)
 
@@ -714,6 +716,8 @@ def build_group_plans(
             catalog_version=resolved_policy.catalog_version,
             topic_field=topic_field,
             source_category=resolved_policy.source_category,
+            year_from=year_from,
+            year_to=year_to,
         )
     ]
 

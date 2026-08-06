@@ -11,8 +11,8 @@
 机构官方 WebVPN 完成统一身份认证后，用知网专业检索按环境期刊目录定向检索
 中文期刊论文。覆盖四个受控范围：`chinese_environment_top`（第6级 6 本，`LY=`
 **精确**枚举）、`other_formally_recognized_chinese`（第7级中文 60 本，精确枚举）、
-`environment_cssci`（第9级 241 本，精确枚举并逐批附结果页「来源类别」= CSSCI，
-代码 `P0209`）与 `pku_core`（1987 本，只提交主题与年份表达式并勾选「来源类别」= 北大核心，
+`environment_cssci`（第9级 241 本，精确枚举并逐批在学术期刊条件区勾选来源类别 CSSCI，
+代码 `P0209`）与 `pku_core`（1987 本，只提交主题表达式并勾选来源类别北大核心，
 代码 `P01`，不生成 `LY=`）。`limit` 为 1 至 50。
 
 1987 是 v4.0 全部北大核心成员数，其中 1742 本位于第11—12级，其余 245 本已在更高
@@ -21,7 +21,7 @@
 
 完整工作流按 **第6级、第7级中文期刊、第9级CSSCI、第11—12级北大核心** 的顺序
 依次检索，跨组总量只计全局去重后的新增论文。**第11级和第12级不得分别重复检索**——
-两级同属一个 `pku_core` 范围，一次分面检索即可覆盖。
+两级同属一个 `pku_core` 范围，一次来源类别检索即可覆盖。
 
 该模式属**机构授权**的正常访问路径，与检测规避有本质区别：**不伪造**
 User-Agent、**不轮换代理**、不抹除自动化标志、**不自动破解**验证码。它
@@ -37,9 +37,16 @@ User-Agent、**不轮换代理**、不抹除自动化标志、**不自动破解*
 唯一记录；达到 `limit` 即停。四个字段互相补充，不是从中挑一个"最好的"。
 `topic_fields_tried` 如实列出试过哪些字段。
 
-**来源类别不是专业检索字段**：CSSCI（`P0209`）与北大核心（`P01`）只在首次
-检索成功后的结果页来源类别中勾选，不写入表达式，也不进 `LY=`。分面未证实
-生效时返回 `page_contract_changed`，不会退回未筛选结果。
+页面操作顺序固定为：知网首页、高级检索、专业检索、学术期刊、再次确认专业检索、
+设置出版年度和来源类别、填写表达式、提交检索。该调整不改变四个受控范围或期刊清单。
+
+**来源类别不是专业检索字段**：CSSCI（`P0209`）与北大核心（`P01`）只在选择
+学术期刊后显示的条件区中勾选，且必须在提交前生效；不写入表达式或 `LY=`。
+控件异常时返回 `page_contract_changed`，不会提交未筛选检索。
+
+可检索字段为 `SU`、`TKA`、`TI`、`KY`、`AB`、`CO`、`FT`、`AU`、`FI`、`RP`、
+`AF`、`LY`、`RF`、`FU`、`CLC`、`SN`、`CN`、`DOI`、`QKLM`、`FAF`、`CF`。
+`YE` 不受支持，年份须通过出版年度起止控件设置。
 
 `first_page_only=true` 表示每条表达式只读取当前页最多 50 条；
 `complete=false` 时不得声称检索完整。组外记录不占限额，进 `excluded_out_of_scope_records`；
@@ -248,7 +255,7 @@ ai4scholar。
 
 ## 版本与发布包
 
-当前环境版为 `0.3.1`，使用《`环境科学与工程学科顶尖期刊目录_v4.0.md`》和机器目录 `environment_journal_catalog_v4.0.json`。正式 Release 包含 `top-journal-search-lists-env_Skill.zip`、`cnki-search-env.mcpb` 和 `checksums.sha256`。环境版使用 `top-journal-search-lists-env`、`cnki-search-env` 和 `runtimes/cnki-search-env`；可与通用版 `top-journal-search-lists`、`cnki-search` 并存，二者互不覆盖。
+当前环境版为 `0.3.2`，使用《`环境科学与工程学科顶尖期刊目录_v4.0.md`》和机器目录 `environment_journal_catalog_v4.0.json`。正式 Release 包含 `top-journal-search-lists-env_Skill.zip`、`cnki-search-env.mcpb` 和 `checksums.sha256`。环境版使用 `top-journal-search-lists-env`、`cnki-search-env` 和 `runtimes/cnki-search-env`；可与通用版 `top-journal-search-lists`、`cnki-search` 并存，二者互不覆盖。
 
 ### 校验发布产物
 
@@ -270,4 +277,3 @@ python scripts/compare_release_content.py <你的构建输出目录> <官方产�
 
 该脚本属于仓库的构建工具，**不随发布包分发**——解压 Skill ZIP 后在其 `scripts/` 下
 找不到它。自行重建本来就需要完整仓库，按上面的路径从仓库根运行即可。
-
