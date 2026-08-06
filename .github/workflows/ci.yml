@@ -18,8 +18,8 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
@@ -49,7 +49,7 @@ jobs:
           python "$RUNNER_TEMP/generic-release-check/skill/top-journal-search-lists/scripts/catalog_lookup.py" validate
           python "$RUNNER_TEMP/generic-release-check/skill/top-journal-search-lists/tests/_mcp_handshake.py"
           CNKI_MCPB_PROJECT="$RUNNER_TEMP/generic-release-check/mcpb" python "$RUNNER_TEMP/generic-release-check/skill/top-journal-search-lists/tests/_mcpb_raw_handshake.py"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: matrix.python-version == '3.11'
         with:
           name: release-canonical-ubuntu-py3.11
@@ -65,8 +65,8 @@ jobs:
         os: [windows-latest, macos-latest]
         python-version: ["3.11"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
@@ -86,7 +86,7 @@ jobs:
       - working-directory: top-journal-search-lists
         run: python -c "from pathlib import Path; import zipfile; files = [Path('release/top-journal-search-lists_Skill.zip'), Path('release/cnki-search.mcpb'), Path('release/checksums.sha256')]; assert all(path.is_file() and path.stat().st_size > 0 for path in files); assert all(zipfile.ZipFile(path).namelist() for path in files[:2])"
       - name: Download the canonical Ubuntu release for comparison
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-canonical-ubuntu-py3.11
           path: ci-ubuntu-release
@@ -101,8 +101,8 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.11"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install and launch Chromium on POSIX
@@ -214,8 +214,8 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.10"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Reject Python 3.10 before POSIX installation
@@ -257,8 +257,8 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
@@ -289,7 +289,7 @@ jobs:
           python "$RUNNER_TEMP/environment-release-check/skill/top-journal-search-lists-env/scripts/generate_environment_catalog_v4.py" --check
           python "$RUNNER_TEMP/environment-release-check/skill/top-journal-search-lists-env/tests/_mcp_handshake.py"
           CNKI_ENV_MCPB_PROJECT="$RUNNER_TEMP/environment-release-check/mcpb" python "$RUNNER_TEMP/environment-release-check/skill/top-journal-search-lists-env/tests/_mcpb_raw_handshake.py"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: matrix.python-version == '3.11'
         with:
           name: release-environment-ubuntu-py3.11
@@ -305,8 +305,8 @@ jobs:
         os: [windows-latest, macos-latest]
         python-version: ["3.11"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
@@ -326,7 +326,7 @@ jobs:
       - working-directory: top-journal-search-lists-env
         run: python -c "from pathlib import Path; import zipfile; files = [Path('release/top-journal-search-lists-env_Skill.zip'), Path('release/cnki-search-env.mcpb'), Path('release/checksums.sha256')]; assert all(path.is_file() and path.stat().st_size > 0 for path in files); assert all(zipfile.ZipFile(path).namelist() for path in files[:2])"
       - name: Download the canonical Ubuntu release for comparison
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-environment-ubuntu-py3.11
           path: ci-ubuntu-release
@@ -342,8 +342,8 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.11"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install both Skills side by side on POSIX
@@ -389,8 +389,8 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.10"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Reject Python 3.10 before POSIX environment installation
@@ -428,8 +428,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: python -m pip install ruff mypy "mcp>=1,<2" "playwright>=1.45,<2"
