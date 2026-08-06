@@ -1280,3 +1280,15 @@ def test_webvpn_e2e_names_a_controlled_reason_for_known_failures(
         "SECRET_WINDOW_DETAIL", "SECRET_NAV_DETAIL", "Traceback",
     ):
         assert secret not in combined
+
+
+def test_readme_says_the_comparison_script_is_repository_only(skill_root: Path) -> None:
+    """README 随 Skill ZIP 发出，但 compare_release_content.py 只在仓库根，不在包内。
+
+    只写 `python scripts/compare_release_content.py` 会让解压包的读者去找同目录的
+    scripts/，那里没有这个文件——而这正是 #21 建立的自证路径。
+    """
+    text = (skill_root / "README.md").read_text(encoding="utf-8")
+    assert "compare_release_content.py" in text
+    assert "不随发布包分发" in text, "必须说明该脚本不在发布包内"
+    assert "仓库根目录" in text, "必须写明命令的路径基准"
