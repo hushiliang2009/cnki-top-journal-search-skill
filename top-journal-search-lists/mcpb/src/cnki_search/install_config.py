@@ -63,6 +63,51 @@ def cnki_server_config(skill_root: Path, python_executable: Path) -> dict[str, o
     }
 
 
+#: 使用者可以自行设置、升级时必须原样留下的 env 键前缀。
+#:
+#: 这里刻意用前缀白名单，而不是"凡非安装器所写皆保留"。既有安全约定是整条
+#: cnki 表被完整替换，好让陈旧值（可能含密钥）不残留；黑名单会把这个性质
+#: 一并破坏。以本产品前缀命名的键是面向使用者的设置项，其余陈旧键照旧清除。
+#:
+#: 也刻意不在此处写出具体键名：公开匿名模式的模块不得出现另一模式的名字，
+#: 该边界由 test_cnki_package_contract 强制。前缀规则既够窄，也不必点名。
+_PRESERVED_ENV_PREFIX = "CNKI_"
+
+#: 安装器自己写入、每次重装都必须指向新路径的键，一律以新值为准。
+_MANAGED_ENV_PREFIXES = ("PYTHON", "PLAYWRIGHT_")
+
+
+def _merged_server_entry(
+    existing_entry: object, server_config: Mapping[str, object]
+) -> dict[str, object]:
+    """以新配置为准，并把使用者自行设置的键带过来。"""
+    merged = copy.deepcopy(dict(server_config))
+    if not isinstance(existing_entry, Mapping):
+        return merged
+
+    previous_env = existing_entry.get("env")
+    if not isinstance(previous_env, Mapping):
+        return merged
+
+    carried = {
+        key: copy.deepcopy(value)
+        for key, value in previous_env.items()
+        if isinstance(key, str)
+        and key.startswith(_PRESERVED_ENV_PREFIX)
+        and not key.startswith(_MANAGED_ENV_PREFIXES)
+    }
+    if not carried:
+        return merged
+
+    new_env = merged.get("env")
+    if not isinstance(new_env, dict):
+        new_env = {}
+        merged["env"] = new_env
+    for key, value in carried.items():
+        new_env.setdefault(key, value)
+    return merged
+
+
 def merge_claude_config(
     existing: Mapping[str, object], server_config: Mapping[str, object]
 ) -> dict[str, object]:
@@ -73,7 +118,7 @@ def merge_claude_config(
         servers = result["mcpServers"]
     if not isinstance(servers, dict):
         raise ValueError("Claude 配置中的 mcpServers 必须是对象")
-    servers["cnki-search"] = copy.deepcopy(dict(server_config))
+    servers["cnki-search"] = _merged_server_entry(servers.get("cnki-search"), server_config)
     return result
 
 
@@ -269,6 +314,14 @@ def merge_codex_config(existing_toml: str, server_config: Mapping[str, object]) 
     _reject_unsupported_cnki_definitions(
         existing_toml, headers, parsed_config, root_inline_table
     )
+    # 这条路径靠删表重渲染实现覆盖，使用者自加的 env 键会随旧表一起消失。
+    # 先从解析结果里取回，再交给渲染函数。
+    previous_entry = parsed_config.get("mcp_servers", {})
+    if isinstance(previous_entry, Mapping):
+        previous_entry = previous_entry.get("cnki-search")
+    else:
+        previous_entry = None
+    server_config = _merged_server_entry(previous_entry, server_config)
     if root_inline_table:
         _, end = root_inline_table
         separator = ", " if existing_toml[root_inline_table[0] + 1 : end].strip() else ""
