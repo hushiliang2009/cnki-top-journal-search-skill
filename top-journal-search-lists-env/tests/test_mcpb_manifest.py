@@ -12,7 +12,7 @@ import pytest
 from cnki_search_env import mcp_server
 
 
-EXPECTED_VERSION = "0.3.2"
+EXPECTED_VERSION = "0.3.3"
 CNKI_MODULES = (
     "__init__.py",
     "browser.py",
