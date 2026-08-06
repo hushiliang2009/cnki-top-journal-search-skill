@@ -63,21 +63,24 @@ def cnki_server_config(skill_root: Path, python_executable: Path) -> dict[str, o
     }
 
 
-#: 使用者可以自行设置、升级时必须原样留下的 env 键。
+#: 使用者可以自行设置、升级时必须原样留下的 env 键前缀。
 #:
-#: 这里刻意用白名单而非"凡非安装器所写皆保留"。既有安全约定是整条 cnki 表
-#: 被完整替换，好让陈旧值（可能含密钥）不残留；黑名单会把这个性质一并破坏。
-#: 白名单只放行文档写明由使用者设置的变量，其余陈旧键照旧清除。
+#: 这里刻意用前缀白名单，而不是"凡非安装器所写皆保留"。既有安全约定是整条
+#: cnki 表被完整替换，好让陈旧值（可能含密钥）不残留；黑名单会把这个性质
+#: 一并破坏。以本产品前缀命名的键是面向使用者的设置项，其余陈旧键照旧清除。
 #:
-#: CNKI_WEBVPN_HOME 由 WebVPN 人工值守模式要求使用者手工设置。此前每次重装
-#: 都会把它抹掉，专业检索退回配置错误，而安装器并不提示自己删了什么。
-_PRESERVED_ENV_KEYS = ("CNKI_WEBVPN_HOME",)
+#: 也刻意不在此处写出具体键名：公开匿名模式的模块不得出现另一模式的名字，
+#: 该边界由 test_cnki_package_contract 强制。前缀规则既够窄，也不必点名。
+_PRESERVED_ENV_PREFIX = "CNKI_"
+
+#: 安装器自己写入、每次重装都必须指向新路径的键，一律以新值为准。
+_MANAGED_ENV_PREFIXES = ("PYTHON", "PLAYWRIGHT_")
 
 
 def _merged_server_entry(
     existing_entry: object, server_config: Mapping[str, object]
 ) -> dict[str, object]:
-    """以新配置为准，并把 _PRESERVED_ENV_KEYS 中的旧值带过来。"""
+    """以新配置为准，并把使用者自行设置的键带过来。"""
     merged = copy.deepcopy(dict(server_config))
     if not isinstance(existing_entry, Mapping):
         return merged
@@ -87,9 +90,11 @@ def _merged_server_entry(
         return merged
 
     carried = {
-        key: copy.deepcopy(previous_env[key])
-        for key in _PRESERVED_ENV_KEYS
-        if key in previous_env
+        key: copy.deepcopy(value)
+        for key, value in previous_env.items()
+        if isinstance(key, str)
+        and key.startswith(_PRESERVED_ENV_PREFIX)
+        and not key.startswith(_MANAGED_ENV_PREFIXES)
     }
     if not carried:
         return merged
