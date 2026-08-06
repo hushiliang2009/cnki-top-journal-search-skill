@@ -1187,7 +1187,7 @@ def test_v050_readme_names_exact_release_and_coexistence_contract(
 ) -> None:
     text = (skill_root / "README.md").read_text(encoding="utf-8")
     for value in (
-        "0.5.2",
+        "0.5.3",
         "top-journal-search-lists_Skill.zip",
         "cnki-search.mcpb",
         "checksums.sha256",
