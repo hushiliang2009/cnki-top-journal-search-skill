@@ -371,6 +371,26 @@ def test_same_scope_and_expression_in_different_catalog_versions_has_distinct_to
     )
 
 
+def test_changing_only_publication_years_submits_a_new_batch(tmp_path: Path) -> None:
+    state = tmp_path / "years.json"
+    template = _identity_batch("TI %= '气候治理'", "cssci", "TI", SourceCategorySpec("P0209", "CSSCI"))
+    calls = []
+
+    async def execute(batch):
+        calls.append((batch.year_from, batch.year_to))
+        return {**_ok(batch), "source_category_applied": True}
+
+    ranges = [(None, None), (2019, 2020), (2022, 2023)]
+    for start, end in [*ranges, ranges[-1]]:
+        batch = replace(template, year_from=start, year_to=end)
+        result = asyncio.run(webvpn.run_batches(
+            [batch], execute, checkpoint=webvpn.BatchCheckpoint(state),
+            should_stop=lambda results: bool(results),
+        ))
+        assert result["limit_reached"]
+    assert calls == ranges
+
+
 def test_checkpoint_token_is_a_sha256_digest_and_never_leaks_the_expression() -> None:
     token = webvpn._checkpoint_token(
         [_identity_batch("TI %= '气候'", "cssci", "TI", None)]
@@ -408,9 +428,9 @@ def test_checkpoint_token_matches_a_pinned_digest() -> None:
             SourceCategorySpec("P0209", "CSSCI"),
         )
     ])
-    assert token == (
-        "4d2823f67d76d4f1c54fc712231211385f934e126eff5ea41257b7c490362136"
-    )
+    # The former identity cannot distinguish bounded years from an unrestricted query.
+    assert token != "4d2823f67d76d4f1c54fc712231211385f934e126eff5ea41257b7c490362136"
+    assert token == "2514eabbfd816e2acf8373ba6a881d78d75a336139b0d6ef84fbb6f1cc50dc4b"
 
 
 def test_checkpoint_is_discarded_when_only_the_facet_changes(tmp_path: Path) -> None:

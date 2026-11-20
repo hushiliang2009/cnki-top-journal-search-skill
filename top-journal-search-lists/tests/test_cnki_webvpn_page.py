@@ -934,8 +934,8 @@ class AcademicScopeLocator:
         return self
 
     async def count(self) -> int:
-        if self.kind == "source_category":
-            return int(self.page.selected)
+        if self.kind != "academic_journals":
+            return int(self.page.selected and self.kind == self.page.source_selector)
         return 1
 
     async def is_visible(self) -> bool:
@@ -947,22 +947,36 @@ class AcademicScopeLocator:
 
 
 class AcademicScopePage:
-    def __init__(self) -> None:
+    def __init__(self, source_selector: str) -> None:
         self.selected = False
+        self.source_selector = source_selector
         self.events: list[str] = []
 
     def locator(self, selector: str) -> AcademicScopeLocator:
         if selector == webvpn.ACADEMIC_JOURNALS_SELECTOR:
             return AcademicScopeLocator(self, "academic_journals")
-        assert selector == webvpn.SOURCE_CATEGORY_SELECTOR.format(value="P0209")
-        return AcademicScopeLocator(self, "source_category")
+        return AcademicScopeLocator(self, selector)
 
 
-def test_academic_journals_is_selected_before_source_category_controls() -> None:
-    page = AcademicScopePage()
+@pytest.mark.parametrize("source_selector", [
+    webvpn.SOURCE_CATEGORY_SELECTOR.format(value="P0209"),
+    "input[type=checkbox][key='CSI'][value='Y']",
+])
+def test_academic_journals_is_selected_before_source_category_controls(source_selector: str) -> None:
+    page = AcademicScopePage(source_selector)
     asyncio.run(webvpn.ProfessionalSearchPage(page).select_academic_journals())
     assert page.selected is True
     assert page.events == ["scope:academic_journals"]
+
+
+def test_type_annotation_only_affects_eligible_rows_and_preserves_offsets() -> None:
+    row = '<tr><td class="name">Title</td><td class="source">Journal</td></tr>'
+    typed = row.replace('</tr>', '<td class="data">Dissertation</td></tr>')
+    other_table = f'<table>{row}</table>'
+    prefix = f'<p>Other\u2028line</p>{other_table}\n<table class="result-table-list">'
+    html = f'{prefix}{row}{typed}</table>'
+    annotated_row = row.replace('</tr>', '<td class="data">期刊</td></tr>')
+    assert webvpn._academic_result_html(html) == f'{prefix}{annotated_row}{typed}</table>'
 
 
 def test_publication_year_uses_page_controls_not_expression_field() -> None:
@@ -1117,7 +1131,7 @@ class MissingFacetLocator:
 
 class MissingFacetPlanPage(PlanPage):
     def locator(self, selector: str) -> MissingFacetLocator:
-        assert selector == webvpn.SOURCE_CATEGORY_SELECTOR.format(value="P01")
+        assert selector in (webvpn.SOURCE_CATEGORY_SELECTOR.format(value="P01"), "input[type=checkbox][key='HX'][value='Y']")
         return MissingFacetLocator()
 
 

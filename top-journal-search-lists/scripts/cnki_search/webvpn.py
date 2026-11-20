@@ -30,6 +30,7 @@ import time
 import unicodedata
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +157,53 @@ CAPTCHA_VIEWPORT_JS = """(markers) => {
 
 class ExpressionTruncated(RuntimeError):
     """输入框接受的字符数少于提交的表达式，继续提交会得到错误的检索范围。"""
+
+
+def _academic_result_html(html: str) -> str:
+    """Annotate an omitted type column using the verified academic-journal scope.
+
+    Only the institutional driver calls this, after selecting academic journals.
+    Preserve every explicit type, including non-journal rows. The original live
+    DOM is untouched; the public mixed-database parser remains strict.
+    """
+    class MissingTypeColumns(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=False)
+            self.depth = 0
+            self.in_row = False
+            self.classes: set[str] = set()
+            self.insertions: list[tuple[int, int]] = []
+
+        def handle_starttag(self, tag, attrs):
+            classes = set((dict(attrs).get("class") or "").split())
+            if tag == "table":
+                if self.depth:
+                    self.depth += 1
+                elif "result-table-list" in classes:
+                    self.depth = 1
+            elif self.depth == 1 and tag == "tr":
+                self.in_row = True
+                self.classes = set()
+            elif self.depth == 1 and self.in_row and tag == "td":
+                self.classes.update(classes)
+
+        def handle_endtag(self, tag):
+            if tag == "table" and self.depth:
+                self.depth -= 1
+            elif tag == "tr" and self.depth == 1 and self.in_row:
+                if {"name", "source"} <= self.classes and "data" not in self.classes:
+                    self.insertions.append(self.getpos())
+                self.in_row = False
+
+    parser = MissingTypeColumns()
+    parser.feed(html)
+    offsets = [0]
+    for text_line in html.split("\n")[:-1]:
+        offsets.append(offsets[-1] + len(text_line) + 1)
+    for line, column in reversed(parser.insertions):
+        position = offsets[line - 1] + column
+        html = html[:position] + '<td class="data">期刊</td>' + html[position:]
+    return html
 
 
 class WebVpnNavigationError(RuntimeError):
@@ -442,6 +490,8 @@ _CHECKPOINT_RESULT_FIELDS = (
     "excluded_non_journal_rows",
     "records",
     "incomplete_records",
+    "source_category_applied",
+    "source_category_total",
 )
 _CHECKPOINT_RECORD_FIELDS = (
     "title",
@@ -511,6 +561,10 @@ def _checkpoint_token(batches: Sequence[ExpressionBatch]) -> str:
                 }
             ),
             "page_size": batch.page_size,
+            # Publication years are page controls, independent of the expression.
+            # Include nulls as well: older tokens could denote any year range.
+            "year_from": batch.year_from,
+            "year_to": batch.year_to,
         }
         for batch in batches
     ]
@@ -773,7 +827,14 @@ def _checkpoint_result(
         "records": records,
         "incomplete_records": incomplete,
     }
-    return {name: safe[name] for name in _CHECKPOINT_RESULT_FIELDS}
+    # Only the driver's boolean proof and optional numeric facet count belong on disk.
+    if result.get("source_category_applied") is True:
+        total = result.get("source_category_total")
+        if total is not None and (type(total) is not int or total < 0):
+            return None
+        safe["source_category_applied"] = True
+        safe["source_category_total"] = total
+    return {name: safe[name] for name in _CHECKPOINT_RESULT_FIELDS if name in safe}
 
 
 def _restore_checkpoint_result(
@@ -806,9 +867,12 @@ def _restore_checkpoint_result(
             except (TypeError, ValueError):
                 continue
         restored[name] = tuple(records)
+    if result.get("source_category_applied") is True:
+        restored["source_category_applied"] = True
+        restored["source_category_total"] = result.get("source_category_total")
     return {
         name: restored[name]
-        for name in _CHECKPOINT_RESULT_FIELDS
+        for name in _CHECKPOINT_RESULT_FIELDS if name in restored
     }
 
 
@@ -851,10 +915,14 @@ async def run_batches(
     results: list[dict[str, Any]] = []
     human_intervention_required = False
     for batch in batches:
-        if checkpoint is not None and batch.index in checkpoint.completed:
+        saved = checkpoint.completed.get(batch.index) if checkpoint is not None else None
+        # Legacy checkpoints have no facet proof; verify on the next explicit search.
+        if saved is not None and (
+            batch.source_category is None or saved.get("source_category_applied") is True
+        ):
             results.append(
                 _restore_checkpoint_result(
-                    checkpoint.completed[batch.index],
+                    saved,
                     batch,
                 )
             )
@@ -1490,9 +1558,8 @@ class ProfessionalSearchPage:
         self, *, timeout_seconds: float = 20.0,
     ) -> None:
         """把检索范围限定为学术期刊，并等待来源类别条件区出现。"""
-        cssci = self.page.locator(
-            SOURCE_CATEGORY_SELECTOR.format(value=SOURCE_CATEGORY_VALUES["CSSCI"])
-        )
+        code = SOURCE_CATEGORY_VALUES["CSSCI"]
+        cssci = await self._source_category_locator(code)
         if await await_maybe(cssci.count()) == 1:
             return
         links = self.page.locator(ACADEMIC_JOURNALS_SELECTOR)
@@ -1508,6 +1575,7 @@ class ProfessionalSearchPage:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             await asyncio.sleep(0.5)
+            cssci = await self._source_category_locator(code)
             if await await_maybe(cssci.count()) == 1:
                 return
         raise WebVpnNavigationError("已选择「学术期刊」，但来源类别条件区未出现")
@@ -1603,12 +1671,28 @@ class ProfessionalSearchPage:
             return await await_maybe(self.page.evaluate(TOTAL_COUNT_JS))
         return None
 
+    async def _source_category_locator(self, code: str) -> Any:
+        """Support both legacy category values and the observed key/Y markup.
+
+        November's page uses key=CSI/HX with value=Y. Keep the controlled
+        category identity and the caller's uniqueness/checked-state checks.
+        Never select generic value=Y, shared by unrelated source categories.
+        """
+        legacy = self.page.locator(SOURCE_CATEGORY_SELECTOR.format(value=code))
+        if await await_maybe(legacy.count()):
+            return legacy
+        keys = {"P0209": "CSI", "P01": "HX"}
+        key = keys.get(code)
+        if key is None:
+            raise ValueError("不支持的来源类别代码")
+        return self.page.locator(f"input[type=checkbox][key='{key}'][value='Y']")
+
     async def apply_source_category(self, category: SourceCategorySpec, *,
                                     timeout_seconds: float = 20.0) -> SourceCategoryApplication:
         """在学术期刊专业检索条件区勾选来源类别，并在提交前复核。"""
         requested = category
         value, label = requested.code, requested.label
-        matches = self.page.locator(SOURCE_CATEGORY_SELECTOR.format(value=value))
+        matches = await self._source_category_locator(value)
         if await await_maybe(matches.count()) != 1:
             raise WebVpnNavigationError(
                 f"专业检索条件区未找到唯一的「{label}」来源类别"
@@ -1677,6 +1761,8 @@ class ProfessionalSearchPage:
                 await self.set_page_size(plan.page_size)
                 status = await self.wait_for_outcome()
         html = await await_maybe(self.page.content()) if status is SearchStatus.SUCCESS else ""
+        if status is SearchStatus.SUCCESS:
+            html = _academic_result_html(html)
         return PlanExecutionResult(
             status=status.value,
             html=html,

@@ -77,6 +77,49 @@ def _executor(pages: list[tuple[str, str]], seen: list[ExpressionBatch] | None =
     return execute
 
 
+
+@pytest.mark.parametrize("stored_proof", ["original", "absent", False, 1, "true", "bad_total"])
+def test_faceted_checkpoint_only_restores_verified_batch(tmp_path: Path, stored_proof) -> None:
+    state = tmp_path / "progress.json"
+    calls = []
+
+    async def execute(plan):
+        calls.append(plan.topic_field)
+        return PlanExecutionResult(
+            status=SearchStatus.SUCCESS.value,
+            html=RESULT_TEMPLATE.format(title="分面回归测试", journal="管理世界"),
+            url="",
+            source_category_applied=True,
+            source_category_total=7,
+        )
+
+    def search():
+        service = CnkiProfessionalSearchService(execute, checkpoint=BatchCheckpoint(state))
+        return asyncio.run(service.search_group("环境治理", "cssci", limit=1))
+
+    first = search()
+    assert first["ok"] and first["source_category_applied"]
+    assert calls == ["TI"]
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    entry = saved["completed"]["1"]
+    if stored_proof == "absent":
+        entry.pop("source_category_applied", None)
+        entry.pop("source_category_total", None)
+    elif stored_proof == "bad_total":
+        entry["source_category_total"] = "untrusted"
+    elif stored_proof != "original":
+        entry["source_category_applied"] = stored_proof
+    state.write_text(json.dumps(saved), encoding="utf-8")
+    calls.clear()
+
+    resumed = search()
+    assert resumed["source_category_applied"] is True
+    assert resumed["source_category_total"] == 7
+    assert calls == ([] if stored_proof == "original" else ["TI"])
+    assert resumed["records"][0]["topic_match_field"] == "TI"
+    assert resumed["batches_completed"] == 1
+
+
 def _tuple_executor(pages: list[tuple[str, str]]):
     """旧式三元组执行器：没有分面证据，服务只能保守认定分面未生效。"""
     async def execute(plan: ExpressionBatch) -> tuple[str, str, str]:
