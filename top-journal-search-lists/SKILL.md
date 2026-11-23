@@ -7,6 +7,8 @@ description: Use when the user asks to search, review, organize, or summarize li
 
 ## 核心原则
 
+已知篇名优先按篇名检索。高级检索、专业检索实测示例与中文 PDF 交付命名见[知网检索与文件命名规则](references/cnki-search-and-filenames.md)。用户指定 Ego Lite 时，网页操作复用该浏览器，检索 MCP 的独立浏览器模式不参与本次任务。
+
 ai4scholar 是中英文文献检索的主要来源。CNKI 仅作为中文论文的补充来源。所有期刊判级均以 `references/Academic_Journal_Master_Directory_20260715.md` 为准，目录版本为 2026-07-15。
 
 CNKI 有两种彼此独立的检索模式，边界不同，不得混用。

@@ -7,6 +7,8 @@ description: Use when the user asks to search, review, organize, or synthesize l
 
 ## 核心原则
 
+已知篇名优先按篇名检索。高级检索、专业检索实测示例与中文 PDF 交付命名见[知网检索与文件命名规则](references/cnki-search-and-filenames.md)。用户指定 Ego Lite 时，网页操作复用该浏览器，检索 MCP 的独立浏览器模式不参与本次任务。
+
 以 ai4scholar 为主要来源，以 `cnki_search_env(query, limit)` 作为近期中文
 期刊论文的补充来源。期刊判级只能依据
 `references/环境科学与工程学科顶尖期刊目录_v4.0.md`，目录版本为 4.0，
